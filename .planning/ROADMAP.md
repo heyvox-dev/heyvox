@@ -13,7 +13,7 @@ Vox is a decoupling project: extract a working ~2000-line voice layer from Condu
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation** - Project structure, config system, and decoupling from Conductor ✓ 2026-03-27
-- [ ] **Phase 2: Audio + Input Pipeline** - Core voice-in path from mic to text injection
+- [x] **Phase 2: Audio + Input Pipeline** - Core voice-in path from mic to text injection ✓ 2026-03-27
 - [ ] **Phase 3: CLI + TTS Output** - User control layer and voice output
 - [ ] **Phase 4: MCP Server** - Agent integration via MCP protocol
 - [ ] **Phase 5: HUD Overlay** - Visual feedback as separate AppKit process
@@ -49,8 +49,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Headset detection, echo suppression, and silent-mic health check loop
-- [ ] 02-02-PLAN.md — Adapter protocol wiring and last-agent target tracking
+- [x] 02-01-PLAN.md — Headset detection, echo suppression, and silent-mic health check loop
+- [x] 02-02-PLAN.md — Adapter protocol wiring and last-agent target tracking
 
 ### Phase 3: CLI + TTS Output
 **Goal**: User can control Vox via CLI commands and AI agents can produce spoken output
@@ -106,7 +106,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | ✓ Complete | 2026-03-27 |
-| 2. Audio + Input Pipeline | 0/2 | Not started | - |
+| 2. Audio + Input Pipeline | 2/2 | ✓ Complete | 2026-03-27 |
 | 3. CLI + TTS Output | 0/2 | Not started | - |
 | 4. MCP Server | 0/1 | Not started | - |
 | 5. HUD Overlay | 0/1 | Not started | - |

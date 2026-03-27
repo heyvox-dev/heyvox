@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 2: Audio + Input Pipeline — Plan 02 complete (adapter dispatch + last-agent tracking)
+**Current focus:** Phase 2 complete, ready for Phase 3: CLI + TTS Output
 
 ## Current Position
 
 Phase: 2 of 5 (Audio + Input Pipeline)
-Plan: 2 of N in current phase (COMPLETE)
-Status: Phase 2 in progress
-Last activity: 2026-03-27 -- Plan 02-02 complete (adapter dispatch, last-agent tracking, target_mode config)
+Plan: 2 of 2 in current phase (COMPLETE)
+Status: Phase 2 complete and verified (11/11 must-haves passed)
+Last activity: 2026-03-27 -- Phase 2 verified and complete
 
 Progress: [####......] 40%
 
@@ -77,5 +77,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Completed 02-02-PLAN.md (adapter dispatch + last-agent tracking)
+Stopped at: Phase 2 complete and verified — ready for Phase 3
 Resume file: None
