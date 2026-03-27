@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 2 complete, ready for Phase 3: CLI + TTS Output
+**Current focus:** Phase 3 complete, ready for Phase 4: MCP Server
 
 ## Current Position
 
 Phase: 3 of 5 (CLI + TTS Output)
-Plan: 1 of 2 in current phase (COMPLETE)
-Status: Phase 3 Plan 1 complete — Kokoro TTS engine + CLI subcommands
-Last activity: 2026-03-27 -- Phase 3 Plan 1: TTS engine and CLI commands implemented
+Plan: 2 of 2 in current phase (COMPLETE)
+Status: Phase 3 complete — launchd service management, setup wizard, TTS interrupt wired
+Last activity: 2026-03-27 -- Phase 3 Plan 2: launchd service lifecycle + setup wizard + TTS main loop integration
 
-Progress: [#####.....] 50%
+Progress: [######....] 60%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 4.3 min
-- Total execution time: 0.22 hours
+- Total plans completed: 4
+- Average duration: 4.5 min
+- Total execution time: 0.30 hours
 
 **By Phase:**
 
@@ -29,10 +29,10 @@ Progress: [#####.....] 50%
 |-------|-------|-------|----------|
 | 01-foundation | 2 | 11 min | 5.5 min |
 | 02-audio-input-pipeline | 2 | 4 min | 2 min |
-| 03-cli-tts-output | 1 | 3 min | 3 min |
+| 03-cli-tts-output | 2 | 8 min | 4 min |
 
 **Recent Trend:**
-- Last 5 plans: 7 min, 4 min, 2 min, 2 min
+- Last 5 plans: 7 min, 4 min, 2 min, 2 min, 5 min
 - Trend: stable fast
 
 *Updated after each plan completion*
@@ -70,6 +70,11 @@ Recent decisions affecting current work:
 - [03-01] Command file IPC (/tmp/vox-tts-cmd) for cross-process CLI control — consistent with flag-file pattern, no sockets
 - [03-01] Single KPipeline singleton (module-level, lazy init) — never create per-call
 - [03-01] TTSConfig.enabled=True by default in Phase 3 (was False in Phase 1/2 external-script era)
+- [03-02] bootout() guards missing plist — returns "Not running" instead of confusing launchctl error (exit code 5)
+- [03-02] sys.executable in plist ProgramArguments — always points to current venv Python, no activation needed
+- [03-02] TTS interrupt uses try/except ImportError in main.py — allows running without sounddevice
+- [03-02] MCP auto-approve writes to ~/.claude/settings.json mcpServers key with sys.executable for portability
+- [03-02] Voice command skip/stop/mute dispatch to native TTS engine directly; tts-next/tts-replay fall through to execute_voice_command
 
 ### Pending Todos
 
@@ -82,5 +87,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Completed 03-cli-tts-output 03-01-PLAN.md — ready for Phase 3 Plan 2
+Stopped at: Completed 03-cli-tts-output 03-02-PLAN.md — Phase 3 complete, ready for Phase 4: MCP Server
 Resume file: None
