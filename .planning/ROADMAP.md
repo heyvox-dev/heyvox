@@ -65,8 +65,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: CLI commands and launchd service management
-- [ ] 03-02: TTS output layer with verbosity and queue controls
+- [ ] 03-01-PLAN.md — Kokoro TTS engine with queue, verbosity, volume control, and CLI speak/skip/mute/quiet commands
+- [ ] 03-02-PLAN.md — launchd service management, setup wizard, and TTS interrupt wiring into main loop
 
 ### Phase 4: MCP Server
 **Goal**: AI agents can discover and use voice capabilities via MCP tools
