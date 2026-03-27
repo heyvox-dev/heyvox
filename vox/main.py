@@ -27,6 +27,7 @@ from vox.constants import (
     DEFAULT_CHUNK_SIZE,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
+    HUD_SOCKET_PATH,
 )
 from vox.audio.mic import find_best_mic, open_mic_stream, detect_headset
 from vox.audio.cues import audio_cue, is_suppressed, get_cues_dir
@@ -48,6 +49,53 @@ _triggered_by_ptt = False
 _cancel_transcription = threading.Event()
 _shutdown = threading.Event()
 _adapter = None  # Initialized in main() via _build_adapter(config)
+
+# ---------------------------------------------------------------------------
+# HUD client state (Phase 5 — optional, never crashes main loop)
+# ---------------------------------------------------------------------------
+
+_hud_client = None
+_hud_last_reconnect = 0.0
+_HUD_RECONNECT_INTERVAL = 5.0
+_HUD_LEVEL_INTERVAL = 0.05  # 20fps throttle for audio_level messages
+_hud_last_level_send = 0.0
+
+
+def _hud_send(msg: dict) -> None:
+    """Send a message to the HUD overlay. No-op if not connected.
+
+    All HUD sends are wrapped here so the rest of the code never has to
+    guard against HUD failures — the HUD is strictly optional.
+    """
+    global _hud_client
+    if _hud_client is None:
+        return
+    try:
+        _hud_client.send(msg)
+    except Exception:
+        pass
+
+
+def _hud_ensure_connected() -> None:
+    """Attempt periodic reconnect if the HUD connection was lost.
+
+    Called in the idle section of the main loop to recover after
+    HUD restart without requiring a full vox restart.
+    """
+    global _hud_client, _hud_last_reconnect
+    if _hud_client is None:
+        return
+    # Already connected — nothing to do
+    if _hud_client._sock is not None:
+        return
+    now = time.time()
+    if now - _hud_last_reconnect >= _HUD_RECONNECT_INTERVAL:
+        _hud_last_reconnect = now
+        try:
+            _hud_client.reconnect()
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Logging (module-level path set from config at startup)
@@ -169,6 +217,7 @@ def start_recording(ptt: bool = False, config: VoxConfig = None) -> None:
     cues_dir = get_cues_dir(config.cues_dir)
     audio_cue("listening", cues_dir)
     _show_recording_indicator(True)
+    _hud_send({"type": "state", "state": "listening"})
     log("Recording started. Waiting for stop wake word.")
 
 
@@ -194,6 +243,7 @@ def stop_recording(config: VoxConfig = None) -> None:
 
     log("Stopping recording...")
     _show_recording_indicator(False)
+    _hud_send({"type": "state", "state": "processing"})
 
     # Release TTS orchestrator
     try:
@@ -260,6 +310,7 @@ def _send_local(duration: float, audio_chunks: list, config: VoxConfig, adapter)
         )
         elapsed = time.time() - t0
         log(f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
+        _hud_send({"type": "transcript", "text": text})
 
         cues_dir = get_cues_dir(config.cues_dir)
 
@@ -340,6 +391,7 @@ def _send_local(duration: float, audio_chunks: list, config: VoxConfig, adapter)
     finally:
         with _state_lock:
             busy = False
+        _hud_send({"type": "state", "state": "idle"})
         log("Ready for next wake word.")
 
 
@@ -398,6 +450,16 @@ def main() -> None:
     silence_threshold = config.silence_threshold
 
     _kill_orphan_indicators()
+
+    # Connect HUD client (optional — silent fail if HUD not running)
+    # Requirement: HUD-08
+    global _hud_client
+    from vox.hud.ipc import HUDClient
+    _hud_client = HUDClient(HUD_SOCKET_PATH)
+    try:
+        _hud_client.connect()
+    except Exception:
+        pass
 
     # Initialize STT backend
     log(f"STT backend: {config.stt.backend}")
@@ -511,9 +573,19 @@ def main() -> None:
                 if _is_rec and config.stt.backend == "local":
                     _audio_buffer.append(audio.copy())
 
+            # Send live audio level to HUD at ~20fps during recording (HUD-08)
+            if _is_rec:
+                global _hud_last_level_send
+                now_level = time.time()
+                if now_level - _hud_last_level_send >= _HUD_LEVEL_INTERVAL:
+                    _hud_last_level_send = now_level
+                    level = float(np.abs(audio).max()) / 32768.0  # Normalize int16 to 0.0-1.0
+                    _hud_send({"type": "audio_level", "level": round(level, 3)})
+
             # Proactive silent-mic health check (catches A2DP bad-state without IOError)
             # Requirement: AUDIO-08
             if not _is_rec and not _is_busy:
+                _hud_ensure_connected()
                 now = time.time()
                 if now - last_health_check >= HEALTH_CHECK_INTERVAL:
                     last_health_check = now
@@ -566,6 +638,7 @@ def main() -> None:
                                 is_recording = False
                                 _audio_buffer.clear()
                             audio_cue("paused", cues_dir)
+                            _hud_send({"type": "state", "state": "idle"})
                             log("Ready for next wake word.")
                             continue
 
@@ -614,6 +687,8 @@ def main() -> None:
     finally:
         log("Cleaning up...")
         _show_recording_indicator(False)
+        if _hud_client:
+            _hud_client.close()
         # Shut down native TTS worker cleanly (drains queue + joins thread)
         # Requirement: TTS-03
         if config.tts.enabled:
@@ -641,6 +716,7 @@ def _cancel_recording_from_ptt(config: VoxConfig) -> None:
         _audio_buffer.clear()
     cues_dir = get_cues_dir(config.cues_dir)
     audio_cue("paused", cues_dir)
+    _hud_send({"type": "state", "state": "idle"})
     log("Recording cancelled.")
 
 
