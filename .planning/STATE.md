@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 ## Current Position
 
-Phase: 2 of 5 (Audio + Input Pipeline)
-Plan: 2 of 2 in current phase (COMPLETE)
-Status: Phase 2 complete and verified (11/11 must-haves passed)
-Last activity: 2026-03-27 -- Phase 2 verified and complete
+Phase: 3 of 5 (CLI + TTS Output)
+Plan: 1 of 2 in current phase (COMPLETE)
+Status: Phase 3 Plan 1 complete — Kokoro TTS engine + CLI subcommands
+Last activity: 2026-03-27 -- Phase 3 Plan 1: TTS engine and CLI commands implemented
 
-Progress: [####......] 40%
+Progress: [#####.....] 50%
 
 ## Performance Metrics
 
@@ -29,6 +29,7 @@ Progress: [####......] 40%
 |-------|-------|-------|----------|
 | 01-foundation | 2 | 11 min | 5.5 min |
 | 02-audio-input-pipeline | 2 | 4 min | 2 min |
+| 03-cli-tts-output | 1 | 3 min | 3 min |
 
 **Recent Trend:**
 - Last 5 plans: 7 min, 4 min, 2 min, 2 min
@@ -65,6 +66,10 @@ Recent decisions affecting current work:
 - [02-02] Module-level _adapter state + thread arg passing — consistent with existing is_recording/busy pattern
 - [02-02] LastAgentAdapter lazy imports AppKit in daemon thread — avoids load-time failure in non-macOS/test environments
 - [02-02] GenericAdapter.should_auto_send() True only when target_app set (pinned-app = AI agent = wants Enter)
+- [03-01] sd.play()+sd.wait() (not blocking=True) enables sd.stop() interrupt from another thread
+- [03-01] Command file IPC (/tmp/vox-tts-cmd) for cross-process CLI control — consistent with flag-file pattern, no sockets
+- [03-01] Single KPipeline singleton (module-level, lazy init) — never create per-call
+- [03-01] TTSConfig.enabled=True by default in Phase 3 (was False in Phase 1/2 external-script era)
 
 ### Pending Todos
 
@@ -77,5 +82,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Phase 2 complete and verified — ready for Phase 3
+Stopped at: Completed 03-cli-tts-output 03-01-PLAN.md — ready for Phase 3 Plan 2
 Resume file: None
