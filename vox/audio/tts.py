@@ -176,6 +176,24 @@ _speed_default: float = TTS_DEFAULT_SPEED
 _volume_boost: int = TTS_DEFAULT_VOLUME_BOOST
 _ducking_percent: int = TTS_DEFAULT_DUCKING_PERCENT
 
+# HUD client — optional, never crashes TTS worker (Phase 5)
+_hud_client = None
+
+
+def _hud_send(msg: dict) -> None:
+    """Send a message to the HUD overlay. No-op if not connected.
+
+    All HUD sends go through here so the TTS worker never has to guard
+    against HUD failures — the HUD is strictly optional.
+    """
+    global _hud_client
+    if _hud_client is None:
+        return
+    try:
+        _hud_client.send(msg)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Command file IPC (cross-process CLI control)
@@ -250,6 +268,9 @@ def _tts_worker(voice_default: str, speed_default: float, volume_boost: int, duc
         voice = voice or voice_default
         speed = speed or speed_default
 
+        _hud_send({"type": "tts_start", "text": text})
+        _hud_send({"type": "state", "state": "speaking"})
+
         # Clear stop flag for this new item
         _stop_event.clear()
 
@@ -291,6 +312,10 @@ def _tts_worker(voice_default: str, speed_default: float, volume_boost: int, duc
             _set_system_volume(original_volume)
             _set_tts_flag(False)
             _tts_queue.task_done()
+            _hud_send({"type": "tts_end"})
+            if _tts_queue.empty():
+                _hud_send({"type": "state", "state": "idle"})
+            _hud_send({"type": "queue_update", "count": _tts_queue.qsize()})
 
 
 # ---------------------------------------------------------------------------
@@ -327,17 +352,33 @@ def start_worker(config=None) -> None:
     )
     _worker_thread.start()
 
+    # Connect HUD client (optional — silent fail if HUD not running)
+    # Requirement: HUD-08
+    global _hud_client
+    try:
+        from vox.hud.ipc import HUDClient
+        from vox.constants import HUD_SOCKET_PATH
+        _hud_client = HUDClient(HUD_SOCKET_PATH)
+        _hud_client.connect()
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
 
 def shutdown() -> None:
     """Gracefully shut down the TTS worker thread.
 
     Sends None sentinel to the queue and joins the worker thread.
     """
-    global _worker_thread
+    global _worker_thread, _hud_client
     _tts_queue.put(None)
     if _worker_thread is not None:
         _worker_thread.join(timeout=10)
         _worker_thread = None
+    if _hud_client:
+        _hud_client.close()
+        _hud_client = None
 
 
 def speak(
@@ -378,6 +419,7 @@ def speak(
             break
 
     _tts_queue.put((filtered, voice, speed))
+    _hud_send({"type": "queue_update", "count": _tts_queue.qsize()})
 
 
 def interrupt() -> None:
