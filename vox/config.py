@@ -57,16 +57,54 @@ class STTConfig(BaseModel):
 
 
 class TTSConfig(BaseModel):
-    """TTS control hook configuration.
+    """TTS engine configuration for native Kokoro-based TTS output.
 
-    When tts.enabled is False (default), voice commands are logged but not
-    executed — no crash, just a warning. This allows the package to work
-    without any TTS setup.
+    Phase 3 enables native TTS by default (enabled=True). Voice, speed,
+    verbosity, volume boost, and audio ducking are all configurable.
 
-    Requirement: DECP-05
+    script_path is kept for backward compatibility but deprecated — Phase 1
+    used it as a bridge to an external bash script. Native Kokoro TTS
+    (Phase 3) does not use it.
+
+    Requirement: DECP-05, TTS-04, AUDIO-12
     """
-    enabled: bool = False
+    enabled: bool = True  # Phase 3: native Kokoro TTS is enabled by default
+
+    # Kokoro voice name (see https://huggingface.co/hexgrad/Kokoro-82M)
+    voice: str = "af_heart"
+
+    # Playback speed multiplier (1.0 = normal)
+    speed: float = 1.0
+
+    # Verbosity level: full | summary | short | skip
+    # Controls how much of each message is spoken.
+    verbosity: str = "full"
+
+    # Added to system volume before TTS playback (0-100 points, capped at 100)
+    # Requirement: AUDIO-12
+    volume_boost: int = 10
+
+    # Reduce system volume to this percentage of original during TTS playback.
+    # 0 = mute other sounds, 100 = no ducking, 60 = reduce to 60% of original.
+    # Requirement: TTS-04
+    ducking_percent: int = 60
+
+    # DEPRECATED: Path to external TTS control script (Phase 1 bridge).
+    # No longer used by the native TTS engine. Kept for backward compatibility.
     script_path: str | None = None
+
+    @field_validator("verbosity")
+    @classmethod
+    def validate_verbosity(cls, v: str) -> str:
+        valid = {"full", "summary", "short", "skip"}
+        if v not in valid:
+            raise ValueError(f"verbosity must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("ducking_percent")
+    @classmethod
+    def validate_ducking_percent(cls, v: int) -> int:
+        return max(0, min(100, v))
 
     @field_validator("script_path")
     @classmethod
@@ -279,12 +317,17 @@ stt:
     threads: 4
 
 # ---------------------------------------------------------------------------
-# Text-to-speech (TTS) control
+# Text-to-speech (TTS) — Kokoro native engine
 # ---------------------------------------------------------------------------
 
 tts:
-  enabled: false           # Set to true and configure script_path to enable TTS control
-  script_path: null        # Absolute path to your TTS control script
+  enabled: true            # Phase 3: native Kokoro TTS enabled by default
+  voice: af_heart          # Kokoro voice name (af_heart = US English female)
+  speed: 1.0               # Playback speed multiplier (0.5–2.0)
+  verbosity: full          # full | summary | short | skip
+  volume_boost: 10         # Added to system volume during TTS (capped at 100)
+  ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
+  # script_path: null      # DEPRECATED: external TTS script path (Phase 1 bridge, no longer needed)
 
 # ---------------------------------------------------------------------------
 # Audio
