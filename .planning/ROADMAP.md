@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Audio + Input Pipeline** - Core voice-in path from mic to text injection ✓ 2026-03-27
 - [x] **Phase 3: CLI + TTS Output** - User control layer and voice output ✓ 2026-03-27
 - [x] **Phase 4: MCP Server** - Agent integration via MCP protocol ✓ 2026-03-27
-- [ ] **Phase 5: HUD Overlay** - Visual feedback as separate AppKit process
+- [x] **Phase 5: HUD Overlay** - Visual feedback as separate AppKit process ✓ 2026-03-27
 
 ## Phase Details
 
@@ -97,8 +97,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — HUD overlay process with frosted-glass pill, state machine, waveform, transcription, TTS controls, and Unix socket IPC
-- [ ] 05-02-PLAN.md — Wire HUDClient into main.py and tts.py for real-time state/audio/TTS events
+- [x] 05-01-PLAN.md — HUD overlay process with frosted-glass pill, state machine, waveform, transcription, TTS controls, and Unix socket IPC
+- [x] 05-02-PLAN.md — Wire HUDClient into main.py and tts.py for real-time state/audio/TTS events
 
 ## Progress
 
@@ -111,4 +111,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Audio + Input Pipeline | 2/2 | ✓ Complete | 2026-03-27 |
 | 3. CLI + TTS Output | 2/2 | ✓ Complete | 2026-03-27 |
 | 4. MCP Server | 2/2 | ✓ Complete | 2026-03-27 |
-| 5. HUD Overlay | 0/1 | Not started | - |
+| 5. HUD Overlay | 2/2 | ✓ Complete | 2026-03-27 |
