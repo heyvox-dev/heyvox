@@ -25,8 +25,10 @@ from vox.constants import (
     RECORDING_FLAG,
     DEFAULT_SAMPLE_RATE,
     DEFAULT_CHUNK_SIZE,
+    TTS_PLAYING_FLAG,
+    TTS_PLAYING_MAX_AGE_SECS,
 )
-from vox.audio.mic import find_best_mic, open_mic_stream
+from vox.audio.mic import find_best_mic, open_mic_stream, detect_headset
 from vox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from vox.audio.stt import init_local_stt, transcribe_audio
 from vox.audio.tts import check_voice_command, execute_voice_command
@@ -390,6 +392,9 @@ def main() -> None:
     log(f"Using input: [{dev_index}] {dev_name}")
     stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
 
+    headset_mode = detect_headset(pa, dev_index)
+    log(f"Headset detected: {headset_mode} (echo suppression {'inactive' if headset_mode else 'active'})")
+
     if use_separate_words:
         log(f"Ready! Say '{start_word}' to start, '{stop_word}' to stop.")
     else:
@@ -398,6 +403,11 @@ def main() -> None:
     cues_dir = get_cues_dir(config.cues_dir)
     last_trigger = 0.0
     consecutive_errors = 0
+
+    # Silent-mic health check state (AUDIO-08 completion)
+    _zero_streak = 0
+    HEALTH_CHECK_INTERVAL = 30.0
+    last_health_check = time.time()
 
     try:
         while not _shutdown.is_set():
@@ -442,6 +452,41 @@ def main() -> None:
                 if _is_rec and config.stt.backend == "local":
                     _audio_buffer.append(audio.copy())
 
+            # Proactive silent-mic health check (catches A2DP bad-state without IOError)
+            # Requirement: AUDIO-08
+            if not _is_rec and not _is_busy:
+                now = time.time()
+                if now - last_health_check >= HEALTH_CHECK_INTERVAL:
+                    last_health_check = now
+                    level = int(np.abs(audio).max())
+                    if level == 0:
+                        _zero_streak += 1
+                        if _zero_streak >= 3:
+                            log("WARNING: Silent mic detected (3 consecutive zero checks), restarting audio session")
+                            _zero_streak = 0
+                            try:
+                                stream.stop_stream()
+                                stream.close()
+                            except Exception:
+                                pass
+                            pa.terminate()
+                            time.sleep(1)
+                            pa = pyaudio.PyAudio()
+                            dev_index = find_best_mic(pa, mic_priority=mic_priority,
+                                                      sample_rate=sample_rate, chunk_size=chunk_size)
+                            if dev_index is None:
+                                log("No mic after reinit, retrying in 5s...")
+                                time.sleep(5)
+                                continue
+                            dev_name = pa.get_device_info_by_index(dev_index)['name']
+                            log(f"Reinitialized audio: [{dev_index}] {dev_name}")
+                            stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
+                            headset_mode = detect_headset(pa, dev_index)
+                            consecutive_errors = 0
+                            continue
+                    else:
+                        _zero_streak = 0
+
             # Silence watchdog — cancel if no speech for silence_timeout
             # Only for wake-word triggered recordings (PTT has natural release)
             if _is_rec and not _is_ptt and silence_timeout > 0:
@@ -471,6 +516,17 @@ def main() -> None:
             # Suppress wake word detection while audio cue plays
             if is_suppressed():
                 continue
+
+            # Echo suppression: skip wake word while TTS is playing in speaker mode
+            # Requirement: AUDIO-09, AUDIO-10
+            if not headset_mode and config.echo_suppression.enabled:
+                if os.path.exists(TTS_PLAYING_FLAG):
+                    try:
+                        flag_age = time.time() - os.path.getmtime(TTS_PLAYING_FLAG)
+                        if flag_age < TTS_PLAYING_MAX_AGE_SECS:
+                            continue  # Suppress wake word during TTS playback
+                    except OSError:
+                        pass  # Flag removed between exists() and getmtime()
 
             model.predict(audio)
 
