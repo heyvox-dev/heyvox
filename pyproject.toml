@@ -2,8 +2,7 @@
 name = "vox-voice"
 version = "0.1.0"
 description = "macOS voice layer for AI coding agents — wake word, local STT, local TTS, HUD"
-readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "openwakeword>=0.6.0",
@@ -28,6 +27,9 @@ dev = [
 
 [project.scripts]
 vox = "vox.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vox*"]
 
 [build-system]
 requires = ["setuptools>=61", "wheel"]
