@@ -1,0 +1,197 @@
+# Requirements: Vox
+
+**Defined:** 2026-03-27
+**Core Value:** One voice layer that works across ALL your AI coding agents — wake word, local STT, local TTS, beautiful HUD — without sending audio to the cloud.
+
+## v1 Requirements
+
+### Decoupling (DECP)
+
+- [ ] **DECP-01**: TTS script path is configurable in config.yaml (not hardcoded to tts-ctl.sh)
+- [ ] **DECP-02**: Voice commands gracefully disable when TTS path not configured
+- [ ] **DECP-03**: IPC flag renamed from `/tmp/claude-ww-recording` to `/tmp/vox-recording`
+- [ ] **DECP-04**: Recording indicator accepts configurable bundle ID (not hardcoded Conductor)
+- [ ] **DECP-05**: Default `target_app` is empty (paste into focused app)
+- [ ] **DECP-06**: No personal paths or Conductor references in codebase
+
+### Project Structure (PROJ)
+
+- [ ] **PROJ-01**: Modular package structure (`vox/audio/`, `vox/input/`, `vox/hud/`, `vox/mcp/`, `vox/adapters/`)
+- [ ] **PROJ-02**: All runtime dependencies declared in pyproject.toml (mlx-whisper, sherpa-onnx, pyobjc-*, openwakeword, pyaudio, mcp)
+- [ ] **PROJ-03**: CLI entry point `vox` registered via pyproject.toml scripts
+- [ ] **PROJ-04**: Package renamed from wake-word to vox (or chosen name)
+- [ ] **PROJ-05**: launchd label renamed to `com.vox.listener`
+
+### Audio Pipeline (AUDIO)
+
+- [ ] **AUDIO-01**: Wake word detection with configurable confidence threshold (default 0.7+)
+- [ ] **AUDIO-02**: Push-to-talk via configurable modifier key (fn default)
+- [ ] **AUDIO-03**: Local STT via MLX Whisper (Apple Silicon) with sherpa-onnx fallback on Intel
+- [ ] **AUDIO-04**: Silence timeout auto-stops recording (configurable duration)
+- [ ] **AUDIO-05**: Audio cue feedback on recording start/stop/cancel
+- [ ] **AUDIO-06**: Mic device priority configurable, defaults to built-in (not Bluetooth)
+- [ ] **AUDIO-07**: Works with USB audio dongles (e.g., headset via USB instead of Bluetooth to avoid macOS BT bugs)
+- [ ] **AUDIO-08**: Echo suppression: when no headset detected, mute mic during TTS playback to prevent feedback loop
+- [ ] **AUDIO-09**: Headset detection: distinguish speaker-only vs headset (mic+speaker) to auto-configure echo handling
+
+### Input & Target Detection (INPT)
+
+- [ ] **INPT-01**: Generic adapter pastes transcribed text into focused app via osascript
+- [ ] **INPT-02**: Adapter protocol (Python Protocol class) for extensibility
+- [ ] **INPT-03**: Adapter selection via config.yaml
+- [ ] **INPT-04**: Smart target detection: identify which app/window is the active AI agent input field
+- [ ] **INPT-05**: Configurable target behavior: always-focused-app vs pinned-app vs last-agent
+- [ ] **INPT-06**: Clipboard save/restore around text injection (prevent clobbering user clipboard)
+
+### MCP Server (MCP)
+
+- [ ] **MCP-01**: `voice_speak` tool — TTS playback with configurable verbosity (full/summary/short/skip)
+- [ ] **MCP-02**: `voice_status` tool — returns current state (idle/listening/recording/transcribing/speaking)
+- [ ] **MCP-03**: `voice_queue` tool — manage TTS queue (list/skip/stop/clear/mute/unmute)
+- [ ] **MCP-04**: `voice_config` tool — get/set voice configuration at runtime
+- [ ] **MCP-05**: All logging to stderr (stdout reserved for MCP stdio transport)
+- [ ] **MCP-06**: Lean server (4-5 tools max) to minimize context window consumption
+- [ ] **MCP-07**: Auto-approve configuration via `vox setup` (writes allowlist to claude settings)
+
+### CLI & Setup (CLI)
+
+- [ ] **CLI-01**: `vox start` / `stop` / `restart` / `status` / `logs` via launchctl
+- [ ] **CLI-02**: `vox setup` — interactive guided setup (permissions, models, mic test, MCP auto-approve)
+- [ ] **CLI-03**: Setup checks and deep-links to macOS permission settings (Accessibility, Microphone, Screen Recording)
+- [ ] **CLI-04**: Setup triggers model downloads with progress indication
+- [ ] **CLI-05**: `vox speak <text>` — CLI command for TTS (hook-friendly, no MCP overhead)
+- [ ] **CLI-06**: `vox skip` / `vox mute` / `vox quiet` — TTS control via CLI (for use in hooks/scripts)
+
+### TTS Output (TTS)
+
+- [ ] **TTS-01**: Configurable verbosity mode: full (read everything), summary (condensed), short (one-liner), skip
+- [ ] **TTS-02**: Per-session or per-message verbosity override via MCP tool parameter
+- [ ] **TTS-03**: TTS pauses immediately when user starts speaking (wake word or PTT)
+- [ ] **TTS-04**: Audio ducking: lower TTS volume briefly on system sounds
+- [ ] **TTS-05**: TTS queue with skip/stop/clear controls (voice commands + CLI + HUD)
+
+### HUD Overlay (HUD)
+
+- [ ] **HUD-01**: Top-center pill that expands for active states (listening, processing, speaking)
+- [ ] **HUD-02**: Recording indicator that modulates visually with input volume (live waveform/amplitude bars)
+- [ ] **HUD-03**: Live partial transcription appearing word-by-word during recording
+- [ ] **HUD-04**: TTS playback progress with controls (pause, skip, stop)
+- [ ] **HUD-05**: State colors: idle=gray, listening=red, processing=amber, speaking=green
+- [ ] **HUD-06**: Frosted glass appearance (NSVisualEffectView, .hudWindow material)
+- [ ] **HUD-07**: Works across all Spaces and fullscreen apps
+- [ ] **HUD-08**: Unix socket IPC (`/tmp/vox-hud.sock`) for state updates from main process
+
+### Configuration (CONF)
+
+- [ ] **CONF-01**: YAML config at `~/.config/vox/config.yaml`
+- [ ] **CONF-02**: Config supports: adapter selection, TTS path, wake word threshold, mic priority, TTS verbosity, target behavior
+- [ ] **CONF-03**: Sensible defaults for all config values (works out of box on Apple Silicon Mac)
+- [ ] **CONF-04**: Config validation on load with actionable error messages
+
+## v2 Requirements
+
+### Multi-Agent Orchestration
+
+- **ORCH-01**: Visual message queue showing pending messages from multiple agents/workspaces
+- **ORCH-02**: Voice-activated workspace/agent switching ("switch to manama")
+- **ORCH-03**: TTS routing (which agent speaks, priority ordering)
+- **ORCH-04**: Message notification system when multiple agents have pending output (visual indicator in HUD)
+
+### Native macOS App
+
+- **NAPP-01**: Menubar app with status icon
+- **NAPP-02**: SwiftUI preferences window
+- **NAPP-03**: Guided setup wizard with permission screenshots
+- **NAPP-04**: Model download manager with progress
+
+### Advanced Voice
+
+- **ADVV-01**: Custom wake word training UI
+- **ADVV-02**: Voice command extensions (configurable in YAML)
+- **ADVV-03**: Context-aware transcription (project vocabulary)
+- **ADVV-04**: Per-app STT profiles (different settings per target)
+- **ADVV-05**: Streamable HTTP MCP transport (multi-client simultaneous)
+
+## Out of Scope
+
+| Feature | Reason |
+|---------|--------|
+| Cloud STT/TTS | Zero cloud is a core differentiator; contradicts privacy positioning |
+| Built-in LLM | Bloats install; AI agents are the LLMs, Vox is the transport layer |
+| iOS / Android | Apple Silicon models don't translate; macOS-first |
+| Meeting transcription | Different product category entirely |
+| Mac App Store | Sandboxing blocks Accessibility API |
+| GUI preferences (v1) | YAML config is what devs want; GUI is v2 Pro |
+| Cross-platform (v1) | Paying dev audience on Mac; Linux in v2 |
+| Speaker identification | High complexity, minimal gain for single-user tool |
+| Screen reading/context | Agents already have screen context via their own tools |
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| DECP-01 | Phase 1: Foundation | Pending |
+| DECP-02 | Phase 1: Foundation | Pending |
+| DECP-03 | Phase 1: Foundation | Pending |
+| DECP-04 | Phase 1: Foundation | Pending |
+| DECP-05 | Phase 1: Foundation | Pending |
+| DECP-06 | Phase 1: Foundation | Pending |
+| PROJ-01 | Phase 1: Foundation | Pending |
+| PROJ-02 | Phase 1: Foundation | Pending |
+| PROJ-03 | Phase 1: Foundation | Pending |
+| PROJ-04 | Phase 1: Foundation | Pending |
+| PROJ-05 | Phase 1: Foundation | Pending |
+| CONF-01 | Phase 1: Foundation | Pending |
+| CONF-02 | Phase 1: Foundation | Pending |
+| CONF-03 | Phase 1: Foundation | Pending |
+| CONF-04 | Phase 1: Foundation | Pending |
+| AUDIO-01 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-02 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-03 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-04 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-05 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-06 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-07 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-08 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-09 | Phase 2: Audio + Input Pipeline | Pending |
+| INPT-01 | Phase 2: Audio + Input Pipeline | Pending |
+| INPT-02 | Phase 2: Audio + Input Pipeline | Pending |
+| INPT-03 | Phase 2: Audio + Input Pipeline | Pending |
+| INPT-04 | Phase 2: Audio + Input Pipeline | Pending |
+| INPT-05 | Phase 2: Audio + Input Pipeline | Pending |
+| INPT-06 | Phase 2: Audio + Input Pipeline | Pending |
+| CLI-01 | Phase 3: CLI + TTS Output | Pending |
+| CLI-02 | Phase 3: CLI + TTS Output | Pending |
+| CLI-03 | Phase 3: CLI + TTS Output | Pending |
+| CLI-04 | Phase 3: CLI + TTS Output | Pending |
+| CLI-05 | Phase 3: CLI + TTS Output | Pending |
+| CLI-06 | Phase 3: CLI + TTS Output | Pending |
+| TTS-01 | Phase 3: CLI + TTS Output | Pending |
+| TTS-02 | Phase 3: CLI + TTS Output | Pending |
+| TTS-03 | Phase 3: CLI + TTS Output | Pending |
+| TTS-04 | Phase 3: CLI + TTS Output | Pending |
+| TTS-05 | Phase 3: CLI + TTS Output | Pending |
+| MCP-01 | Phase 4: MCP Server | Pending |
+| MCP-02 | Phase 4: MCP Server | Pending |
+| MCP-03 | Phase 4: MCP Server | Pending |
+| MCP-04 | Phase 4: MCP Server | Pending |
+| MCP-05 | Phase 4: MCP Server | Pending |
+| MCP-06 | Phase 4: MCP Server | Pending |
+| MCP-07 | Phase 4: MCP Server | Pending |
+| HUD-01 | Phase 5: HUD Overlay | Pending |
+| HUD-02 | Phase 5: HUD Overlay | Pending |
+| HUD-03 | Phase 5: HUD Overlay | Pending |
+| HUD-04 | Phase 5: HUD Overlay | Pending |
+| HUD-05 | Phase 5: HUD Overlay | Pending |
+| HUD-06 | Phase 5: HUD Overlay | Pending |
+| HUD-07 | Phase 5: HUD Overlay | Pending |
+| HUD-08 | Phase 5: HUD Overlay | Pending |
+
+**Coverage:**
+- v1 requirements: 56 total
+- Mapped to phases: 56
+- Unmapped: 0
+
+---
+*Requirements defined: 2026-03-27*
+*Last updated: 2026-03-27 after roadmap creation*
