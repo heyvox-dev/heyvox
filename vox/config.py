@@ -91,6 +91,19 @@ class AudioConfig(BaseModel):
     chunk_size: int = 1280
 
 
+class EchoSuppressionConfig(BaseModel):
+    """Echo suppression configuration.
+
+    When enabled and no headset is detected, the wake word detector is
+    silenced while the TTS_PLAYING_FLAG file is present (written by the TTS
+    process). This prevents the mic from picking up TTS output through
+    speakers and triggering a false wake word detection.
+
+    Requirement: AUDIO-09, AUDIO-10
+    """
+    enabled: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Root config model
 # ---------------------------------------------------------------------------
@@ -121,6 +134,7 @@ class VoxConfig(BaseModel):
     tts: TTSConfig = TTSConfig()
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
     audio: AudioConfig = AudioConfig()
+    echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
 
     mic_priority: list[str] = ["MacBook Pro Microphone"]
 
@@ -272,6 +286,14 @@ cues_dir: ""               # Empty = auto-detect from package location
 
 log_file: /tmp/vox.log
 log_max_bytes: 1000000     # 1 MB — rotate to vox.log.1 when exceeded
+
+# ---------------------------------------------------------------------------
+# Echo suppression
+# ---------------------------------------------------------------------------
+
+# Echo suppression — auto-mutes mic during TTS when no headset detected
+echo_suppression:
+  enabled: true
 """
 
 
