@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 4 complete and verified (10/10 must-haves), ready for Phase 5: HUD Overlay
+**Current focus:** Phase 5 Plan 01 complete — HUD IPC layer + frosted-glass pill overlay built; ready for Plan 02 (integration wiring)
 
 ## Current Position
 
-Phase: 4 of 5 (MCP Server)
-Plan: 2 of 2 in current phase (COMPLETE)
-Status: Phase 4 complete and verified (10/10 must-haves passed)
-Last activity: 2026-03-27 -- Phase 4 verified and complete
+Phase: 5 of 5 (HUD Overlay)
+Plan: 1 of 2 in current phase (COMPLETE)
+Status: 05-01 complete — HUDServer/HUDClient + full overlay.py implemented and verified
+Last activity: 2026-03-27 -- Phase 5 Plan 01 complete
 
-Progress: [########..] 80%
+Progress: [#########.] 90%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: 3.8 min
-- Total execution time: 0.32 hours
+- Total plans completed: 6
+- Average duration: 3.7 min
+- Total execution time: 0.35 hours
 
 **By Phase:**
 
@@ -31,9 +31,10 @@ Progress: [########..] 80%
 | 02-audio-input-pipeline | 2 | 4 min | 2 min |
 | 03-cli-tts-output | 2 | 8 min | 4 min |
 | 04-mcp-server | 2 | 6 min | 3 min |
+| 05-hud-overlay | 1 | 3 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 4 min, 2 min, 2 min, 5 min, 1 min
+- Last 5 plans: 2 min, 2 min, 5 min, 1 min, 3 min
 - Trend: stable fast
 
 *Updated after each plan completion*
@@ -83,6 +84,10 @@ Recent decisions affecting current work:
 - [04-01] voice_config SET is session-only (live state only, no YAML persistence) — v1 scope
 - [04-02] Stdout safety net: _original_stdout saved before sys.stdout = sys.stderr at module top; restored in __main__ guard before mcp.run()
 - [04-02] ImportError guard wraps start_worker() only (not whole lifespan) — TTS optional, server must start regardless
+- [05-01] DEFAULT_SOCKET_PATH module default in ipc.py avoids circular import (HUD_SOCKET_PATH added to constants.py in Plan 02)
+- [05-01] performSelectorOnMainThread chosen over NSTimer dispatch for IPC messages (lower overhead for high-frequency audio_level)
+- [05-01] Color overlay is a separate NSView at alpha 0.3 so frosted glass vibrancy shows through in active states
+- [05-01] TTS button action lazily imports TTS_CMD_FILE to allow standalone overlay.py use without full vox package
 
 ### Pending Todos
 
@@ -95,5 +100,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Phase 4 complete and verified — ready for Phase 5: HUD Overlay
+Stopped at: Completed 05-01-PLAN.md — HUD IPC + overlay built, ready for 05-02 integration wiring
 Resume file: None
