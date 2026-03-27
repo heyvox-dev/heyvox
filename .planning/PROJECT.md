@@ -80,13 +80,18 @@ Being decoupled from an existing Conductor-embedded implementation (~90% agent-a
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Hybrid voice model (OS-level IN, MCP OUT) | MCP has no "inject user message" primitive; voice input requires OS-level text injection | — Pending |
-| MCP server over per-app adapters | One server, every MCP-compatible tool connects automatically | — Pending |
-| HUD as separate AppKit process | AppKit needs its own run loop; Unix socket IPC more reliable than file flags | — Pending |
-| MIT license for OSS core | Maximum adoption (same as Starship, Zoxide, Atuin) | — Pending |
-| pipx install as v1 distribution | Avoids Homebrew formula complexity; Homebrew tap at 100+ stars | — Pending |
-| macOS-first, no cross-platform | Paying dev audience on Mac; Linux in v2 | — Pending |
-| Package name TBD | "Vox" taken; need to check heyvox/voxcode/hotmic/murmur/hark availability | — Pending |
+| Hybrid voice model (OS-level IN, MCP OUT) | MCP has no "inject user message" primitive; voice input requires OS-level text injection. Community validates: CLI for input, MCP for output. | Confirmed |
+| MCP server lean (4-5 tools) + CLI commands | MCP tool approval friction is #1 pain point (GH #10801, 28 upvotes). CLI commands (`vox speak`, `vox skip`) for hook integration, MCP for agent-initiated speech. | Confirmed |
+| HUD as separate AppKit process | AppKit needs its own run loop; Unix socket IPC more reliable than file flags | Confirmed |
+| Echo suppression for speaker mode | Without headset, mic picks up TTS — must mute mic during playback or use echo cancellation | New — v1 |
+| USB dongle headset support | macOS Bluetooth has bugs; USB audio dongles are common workaround. Must handle non-default audio devices properly. | New — v1 |
+| TTS verbosity configurable | User wants: full/summary/short/skip. Per-message override via MCP param. | New — v1 |
+| Volume-modulated recording indicator | Current indicator is static; should pulse/modulate with actual input volume for better feedback | New — v1 |
+| Smart target detection | Text injection needs to find the right input field. Config: always-focused / pinned-app / last-agent | New — v1 |
+| MIT license for OSS core | Maximum adoption (same as Starship, Zoxide, Atuin) | Confirmed |
+| pipx install as v1 distribution | Avoids Homebrew formula complexity; Homebrew tap at 100+ stars | Confirmed |
+| macOS-first, no cross-platform | Paying dev audience on Mac; Linux in v2 | Confirmed |
+| Package name TBD | "Vox" taken; need to check heyvox/voxcode/hotmic/murmur/hark availability | Pending |
 
 ---
 *Last updated: 2026-03-26 after initialization*
