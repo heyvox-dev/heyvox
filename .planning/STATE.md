@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 1: Foundation
+**Current focus:** Phase 1 complete, ready for Phase 2: Audio + Input Pipeline
 
 ## Current Position
 
@@ -68,5 +68,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Completed 01-02-PLAN.md (pydantic config system + full decoupling)
+Stopped at: Phase 1 complete and verified (5/5 must-haves passed)
 Resume file: None

@@ -12,7 +12,7 @@ Vox is a decoupling project: extract a working ~2000-line voice layer from Condu
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation** - Project structure, config system, and decoupling from Conductor
+- [x] **Phase 1: Foundation** - Project structure, config system, and decoupling from Conductor ✓ 2026-03-27
 - [ ] **Phase 2: Audio + Input Pipeline** - Core voice-in path from mic to text injection
 - [ ] **Phase 3: CLI + TTS Output** - User control layer and voice output
 - [ ] **Phase 4: MCP Server** - Agent integration via MCP protocol
@@ -33,8 +33,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Project scaffolding, pyproject.toml, and monolith extraction into modular structure
-- [ ] 01-02-PLAN.md — Pydantic config system and Conductor decoupling
+- [x] 01-01-PLAN.md — Project scaffolding, pyproject.toml, and monolith extraction into modular structure
+- [x] 01-02-PLAN.md — Pydantic config system and Conductor decoupling
 
 ### Phase 2: Audio + Input Pipeline
 **Goal**: User can speak via wake word or push-to-talk and have transcribed text appear in the focused app
@@ -105,7 +105,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/2 | Not started | - |
+| 1. Foundation | 2/2 | ✓ Complete | 2026-03-27 |
 | 2. Audio + Input Pipeline | 0/2 | Not started | - |
 | 3. CLI + TTS Output | 0/2 | Not started | - |
 | 4. MCP Server | 0/1 | Not started | - |
