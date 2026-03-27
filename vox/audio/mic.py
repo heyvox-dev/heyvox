@@ -109,6 +109,48 @@ def open_mic_stream(pa, dev_index, sample_rate=DEFAULT_SAMPLE_RATE, chunk_size=D
     )
 
 
+def detect_headset(pa, selected_input_index: int) -> bool:
+    """Detect whether the selected microphone is part of a headset.
+
+    Checks if there is an output device whose name partially overlaps with the
+    selected input device's name. Uses case-insensitive substring matching in
+    both directions to handle Bluetooth/USB name variations such as
+    "G435 Wireless" (input) vs "G435 Bluetooth" (output).
+
+    Returns True when a paired output is found — meaning we are in headset
+    mode and echo suppression can be disabled (headphones prevent feedback).
+    Returns False when only speaker-only output is available, meaning echo
+    suppression should be active to avoid TTS being picked up by the mic.
+
+    Requirement: AUDIO-10
+
+    Args:
+        pa: PyAudio instance.
+        selected_input_index: Device index of the chosen microphone.
+
+    Returns:
+        True if a matching output device (headset) is found, False otherwise.
+    """
+    try:
+        input_info = pa.get_device_info_by_index(selected_input_index)
+        selected_name = input_info['name'].lower()
+    except Exception:
+        return False
+
+    for i in range(pa.get_device_count()):
+        try:
+            d = pa.get_device_info_by_index(i)
+        except Exception:
+            continue
+        if d['maxOutputChannels'] <= 0:
+            continue
+        out_name = d['name'].lower()
+        if selected_name in out_name or out_name in selected_name:
+            return True
+
+    return False
+
+
 def _log(msg):
     """Minimal log helper — avoids circular import with vox.main."""
     import time
