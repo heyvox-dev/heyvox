@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 3 complete, ready for Phase 4: MCP Server
+**Current focus:** Phase 4 plan 1 complete — FastMCP server with 4 voice tools
 
 ## Current Position
 
-Phase: 3 of 5 (CLI + TTS Output)
-Plan: 2 of 2 in current phase (COMPLETE)
-Status: Phase 3 complete and verified (16/16 must-haves passed)
-Last activity: 2026-03-27 -- Phase 3 verified and complete
+Phase: 4 of 5 (MCP Server)
+Plan: 1 of 2 in current phase (COMPLETE)
+Status: 04-01 complete — FastMCP server importable, 4 tools registered, mcp>=1.0 in pyproject.toml
+Last activity: 2026-03-27 -- 04-01 MCP server implementation
 
-Progress: [######....] 60%
+Progress: [#######...] 70%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: 4.5 min
-- Total execution time: 0.30 hours
+- Total plans completed: 5
+- Average duration: 3.8 min
+- Total execution time: 0.32 hours
 
 **By Phase:**
 
@@ -30,9 +30,10 @@ Progress: [######....] 60%
 | 01-foundation | 2 | 11 min | 5.5 min |
 | 02-audio-input-pipeline | 2 | 4 min | 2 min |
 | 03-cli-tts-output | 2 | 8 min | 4 min |
+| 04-mcp-server | 1 | 1 min | 1 min |
 
 **Recent Trend:**
-- Last 5 plans: 7 min, 4 min, 2 min, 2 min, 5 min
+- Last 5 plans: 4 min, 2 min, 2 min, 5 min, 1 min
 - Trend: stable fast
 
 *Updated after each plan completion*
@@ -75,6 +76,11 @@ Recent decisions affecting current work:
 - [03-02] TTS interrupt uses try/except ImportError in main.py — allows running without sounddevice
 - [03-02] MCP auto-approve writes to ~/.claude/settings.json mcpServers key with sys.executable for portability
 - [03-02] Voice command skip/stop/mute dispatch to native TTS engine directly; tts-next/tts-replay fall through to execute_voice_command
+- [04-01] FastMCP lifespan starts TTS worker before first tool call — avoids silent no-audio bug
+- [04-01] loguru stdout patched at module top before any imports — prevents MCP stdio corruption
+- [04-01] Sync tool functions (not async) — all TTS ops are non-blocking enqueue
+- [04-01] voice_status reads flag files not module state — works cross-process with launchd daemon
+- [04-01] voice_config SET is session-only (live state only, no YAML persistence) — v1 scope
 
 ### Pending Todos
 
@@ -87,5 +93,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Phase 3 complete and verified — ready for Phase 4
+Stopped at: Completed 04-01 MCP server — ready for 04-02
 Resume file: None
