@@ -127,6 +127,11 @@ class VoxConfig(BaseModel):
     # Requirement: DECP-01 (decoupling: no hardcoded app default)
     target_app: str = ""
 
+    # Target behavior: how transcribed text reaches the AI agent
+    # Requirement: INPT-03, INPT-05
+    target_mode: str = "always-focused"  # always-focused | pinned-app | last-agent
+    agents: list[str] = ["Claude", "Cursor", "Terminal", "iTerm2"]  # App names for last-agent tracking
+
     enter_count: int = 2
     transcription_prefix: str = ""
 
@@ -143,6 +148,14 @@ class VoxConfig(BaseModel):
 
     log_file: str = "/tmp/vox.log"
     log_max_bytes: int = 1_000_000
+
+    @field_validator("target_mode")
+    @classmethod
+    def validate_target_mode(cls, v: str) -> str:
+        valid = {"always-focused", "pinned-app", "last-agent"}
+        if v not in valid:
+            raise ValueError(f"target_mode must be one of {valid}, got '{v}'")
+        return v
 
     class Config:
         # Allow extra fields to be ignored (forward compatibility)
@@ -234,6 +247,12 @@ silence_threshold: 200     # Audio level below this is considered silence
 # ---------------------------------------------------------------------------
 
 target_app: ""             # App to focus before typing — empty = paste into focused app
+target_mode: always-focused  # always-focused | pinned-app | last-agent
+agents:                    # App names to track in last-agent mode
+  - Claude
+  - Cursor
+  - Terminal
+  - iTerm2
 enter_count: 2             # Number of Enter presses after pasting
 transcription_prefix: ""   # Prepend this text to every transcription
 
