@@ -97,7 +97,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 05-01: HUD process with AppKit overlay and IPC
+- [ ] 05-01-PLAN.md — HUD overlay process with frosted-glass pill, state machine, waveform, transcription, TTS controls, and Unix socket IPC
+- [ ] 05-02-PLAN.md — Wire HUDClient into main.py and tts.py for real-time state/audio/TTS events
 
 ## Progress
 
