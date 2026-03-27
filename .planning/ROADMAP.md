@@ -49,8 +49,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Audio pipeline (mic, wake word, STT, cues, echo suppression)
-- [ ] 02-02: Input layer (PTT, adapters, text injection, target detection)
+- [ ] 02-01-PLAN.md — Headset detection, echo suppression, and silent-mic health check loop
+- [ ] 02-02-PLAN.md — Adapter protocol wiring and last-agent target tracking
 
 ### Phase 3: CLI + TTS Output
 **Goal**: User can control Vox via CLI commands and AI agents can produce spoken output
