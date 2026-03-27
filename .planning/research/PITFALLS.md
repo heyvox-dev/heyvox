@@ -9,11 +9,20 @@
 **Prevention:** `vox setup` checks each permission with instructions. Deep-link to System Preferences panes. Verify with test actions. Show actionable runtime errors.
 **Phase:** Setup/onboarding
 
-### P2: Bluetooth A2DP → HFP Switching
+### P2: macOS Bluetooth Audio Bugs (Multiple)
 **Severity:** HIGH
-**Warning signs:** Terrible audio quality with AirPods/Bluetooth headphones.
-**Details:** Bluetooth uses A2DP (high quality, no mic) vs HFP (low quality, has mic). Opening Bluetooth mic degrades all audio.
-**Prevention:** Detect Bluetooth in setup and warn. Default mic priority to built-in. Don't auto-select Bluetooth mics.
+**Warning signs:** Dead mic, muffled audio, quality degradation, headset stuck in wrong profile.
+**Details:** Three distinct macOS Bluetooth bugs affect voice input:
+1. **A2DP ↔ HFP profile switching failure** — macOS doesn't properly switch between A2DP (high quality, no mic) and HFP (low quality, with mic). Headset gets stuck in one profile. This is why the project owner uses a USB dongle instead of Bluetooth.
+2. **coreaudiod corruption** — Audio gradually becomes quiet/muffled across ALL outputs including Bluetooth. Only full reboot fixes it. `sudo killall coreaudiod` is a temporary fix but the bug returns because a client process holds corrupted state.
+3. **Tahoe (macOS 26) audio regression** — Recent reports of Bluetooth audio quality degradation and muffled output after macOS Tahoe update.
+**Prevention:**
+- Default mic priority to built-in or USB, not Bluetooth
+- Detect dead/silent mic (zero frames) and auto-fallback with user notification
+- Handle 1-3s A2DP→HFP switch latency (buffer before STT)
+- Monitor audio levels during recording — if they drop to near-zero mid-session, re-detect device
+- `vox setup` should warn about Bluetooth mic issues and recommend USB dongle or built-in mic
+- Consider `vox doctor` command that checks coreaudiod health and suggests restart if audio is degraded
 **Phase:** Audio pipeline
 
 ### P3: Hardcoded Paths Crash Non-Conductor Users
