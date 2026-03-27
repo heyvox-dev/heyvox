@@ -56,3 +56,13 @@ TTS_DEFAULT_DUCKING_PERCENT = 60
 # Command file for cross-process CLI control (skip, mute-toggle, quiet, stop)
 # Written by vox skip/mute/quiet CLI commands; read and deleted by TTS worker.
 TTS_CMD_FILE = "/tmp/vox-tts-cmd"
+
+# ---------------------------------------------------------------------------
+# HUD overlay constants (Phase 5)
+# ---------------------------------------------------------------------------
+
+# HUD overlay Unix socket path — single source of truth.
+# Used by HUDClient (sender in main.py/tts.py) and HUDServer (receiver in overlay.py).
+# ipc.py uses its own DEFAULT_SOCKET_PATH as a module-level fallback for standalone use.
+# Requirement: HUD-08
+HUD_SOCKET_PATH = "/tmp/vox-hud.sock"
