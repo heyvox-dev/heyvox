@@ -2,10 +2,14 @@
 
 # IPC flag file: written when recording is active, removed when done.
 # Used by TTS orchestrator to pause playback during recording.
+# Requirement: DECP-04
 RECORDING_FLAG = "/tmp/vox-recording"
 
-# Log file location
-LOG_FILE = "/tmp/vox.log"
+# Default log file location
+LOG_FILE_DEFAULT = "/tmp/vox.log"
+
+# Keep LOG_FILE as alias for backward compatibility within package
+LOG_FILE = LOG_FILE_DEFAULT
 
 # launchd service label
 LAUNCHD_LABEL = "com.vox.listener"

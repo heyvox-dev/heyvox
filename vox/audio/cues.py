@@ -15,17 +15,29 @@ import time
 _cue_suppress_until: float = 0.0
 
 
-def get_cues_dir() -> str:
+def get_cues_dir(config_cues_dir: str = "") -> str:
     """Resolve the cues directory location.
 
-    Looks for a 'cues' directory relative to this package's install location.
+    Args:
+        config_cues_dir: Path from config (cues_dir field). If set and exists,
+            use it directly. Otherwise, look for 'cues/' relative to the
+            package installation root.
 
     Returns:
-        Absolute path to the cues directory.
+        Absolute path to the cues directory. May not exist if cues are missing.
     """
+    if config_cues_dir and os.path.isdir(config_cues_dir):
+        return config_cues_dir
+
     # Package root is two levels up from this file (vox/audio/cues.py -> vox/ -> package_root/)
     package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(package_root, "cues")
+    resolved = os.path.join(package_root, "cues")
+
+    if not os.path.isdir(resolved):
+        # Log warning — no crash, cues are optional
+        print(f"WARNING: No cues directory found at {resolved}. Audio cues will be silent.", flush=True)
+
+    return resolved
 
 
 def audio_cue(name: str, cues_dir: str = None) -> None:
