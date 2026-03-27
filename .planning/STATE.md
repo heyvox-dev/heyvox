@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 4 complete — hardened MCP server with stdout safety net, verified TTS integration
+**Current focus:** Phase 4 complete and verified (10/10 must-haves), ready for Phase 5: HUD Overlay
 
 ## Current Position
 
 Phase: 4 of 5 (MCP Server)
 Plan: 2 of 2 in current phase (COMPLETE)
-Status: 04-02 complete — MCP server hardened, stdout safety net, graceful ImportError, TTS integration verified
-Last activity: 2026-03-27 -- 04-02 MCP server hardening
+Status: Phase 4 complete and verified (10/10 must-haves passed)
+Last activity: 2026-03-27 -- Phase 4 verified and complete
 
 Progress: [########..] 80%
 
@@ -95,5 +95,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Completed 04-02 MCP server hardening — Phase 4 complete, ready for Phase 5 packaging
+Stopped at: Phase 4 complete and verified — ready for Phase 5: HUD Overlay
 Resume file: None
