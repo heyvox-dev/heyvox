@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 1 complete, ready for Phase 2: Audio + Input Pipeline
+**Current focus:** Phase 2: Audio + Input Pipeline — Plan 01 complete (echo suppression + health check)
 
 ## Current Position
 
-Phase: 1 of 5 (Foundation)
-Plan: 2 of 2 in current phase (COMPLETE)
-Status: Phase 1 complete
-Last activity: 2026-03-27 -- Plan 02 complete (pydantic config system + full decoupling)
+Phase: 2 of 5 (Audio + Input Pipeline)
+Plan: 1 of N in current phase (COMPLETE)
+Status: Phase 2 in progress
+Last activity: 2026-03-27 -- Plan 02-01 complete (headset detection, echo suppression, silent-mic health check)
 
-Progress: [##........] 20%
+Progress: [###.......] 30%
 
 ## Performance Metrics
 
@@ -28,9 +28,10 @@ Progress: [##........] 20%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-foundation | 2 | 11 min | 5.5 min |
+| 02-audio-input-pipeline | 1 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 7 min, 4 min
+- Last 5 plans: 7 min, 4 min, 2 min
 - Trend: accelerating
 
 *Updated after each plan completion*
@@ -56,6 +57,10 @@ Recent decisions affecting current work:
 - [01-02] TTSConfig validates script_path existence at config load time (fail fast)
 - [01-02] overlay.py always uses NSScreen.mainScreen() -- Conductor-specific detection removed entirely
 - [01-02] ptt.py required no changes -- callbacks dict already decoupled RECORDING_FLAG usage
+- [02-01] Echo suppression uses file flag IPC (/tmp/vox-tts-playing) — TTS runs out-of-process, flag is the natural IPC boundary
+- [02-01] Stale flag guard 60s — generous for long TTS responses, fast enough to recover from TTS crash
+- [02-01] Health check: 30s interval, 3 consecutive strikes required (90s minimum) to avoid false positives
+- [02-01] detect_headset() bidirectional substring matching handles asymmetric macOS BT/USB device naming
 
 ### Pending Todos
 
@@ -68,5 +73,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Phase 1 complete and verified (5/5 must-haves passed)
+Stopped at: Completed 02-01-PLAN.md (echo suppression + silent-mic health check)
 Resume file: None
