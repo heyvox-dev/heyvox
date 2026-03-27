@@ -2,9 +2,12 @@
 Vox main event loop.
 
 Orchestrates the wake word listener, push-to-talk, STT transcription,
-text injection, and recording indicator. Reads configuration from config.yaml.
+text injection, and recording indicator. Loads configuration from
+~/.config/vox/config.yaml via the pydantic config system.
 
 Entry point: vox.cli calls run() which calls main().
+
+Requirement: CONF-01, DECP-01 through DECP-06
 """
 
 import os
@@ -16,11 +19,10 @@ import subprocess
 
 import numpy as np
 import pyaudio
-import yaml
 
+from vox.config import load_config, VoxConfig
 from vox.constants import (
     RECORDING_FLAG,
-    LOG_FILE,
     DEFAULT_SAMPLE_RATE,
     DEFAULT_CHUNK_SIZE,
 )
@@ -45,33 +47,21 @@ _cancel_transcription = threading.Event()
 _shutdown = threading.Event()
 
 # ---------------------------------------------------------------------------
-# Config
+# Logging (module-level path set from config at startup)
 # ---------------------------------------------------------------------------
 
-_LOG_FILE = LOG_FILE
+_LOG_FILE = "/tmp/vox.log"
 _LOG_MAX_BYTES = 1_000_000
 
 
-def _load_config():
-    """Load config.yaml from the current working directory or home dir."""
-    candidates = [
-        os.path.join(os.getcwd(), "config.yaml"),
-        os.path.expanduser("~/.config/vox/config.yaml"),
-        os.path.expanduser("~/vox/config.yaml"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            with open(path) as f:
-                return yaml.safe_load(f)
-    log("WARNING: No config.yaml found, using defaults")
-    return {}
+def _init_log(log_file: str, log_max_bytes: int) -> None:
+    """Set the log file path and rotation limit from config."""
+    global _LOG_FILE, _LOG_MAX_BYTES
+    _LOG_FILE = log_file
+    _LOG_MAX_BYTES = log_max_bytes
 
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-def log(msg):
+def log(msg: str) -> None:
     """Write timestamped message to stdout and log file with rotation."""
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -96,7 +86,7 @@ def log(msg):
 _indicator_proc = None
 
 
-def _kill_orphan_indicators():
+def _kill_orphan_indicators() -> None:
     """Kill any leftover indicator processes from previous sessions."""
     try:
         subprocess.run(
@@ -107,7 +97,7 @@ def _kill_orphan_indicators():
         pass
 
 
-def _show_recording_indicator(active):
+def _show_recording_indicator(active: bool) -> None:
     """Show/hide the recording indicator overlay in a separate process."""
     global _indicator_proc
     if active:
@@ -136,7 +126,7 @@ def _show_recording_indicator(active):
 # Recording flow
 # ---------------------------------------------------------------------------
 
-def start_recording(ptt=False, cfg=None):
+def start_recording(ptt: bool = False, config: VoxConfig = None) -> None:
     """Begin a recording session.
 
     Sets is_recording flag, signals TTS to pause, plays listening cue,
@@ -144,11 +134,11 @@ def start_recording(ptt=False, cfg=None):
 
     Args:
         ptt: True if triggered by push-to-talk (affects auto-send behavior).
-        cfg: Config dict (used to resolve STT backend, superwhisper settings).
+        config: VoxConfig instance. Required.
     """
     global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt
-    if cfg is None:
-        cfg = {}
+    if config is None:
+        return
 
     with _state_lock:
         if is_recording:
@@ -158,36 +148,31 @@ def start_recording(ptt=False, cfg=None):
         _audio_buffer = []
         _triggered_by_ptt = ptt
 
-    stt_backend = cfg.get("stt", {}).get("backend", "superwhisper")
-
-    if stt_backend == "superwhisper":
-        sw_url = cfg.get("superwhisper", {}).get("toggle_url", "superwhisper://record")
-        subprocess.run(["open", "-g", sw_url], capture_output=True, timeout=5)
-
     # Signal TTS orchestrator to pause while recording
+    # Requirement: DECP-04
     try:
         open(RECORDING_FLAG, "w").close()
     except Exception:
         pass
 
-    cues_dir = cfg.get("_cues_dir", get_cues_dir())
+    cues_dir = get_cues_dir(config.cues_dir)
     audio_cue("listening", cues_dir)
     _show_recording_indicator(True)
     log("Recording started. Waiting for stop wake word.")
 
 
-def stop_recording(cfg=None):
+def stop_recording(config: VoxConfig = None) -> None:
     """End a recording session and dispatch transcription.
 
     Checks minimum recording duration, plays feedback cue, and starts
     the transcription thread.
 
     Args:
-        cfg: Config dict.
+        config: VoxConfig instance. Required.
     """
     global is_recording, busy
-    if cfg is None:
-        cfg = {}
+    if config is None:
+        return
 
     with _state_lock:
         if not is_recording:
@@ -205,57 +190,50 @@ def stop_recording(cfg=None):
     except FileNotFoundError:
         pass
 
-    min_rec = cfg.get("min_recording_secs", 1.5)
-    cues_dir = cfg.get("_cues_dir", get_cues_dir())
-    stt_backend = cfg.get("stt", {}).get("backend", "superwhisper")
+    cues_dir = get_cues_dir(config.cues_dir)
 
-    if duration < min_rec:
-        log(f"Recording too short ({duration:.1f}s < {min_rec}s), cancelling")
+    if duration < config.min_recording_secs:
+        log(f"Recording too short ({duration:.1f}s < {config.min_recording_secs}s), cancelling")
         audio_cue("paused", cues_dir)
-        if stt_backend == "superwhisper":
-            sw_url = cfg.get("superwhisper", {}).get("toggle_url", "superwhisper://record")
-            subprocess.run(["open", "-g", sw_url], capture_output=True, timeout=5)
         return
 
     audio_cue("ok", cues_dir)
     with _state_lock:
         busy = True
 
-    if stt_backend == "local":
+    if config.stt.backend == "local":
         # Trim audio cue from wake-word recording (speakers bleed into mic)
         # PTT starts silently — no trim needed
-        chunk_size = cfg.get("chunk_size", DEFAULT_CHUNK_SIZE)
-        sample_rate = cfg.get("sample_rate", DEFAULT_SAMPLE_RATE)
         if not _triggered_by_ptt:
-            cue_trim = int(1.5 * sample_rate / chunk_size)
-            recorded_chunks = recorded_chunks[cue_trim:] if len(recorded_chunks) > cue_trim else recorded_chunks
-        threading.Thread(target=_send_local, args=(duration, recorded_chunks, cfg), daemon=True).start()
-    else:
-        threading.Thread(target=_send_superwhisper, args=(duration, cfg), daemon=True).start()
+            cue_trim = int(1.5 * config.audio.sample_rate / config.audio.chunk_size)
+            recorded_chunks = (
+                recorded_chunks[cue_trim:] if len(recorded_chunks) > cue_trim else recorded_chunks
+            )
+        threading.Thread(
+            target=_send_local,
+            args=(duration, recorded_chunks, config),
+            daemon=True,
+        ).start()
 
 
-def _send_local(duration, audio_chunks, cfg):
+def _send_local(duration: float, audio_chunks: list, config: VoxConfig) -> None:
     """Transcribe locally and inject text into target app."""
     global busy
-
-    stt_cfg = cfg.get("stt", {}).get("local", {})
-    engine = stt_cfg.get("engine", "mlx")
-    mlx_model = stt_cfg.get("mlx_model", "mlx-community/whisper-small-mlx")
-    language = stt_cfg.get("language", "")
-    sample_rate = cfg.get("sample_rate", DEFAULT_SAMPLE_RATE)
-    target_app = cfg.get("target_app", "")
-    enter_count = cfg.get("enter_count", 2)
-    prefix = cfg.get("transcription_prefix", "")
-    cues_dir = cfg.get("_cues_dir", get_cues_dir())
-    tts_script = cfg.get("_tts_script_path")
 
     try:
         log(f"Recording was {duration:.1f}s, transcribing...")
         t0 = time.time()
-        text = transcribe_audio(audio_chunks, engine=engine, mlx_model=mlx_model,
-                                language=language, sample_rate=sample_rate)
+        text = transcribe_audio(
+            audio_chunks,
+            engine=config.stt.local.engine,
+            mlx_model=config.stt.local.mlx_model,
+            language=config.stt.local.language,
+            sample_rate=config.audio.sample_rate,
+        )
         elapsed = time.time() - t0
         log(f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
+
+        cues_dir = get_cues_dir(config.cues_dir)
 
         if not text:
             log("WARNING: Empty transcription, skipping")
@@ -273,18 +251,23 @@ def _send_local(duration, audio_chunks, cfg):
         cmd_result = check_voice_command(text)
         if cmd_result:
             action_key, feedback = cmd_result
+            tts_script = config.tts.script_path if config.tts.enabled else None
             execute_voice_command(action_key, feedback, tts_script_path=tts_script, log_fn=log)
             audio_cue("paused", cues_dir)
             return
 
-        paste_text = f"{prefix}{text}" if prefix else text
+        paste_text = f"{config.transcription_prefix}{text}" if config.transcription_prefix else text
 
         if _triggered_by_ptt:
             log("Typing into active app (PTT mode)...")
-        else:
-            log(f"Focusing {target_app}...")
-            focus_app(target_app)
+        elif config.target_app:
+            # Only focus a specific app if target_app is configured
+            # Requirement: DECP-01
+            log(f"Focusing {config.target_app}...")
+            focus_app(config.target_app)
             time.sleep(0.3)
+        else:
+            log("Pasting into focused app (target_app not set)...")
 
         # Re-check cancellation right before typing
         if _cancel_transcription.is_set():
@@ -299,76 +282,9 @@ def _send_local(duration, audio_chunks, cfg):
             log("Pasted (PTT mode, no auto-Enter)")
         else:
             time.sleep(0.2)
-            log(f"Pressing Enter x{enter_count}...")
-            press_enter(enter_count)
+            log(f"Pressing Enter x{config.enter_count}...")
+            press_enter(config.enter_count)
             log("Sent!")
-    except subprocess.TimeoutExpired:
-        log("WARNING: Subprocess timed out during send phase")
-    except Exception as e:
-        log(f"ERROR in send phase: {e}")
-    finally:
-        with _state_lock:
-            busy = False
-        log("Ready for next wake word.")
-
-
-def _send_superwhisper(duration, cfg):
-    """SuperWhisper flow: wait for clipboard change, then press Enter."""
-    global busy
-    from vox.input.injection import get_clipboard_text, clipboard_is_image
-
-    sw_cfg = cfg.get("superwhisper", cfg.get("stt", {}).get("superwhisper", {}))
-    sw_url = sw_cfg.get("toggle_url", "superwhisper://record")
-    sw_max_wait = sw_cfg.get("max_wait_secs", 15)
-    target_app = cfg.get("target_app", "")
-    enter_count = cfg.get("enter_count", 2)
-    cues_dir = cfg.get("_cues_dir", get_cues_dir())
-
-    # Snapshot clipboard before recording started (captured in start_recording)
-    clipboard_before = cfg.get("_clipboard_before", "")
-    clipboard_was_image = cfg.get("_clipboard_was_image", False)
-
-    try:
-        log(f"Recording was {duration:.1f}s")
-        log(f"Focusing {target_app}...")
-        focus_app(target_app)
-        time.sleep(0.3)
-
-        log("Stopping SuperWhisper...")
-        subprocess.run(["open", "-g", sw_url], capture_output=True, timeout=5)
-
-        poll = 0.1
-        elapsed = 0
-        phase = "waiting_for_transcription"
-        log("Watching clipboard for paste completion...")
-
-        while elapsed < sw_max_wait:
-            time.sleep(poll)
-            elapsed += poll
-            try:
-                clip = get_clipboard_text()
-            except subprocess.TimeoutExpired:
-                continue
-
-            if phase == "waiting_for_transcription":
-                if clip and clip != clipboard_before:
-                    log(f"Transcription on clipboard after {elapsed:.1f}s: {clip[:50]}...")
-                    phase = "waiting_for_restore"
-            elif phase == "waiting_for_restore":
-                if clip == clipboard_before or (clipboard_was_image and (clip == "" or clipboard_is_image())):
-                    log(f"Clipboard restored after {elapsed:.1f}s - paste complete!")
-                    break
-        else:
-            if phase == "waiting_for_transcription":
-                log("WARNING: No transcription appeared on clipboard, aborting")
-                return
-            else:
-                log("Clipboard not restored yet, but transcription was pasted - proceeding")
-
-        time.sleep(0.2)
-        log(f"Pressing Enter x{enter_count}...")
-        press_enter(enter_count)
-        log("Enter sent!")
     except subprocess.TimeoutExpired:
         log("WARNING: Subprocess timed out during send phase")
     except Exception as e:
@@ -383,9 +299,14 @@ def _send_superwhisper(duration, cfg):
 # Main loop
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     """Main event loop — loads config, starts PTT, runs wake word detection."""
     global is_recording, _audio_buffer, busy
+
+    # Load configuration from ~/.config/vox/config.yaml (or defaults)
+    # Requirement: CONF-01
+    config = load_config()
+    _init_log(config.log_file, config.log_max_bytes)
 
     # Signal handlers for clean shutdown
     def handle_signal(signum, frame):
@@ -401,7 +322,7 @@ def main():
             with _state_lock:
                 is_recording = False
                 _audio_buffer.clear()
-            cues_dir = cfg.get("_cues_dir", get_cues_dir())
+            cues_dir = get_cues_dir(config.cues_dir)
             audio_cue("paused", cues_dir)
             log("Recording cancelled.")
 
@@ -409,66 +330,49 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGUSR1, handle_cancel)
 
-    # Load configuration
-    cfg = _load_config()
-
-    # Resolve paths
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    cues_dir_path = os.path.join(script_dir, "..", cfg.get("cues_dir", "cues"))
-    cues_dir_path = os.path.normpath(cues_dir_path)
-    if not os.path.isdir(cues_dir_path):
-        cues_dir_path = get_cues_dir()
-    cfg["_cues_dir"] = cues_dir_path
-
-    # Inline settings
-    wake_cfg = cfg.get("wake_words", {})
-    start_word = wake_cfg.get("start", "hey_jarvis_v0.1")
-    stop_word = wake_cfg.get("stop", start_word)
+    # Wake word settings
+    start_word = config.wake_words.start
+    stop_word = config.wake_words.stop
     use_separate_words = start_word != stop_word
-    threshold = cfg.get("threshold", 0.2)
-    cooldown = cfg.get("cooldown_secs", 2.0)
-    sample_rate = cfg.get("sample_rate", DEFAULT_SAMPLE_RATE)
-    chunk_size = cfg.get("chunk_size", DEFAULT_CHUNK_SIZE)
-    mic_priority = cfg.get("mic_priority", ["MacBook Pro Microphone"])
-    stt_backend = cfg.get("stt", {}).get("backend", "superwhisper")
-    ptt_cfg = cfg.get("push_to_talk", {})
-    ptt_enabled = ptt_cfg.get("enabled", False)
-    ptt_key = ptt_cfg.get("key", "fn")
-    silence_timeout = cfg.get("silence_timeout_secs", 5.0)
-    silence_threshold = cfg.get("silence_threshold", 200)
+    threshold = config.threshold
+    cooldown = config.cooldown_secs
+    sample_rate = config.audio.sample_rate
+    chunk_size = config.audio.chunk_size
+    mic_priority = config.mic_priority
+    silence_timeout = config.silence_timeout_secs
+    silence_threshold = config.silence_threshold
 
     _kill_orphan_indicators()
 
     # Initialize STT backend
-    log(f"STT backend: {stt_backend}")
-    if stt_backend == "local":
-        stt_local = cfg.get("stt", {}).get("local", {})
+    log(f"STT backend: {config.stt.backend}")
+    if config.stt.backend == "local":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
         init_local_stt(
-            engine=stt_local.get("engine", "mlx"),
-            mlx_model=stt_local.get("mlx_model", "mlx-community/whisper-small-mlx"),
-            model_dir=os.path.join(script_dir, stt_local.get("model_dir", "models/sherpa-onnx-whisper-small")),
-            language=stt_local.get("language", ""),
-            threads=stt_local.get("threads", 4),
+            engine=config.stt.local.engine,
+            mlx_model=config.stt.local.mlx_model,
+            model_dir=os.path.join(script_dir, config.stt.local.model_dir),
+            language=config.stt.local.language,
+            threads=config.stt.local.threads,
             log_fn=log,
         )
 
     # Start push-to-talk listener if enabled
-    if ptt_enabled:
+    if config.push_to_talk.enabled:
         from vox.input.ptt import start_ptt_listener
 
-        def _ptt_callbacks():
-            return {
-                "on_start": lambda: start_recording(ptt=True, cfg=cfg),
-                "on_stop": lambda: stop_recording(cfg=cfg),
-                "on_cancel_transcription": lambda: _cancel_transcription.set(),
-                "on_cancel_recording": lambda: _cancel_recording_from_ptt(cfg),
-                "is_busy": lambda: busy,
-                "is_recording": lambda: is_recording,
-            }
-
-        start_ptt_listener(ptt_key, _ptt_callbacks(), log_fn=log)
+        ptt_callbacks = {
+            "on_start": lambda: start_recording(ptt=True, config=config),
+            "on_stop": lambda: stop_recording(config=config),
+            "on_cancel_transcription": lambda: _cancel_transcription.set(),
+            "on_cancel_recording": lambda: _cancel_recording_from_ptt(config),
+            "is_busy": lambda: busy,
+            "is_recording": lambda: is_recording,
+        }
+        start_ptt_listener(config.push_to_talk.key, ptt_callbacks, log_fn=log)
 
     # Load wake word models
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "training", "models")
     from vox.audio.wakeword import load_models
     model, use_separate_words = load_models(start_word, stop_word, models_dir)
@@ -491,7 +395,8 @@ def main():
     else:
         log(f"Ready! Say '{start_word}' to start/stop voice input.")
 
-    last_trigger = 0
+    cues_dir = get_cues_dir(config.cues_dir)
+    last_trigger = 0.0
     consecutive_errors = 0
 
     try:
@@ -534,7 +439,7 @@ def main():
                 _is_rec = is_recording
                 _is_busy = busy
                 _is_ptt = _triggered_by_ptt
-                if _is_rec and stt_backend == "local":
+                if _is_rec and config.stt.backend == "local":
                     _audio_buffer.append(audio.copy())
 
             # Silence watchdog — cancel if no speech for silence_timeout
@@ -556,7 +461,7 @@ def main():
                             with _state_lock:
                                 is_recording = False
                                 _audio_buffer.clear()
-                            audio_cue("paused", cues_dir_path)
+                            audio_cue("paused", cues_dir)
                             log("Ready for next wake word.")
                             continue
 
@@ -579,14 +484,14 @@ def main():
                         last_trigger = now
                         if use_separate_words:
                             if start_word in ww_name and not is_recording:
-                                start_recording(cfg=cfg)
+                                start_recording(config=config)
                             elif stop_word in ww_name and is_recording:
-                                stop_recording(cfg=cfg)
+                                stop_recording(config=config)
                         else:
                             if not is_recording:
-                                start_recording(cfg=cfg)
+                                start_recording(config=config)
                             else:
-                                stop_recording(cfg=cfg)
+                                stop_recording(config=config)
                     model.reset()
 
     except KeyboardInterrupt:
@@ -603,7 +508,7 @@ def main():
         log("Shutdown complete.")
 
 
-def _cancel_recording_from_ptt(cfg):
+def _cancel_recording_from_ptt(config: VoxConfig) -> None:
     """Cancel an active recording (used by PTT Escape handler)."""
     global is_recording
     _show_recording_indicator(False)
@@ -614,11 +519,11 @@ def _cancel_recording_from_ptt(cfg):
     with _state_lock:
         is_recording = False
         _audio_buffer.clear()
-    cues_dir = cfg.get("_cues_dir", get_cues_dir())
+    cues_dir = get_cues_dir(config.cues_dir)
     audio_cue("paused", cues_dir)
     log("Recording cancelled.")
 
 
-def run():
+def run() -> None:
     """CLI entry point — called by vox.cli on 'vox start'."""
     main()

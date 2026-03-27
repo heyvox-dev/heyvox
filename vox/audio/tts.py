@@ -2,10 +2,13 @@
 TTS voice command interception for vox.
 
 Checks if a transcribed utterance is a TTS control command (skip, next, mute, etc.)
-and executes it via the tts-ctl.sh hook script. If no TTS script is configured,
-voice commands are logged and skipped gracefully.
+and executes it via the configured tts.script_path hook script. If no TTS script is
+configured (tts.script_path is None), voice commands are logged and skipped gracefully
+with no crash.
 
 Full TTS output (Kokoro) is implemented in Phase 4 via the MCP server.
+
+Requirement: DECP-05, CONF-03
 """
 
 import re
@@ -39,7 +42,7 @@ def check_voice_command(text: str):
 
 
 def _make_actions(tts_script_path: str) -> dict:
-    """Build the action dispatch table for a given tts-ctl script path."""
+    """Build the action dispatch table for a given TTS script path."""
     def _run(cmd):
         return subprocess.run(["bash", tts_script_path, cmd], timeout=5)
 
@@ -55,12 +58,18 @@ def _make_actions(tts_script_path: str) -> dict:
 def execute_voice_command(action_key: str, feedback: str, tts_script_path: str = None, log_fn=None) -> None:
     """Execute a voice command action.
 
+    When tts_script_path is None or empty, the command is logged as a warning
+    and skipped — no crash, no exception. This allows the package to run without
+    any TTS configuration.
+
     Args:
         action_key: Action identifier from VOICE_COMMANDS (e.g. "tts-skip").
         feedback: Human-readable description for logging.
-        tts_script_path: Absolute path to tts-ctl.sh hook script.
-            If None, the command is logged but not executed.
+        tts_script_path: Absolute path to the TTS control script.
+            If None or empty, the command is logged but not executed.
         log_fn: Optional callable(str) for log output.
+
+    Requirement: DECP-05
     """
     def _log(msg):
         if log_fn:
@@ -70,8 +79,11 @@ def execute_voice_command(action_key: str, feedback: str, tts_script_path: str =
 
     _log(f"Voice command: {action_key} ({feedback})")
 
-    if tts_script_path is None:
-        _log(f"WARNING: tts_script_path not configured, skipping voice command execution")
+    if not tts_script_path:
+        _log(
+            f"Voice command '{action_key}' ignored: TTS not configured "
+            f"(set tts.script_path in ~/.config/vox/config.yaml)"
+        )
         return
 
     try:
