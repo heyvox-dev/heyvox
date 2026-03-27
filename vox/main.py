@@ -32,7 +32,7 @@ from vox.audio.mic import find_best_mic, open_mic_stream, detect_headset
 from vox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from vox.audio.stt import init_local_stt, transcribe_audio
 from vox.audio.tts import check_voice_command, execute_voice_command
-from vox.input.injection import type_text, press_enter, focus_app
+from vox.input.injection import type_text
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,7 @@ _audio_buffer = []
 _triggered_by_ptt = False
 _cancel_transcription = threading.Event()
 _shutdown = threading.Event()
+_adapter = None  # Initialized in main() via _build_adapter(config)
 
 # ---------------------------------------------------------------------------
 # Logging (module-level path set from config at startup)
@@ -213,12 +214,29 @@ def stop_recording(config: VoxConfig = None) -> None:
             )
         threading.Thread(
             target=_send_local,
-            args=(duration, recorded_chunks, config),
+            args=(duration, recorded_chunks, config, _adapter),
             daemon=True,
         ).start()
 
 
-def _send_local(duration: float, audio_chunks: list, config: VoxConfig) -> None:
+def _build_adapter(config: VoxConfig):
+    """Resolve the correct adapter from config.target_mode.
+
+    Requirement: INPT-03 (adapter selection via config)
+    """
+    mode = config.target_mode
+    if mode == "pinned-app" and config.target_app:
+        from vox.adapters.generic import GenericAdapter
+        return GenericAdapter(target_app=config.target_app, enter_count=config.enter_count)
+    elif mode == "last-agent":
+        from vox.adapters.last_agent import LastAgentAdapter
+        return LastAgentAdapter(agents=config.agents, enter_count=config.enter_count)
+    else:  # "always-focused" default
+        from vox.adapters.generic import GenericAdapter
+        return GenericAdapter(enter_count=config.enter_count)
+
+
+def _send_local(duration: float, audio_chunks: list, config: VoxConfig, adapter) -> None:
     """Transcribe locally and inject text into target app."""
     global busy
 
@@ -260,17 +278,6 @@ def _send_local(duration: float, audio_chunks: list, config: VoxConfig) -> None:
 
         paste_text = f"{config.transcription_prefix}{text}" if config.transcription_prefix else text
 
-        if _triggered_by_ptt:
-            log("Typing into active app (PTT mode)...")
-        elif config.target_app:
-            # Only focus a specific app if target_app is configured
-            # Requirement: DECP-01
-            log(f"Focusing {config.target_app}...")
-            focus_app(config.target_app)
-            time.sleep(0.3)
-        else:
-            log("Pasting into focused app (target_app not set)...")
-
         # Re-check cancellation right before typing
         if _cancel_transcription.is_set():
             log("Transcription cancelled by user (Escape)")
@@ -278,15 +285,23 @@ def _send_local(duration: float, audio_chunks: list, config: VoxConfig) -> None:
             _cancel_transcription.clear()
             return
 
-        type_text(paste_text)
-
+        # PTT mode: always paste into currently focused app (bypass adapter)
+        # Requirement: INPT-05 (PTT = always-focused regardless of target_mode)
         if _triggered_by_ptt:
+            log("Typing into active app (PTT mode)...")
+            type_text(paste_text)
             log("Pasted (PTT mode, no auto-Enter)")
         else:
-            time.sleep(0.2)
-            log(f"Pressing Enter x{config.enter_count}...")
-            press_enter(config.enter_count)
-            log("Sent!")
+            log(f"Injecting via {type(adapter).__name__}...")
+            adapter.inject_text(paste_text)
+            if adapter.should_auto_send():
+                time.sleep(0.2)
+                from vox.input.injection import press_enter as _press_enter
+                log(f"Pressing Enter x{adapter.enter_count}...")
+                _press_enter(adapter.enter_count)
+                log("Sent!")
+            else:
+                log("Pasted (no auto-send)")
     except subprocess.TimeoutExpired:
         log("WARNING: Subprocess timed out during send phase")
     except Exception as e:
@@ -378,6 +393,12 @@ def main() -> None:
     models_dir = os.path.join(script_dir, "training", "models")
     from vox.audio.wakeword import load_models
     model, use_separate_words = load_models(start_word, stop_word, models_dir)
+
+    # Build text injection adapter based on config.target_mode
+    # Requirement: INPT-03
+    global _adapter
+    _adapter = _build_adapter(config)
+    log(f"Target mode: {config.target_mode} (adapter: {type(_adapter).__name__})")
 
     # Open audio stream
     log("Opening audio stream...")
