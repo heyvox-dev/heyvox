@@ -1,0 +1,34 @@
+[project]
+name = "vox-voice"
+version = "0.1.0"
+description = "macOS voice layer for AI coding agents — wake word, local STT, local TTS, HUD"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "openwakeword>=0.6.0",
+    "pyaudio>=0.2.14",
+    "numpy>=1.24.0",
+    "PyYAML>=6.0",
+    "pydantic>=2.0",
+    "platformdirs>=4.0",
+    "sherpa-onnx>=1.0",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+]
+
+[project.optional-dependencies]
+apple-silicon = [
+    "mlx-whisper>=0.1.0",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+vox = "vox.cli:main"
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
