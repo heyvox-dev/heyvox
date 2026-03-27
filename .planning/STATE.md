@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 5 Plan 01 complete — HUD IPC layer + frosted-glass pill overlay built; ready for Plan 02 (integration wiring)
+**Current focus:** All 5 phases complete — Vox v1 MVP fully built (wake word + STT + TTS + HUD)
 
 ## Current Position
 
 Phase: 5 of 5 (HUD Overlay)
-Plan: 1 of 2 in current phase (COMPLETE)
-Status: 05-01 complete — HUDServer/HUDClient + full overlay.py implemented and verified
-Last activity: 2026-03-27 -- Phase 5 Plan 01 complete
+Plan: 2 of 2 in current phase (COMPLETE)
+Status: 05-02 complete — HUDClient wired into main.py and tts.py; full live HUD feedback loop operational
+Last activity: 2026-03-27 -- Phase 5 Plan 02 complete
 
-Progress: [#########.] 90%
+Progress: [##########] 100%
 
 ## Performance Metrics
 
@@ -31,7 +31,7 @@ Progress: [#########.] 90%
 | 02-audio-input-pipeline | 2 | 4 min | 2 min |
 | 03-cli-tts-output | 2 | 8 min | 4 min |
 | 04-mcp-server | 2 | 6 min | 3 min |
-| 05-hud-overlay | 1 | 3 min | 3 min |
+| 05-hud-overlay | 2 | 6 min | 3 min |
 
 **Recent Trend:**
 - Last 5 plans: 2 min, 2 min, 5 min, 1 min, 3 min
@@ -88,6 +88,10 @@ Recent decisions affecting current work:
 - [05-01] performSelectorOnMainThread chosen over NSTimer dispatch for IPC messages (lower overhead for high-frequency audio_level)
 - [05-01] Color overlay is a separate NSView at alpha 0.3 so frosted glass vibrancy shows through in active states
 - [05-01] TTS button action lazily imports TTS_CMD_FILE to allow standalone overlay.py use without full vox package
+- [05-02] HUD_SOCKET_PATH in constants.py (not ipc.py) — keeps ipc.py standalone-usable, avoids circular import
+- [05-02] _hud_send() wrapper pattern in main.py and tts.py — single try/except point, callers never guard HUD calls
+- [05-02] Lazy HUDClient import in tts.py start_worker() with try/except ImportError — allows tts.py to load in CI without HUD module
+- [05-02] Reconnect via _hud_ensure_connected() reuses existing idle gate — no separate timer thread needed
 
 ### Pending Todos
 
@@ -100,5 +104,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Completed 05-01-PLAN.md — HUD IPC + overlay built, ready for 05-02 integration wiring
+Stopped at: Completed 05-02-PLAN.md — HUD integration wiring complete; all 5 phases done, v1 MVP ready
 Resume file: None
