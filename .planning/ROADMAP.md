@@ -30,23 +30,23 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. No Conductor references, personal paths, or hardcoded `tts-ctl.sh` remain in the codebase
   4. Package follows modular structure (`vox/audio/`, `vox/input/`, `vox/hud/`, `vox/mcp/`, `vox/adapters/`)
   5. TTS and voice commands gracefully degrade when optional paths are not configured
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: Project scaffolding and pyproject.toml with all dependencies
-- [ ] 01-02: Config system and code decoupling from Conductor
+- [ ] 01-01-PLAN.md — Project scaffolding, pyproject.toml, and monolith extraction into modular structure
+- [ ] 01-02-PLAN.md — Pydantic config system and Conductor decoupling
 
 ### Phase 2: Audio + Input Pipeline
 **Goal**: User can speak via wake word or push-to-talk and have transcribed text appear in the focused app
 **Depends on**: Phase 1
-**Requirements**: AUDIO-01, AUDIO-02, AUDIO-03, AUDIO-04, AUDIO-05, AUDIO-06, AUDIO-07, AUDIO-08, AUDIO-09, INPT-01, INPT-02, INPT-03, INPT-04, INPT-05, INPT-06
+**Requirements**: AUDIO-01, AUDIO-02, AUDIO-03, AUDIO-04, AUDIO-05, AUDIO-06, AUDIO-07, AUDIO-08, AUDIO-09, AUDIO-10, INPT-01, INPT-02, INPT-03, INPT-04, INPT-05, INPT-06
 **Success Criteria** (what must be TRUE):
   1. Saying the wake word activates recording; pressing the configured modifier key (fn) activates push-to-talk
   2. Speech is transcribed locally via MLX Whisper and the resulting text appears in the focused application
   3. Silence timeout auto-stops recording; audio cues play on start/stop/cancel
   4. User's clipboard content is preserved after text injection (save/restore around paste)
-  5. Mic device priority is respected; USB audio dongles work; echo suppression engages when no headset is detected
-**Plans**: TBD
+  5. Mic device priority is respected; USB audio dongles work; Bluetooth A2DP dead-mic auto-falls back to built-in; echo suppression engages when no headset is detected
+**Plans**: 2 plans
 
 Plans:
 - [ ] 02-01: Audio pipeline (mic, wake word, STT, cues, echo suppression)
@@ -62,7 +62,7 @@ Plans:
   3. `vox speak "hello"` produces TTS audio; `vox skip/mute/quiet` controls playback from the terminal
   4. TTS verbosity (full/summary/short/skip) is configurable and can be overridden per-message
   5. TTS pauses immediately when user starts speaking (wake word or PTT detected)
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 - [ ] 03-01: CLI commands and launchd service management
@@ -78,7 +78,7 @@ Plans:
   3. All logging goes to stderr; stdout is clean for MCP stdio transport
   4. `vox setup` offers to write MCP server config to Claude Code's allowlist for auto-approval
   5. Server stays lean (4-5 tools) and tool schemas are concise to minimize context window consumption
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 - [ ] 04-01: MCP server implementation and auto-approve setup
@@ -93,7 +93,7 @@ Plans:
   3. Recording indicator modulates with input volume; partial transcription appears word-by-word
   4. TTS playback shows progress with pause/skip/stop controls
   5. HUD receives state updates via Unix socket IPC at `/tmp/vox-hud.sock` from the main process
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 - [ ] 05-01: HUD process with AppKit overlay and IPC
