@@ -33,6 +33,13 @@ try:
 except ImportError:
     pass
 
+# Safety net: save original stdout then redirect rogue writes to stderr.
+# This prevents any third-party library print() calls from corrupting the
+# MCP stdio JSON-RPC framing during import and tool execution.
+# Restored in the __main__ guard before mcp.run() so FastMCP can use it.
+_original_stdout = sys.stdout
+sys.stdout = sys.stderr
+
 # ---------------------------------------------------------------------------
 # MCP server setup
 # ---------------------------------------------------------------------------
@@ -48,7 +55,13 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
     from vox.audio.tts import start_worker, shutdown as tts_shutdown
     from vox.config import load_config
     config = load_config()
-    start_worker(config)
+    try:
+        start_worker(config)
+    except ImportError as exc:
+        # kokoro or sounddevice not installed — server still starts.
+        # voice_speak calls will fail gracefully at call time with a clear error.
+        print(f"vox MCP server: TTS worker not started ({exc}). "
+              "Install kokoro + sounddevice for TTS support.", file=sys.stderr)
     try:
         yield
     finally:
@@ -149,4 +162,8 @@ def voice_config(action: str = "get", key: str = "", value: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # Restore original stdout for FastMCP's stdio transport framing.
+    # During module import and tool execution, rogue prints went to stderr.
+    # Now we hand stdout back to the MCP protocol layer.
+    sys.stdout = _original_stdout
     mcp.run(transport="stdio")
