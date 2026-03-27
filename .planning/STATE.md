@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 4 plan 1 complete — FastMCP server with 4 voice tools
+**Current focus:** Phase 4 complete — hardened MCP server with stdout safety net, verified TTS integration
 
 ## Current Position
 
 Phase: 4 of 5 (MCP Server)
-Plan: 1 of 2 in current phase (COMPLETE)
-Status: 04-01 complete — FastMCP server importable, 4 tools registered, mcp>=1.0 in pyproject.toml
-Last activity: 2026-03-27 -- 04-01 MCP server implementation
+Plan: 2 of 2 in current phase (COMPLETE)
+Status: 04-02 complete — MCP server hardened, stdout safety net, graceful ImportError, TTS integration verified
+Last activity: 2026-03-27 -- 04-02 MCP server hardening
 
-Progress: [#######...] 70%
+Progress: [########..] 80%
 
 ## Performance Metrics
 
@@ -30,7 +30,7 @@ Progress: [#######...] 70%
 | 01-foundation | 2 | 11 min | 5.5 min |
 | 02-audio-input-pipeline | 2 | 4 min | 2 min |
 | 03-cli-tts-output | 2 | 8 min | 4 min |
-| 04-mcp-server | 1 | 1 min | 1 min |
+| 04-mcp-server | 2 | 6 min | 3 min |
 
 **Recent Trend:**
 - Last 5 plans: 4 min, 2 min, 2 min, 5 min, 1 min
@@ -81,6 +81,8 @@ Recent decisions affecting current work:
 - [04-01] Sync tool functions (not async) — all TTS ops are non-blocking enqueue
 - [04-01] voice_status reads flag files not module state — works cross-process with launchd daemon
 - [04-01] voice_config SET is session-only (live state only, no YAML persistence) — v1 scope
+- [04-02] Stdout safety net: _original_stdout saved before sys.stdout = sys.stderr at module top; restored in __main__ guard before mcp.run()
+- [04-02] ImportError guard wraps start_worker() only (not whole lifespan) — TTS optional, server must start regardless
 
 ### Pending Todos
 
@@ -93,5 +95,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-27
-Stopped at: Completed 04-01 MCP server — ready for 04-02
+Stopped at: Completed 04-02 MCP server hardening — Phase 4 complete, ready for Phase 5 packaging
 Resume file: None
