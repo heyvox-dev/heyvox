@@ -9,36 +9,97 @@ import sys
 
 
 def _cmd_start(args):
-    # Lazy import to avoid loading heavy audio deps at import time
-    from vox.main import run
-    run()
+    """Start vox — foreground mode by default, launchd daemon with --daemon.
+
+    Requirement: CLI-01
+    """
+    if getattr(args, "daemon", False):
+        from vox.setup.launchd import bootstrap
+        success, msg = bootstrap()
+        print(msg)
+        if not success:
+            sys.exit(1)
+    else:
+        # Foreground mode: run main loop directly (development/debug)
+        from vox.main import run
+        run()
 
 
 def _cmd_stop(args):
-    print("Service management not yet implemented (Phase 3).")
+    """Stop the running launchd vox service.
+
+    Requirement: CLI-01
+    """
+    from vox.setup.launchd import bootout
+    success, msg = bootout()
+    print(msg)
+    if not success:
+        sys.exit(1)
 
 
 def _cmd_restart(args):
-    print("Service management not yet implemented (Phase 3).")
+    """Restart the vox launchd service (stop then start).
+
+    Requirement: CLI-01
+    """
+    from vox.setup.launchd import restart
+    success, msg = restart()
+    print(msg)
+    if not success:
+        sys.exit(1)
 
 
 def _cmd_status(args):
+    """Show the current vox service state with PID.
+
+    Requirement: CLI-01
+    """
     from vox import __version__
-    print(f"Vox v{__version__} — service management not yet implemented (Phase 3).")
+    from vox.setup.launchd import get_status, PLIST_PATH
+
+    status = get_status()
+
+    if not PLIST_PATH.exists():
+        print(f"Vox v{__version__} — Not installed (run: vox setup)")
+    elif status["running"]:
+        print(f"Vox v{__version__} — Running (PID {status['pid']})")
+    elif status["loaded"]:
+        code = status["exit_code"]
+        print(f"Vox v{__version__} — Stopped (exit code {code})")
+    else:
+        print(f"Vox v{__version__} — Not loaded")
 
 
 def _cmd_setup(args):
-    print("Setup not yet implemented (Phase 3).")
+    """Run the interactive guided setup wizard.
+
+    Requirement: CLI-02, CLI-03, CLI-04
+    """
+    from vox.config import load_config
+    from vox.setup.wizard import run_setup
+    config = load_config()
+    run_setup(config)
 
 
 def _cmd_logs(args):
-    from vox.constants import LOG_FILE
-    import subprocess
+    """Tail the vox service log file.
 
-    if args.follow:
-        subprocess.run(["tail", "-f", LOG_FILE])
-    else:
-        subprocess.run(["tail", "-n", "100", LOG_FILE])
+    Requirement: CLI-01
+    """
+    import subprocess
+    from pathlib import Path
+
+    log_path = "/tmp/vox.log"
+
+    if not Path(log_path).exists():
+        print("No log file found. Is the service running?")
+        sys.exit(1)
+
+    lines = getattr(args, "lines", 50)
+    try:
+        subprocess.run(["tail", f"-n{lines}", "-f", log_path])
+    except KeyboardInterrupt:
+        pass  # Clean exit on Ctrl+C
 
 
 def _cmd_speak(args):
@@ -122,6 +183,11 @@ def main():
 
     # start
     sub_start = subparsers.add_parser("start", help="Start the vox listener")
+    sub_start.add_argument(
+        "--daemon", "-d",
+        action="store_true",
+        help="Start as launchd service (background daemon)",
+    )
     sub_start.set_defaults(func=_cmd_start)
 
     # stop
@@ -141,8 +207,13 @@ def main():
     sub_setup.set_defaults(func=_cmd_setup)
 
     # logs
-    sub_logs = subparsers.add_parser("logs", help="Show vox logs")
-    sub_logs.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+    sub_logs = subparsers.add_parser("logs", help="Tail the vox service log file")
+    sub_logs.add_argument(
+        "--lines", "-n",
+        type=int,
+        default=50,
+        help="Number of lines to show before following (default: 50)",
+    )
     sub_logs.set_defaults(func=_cmd_logs)
 
     # speak — synthesize and play text (CLI-05)
