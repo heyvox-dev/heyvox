@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Foundation** - Project structure, config system, and decoupling from Conductor ✓ 2026-03-27
 - [x] **Phase 2: Audio + Input Pipeline** - Core voice-in path from mic to text injection ✓ 2026-03-27
 - [x] **Phase 3: CLI + TTS Output** - User control layer and voice output ✓ 2026-03-27
-- [ ] **Phase 4: MCP Server** - Agent integration via MCP protocol
+- [x] **Phase 4: MCP Server** - Agent integration via MCP protocol ✓ 2026-03-27
 - [ ] **Phase 5: HUD Overlay** - Visual feedback as separate AppKit process
 
 ## Phase Details
@@ -81,7 +81,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: MCP server implementation and auto-approve setup
+- [x] 04-01-PLAN.md — MCP server implementation with 4 voice tools and mcp dependency
+- [x] 04-02-PLAN.md — Validation, hardening, stdout safety net, and TTS integration check
 
 ### Phase 5: HUD Overlay
 **Goal**: User sees a beautiful, always-visible overlay showing voice state, transcription, and TTS progress
@@ -108,5 +109,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Foundation | 2/2 | ✓ Complete | 2026-03-27 |
 | 2. Audio + Input Pipeline | 2/2 | ✓ Complete | 2026-03-27 |
 | 3. CLI + TTS Output | 2/2 | ✓ Complete | 2026-03-27 |
-| 4. MCP Server | 0/1 | Not started | - |
+| 4. MCP Server | 2/2 | ✓ Complete | 2026-03-27 |
 | 5. HUD Overlay | 0/1 | Not started | - |
