@@ -31,8 +31,11 @@
 - [ ] **AUDIO-05**: Audio cue feedback on recording start/stop/cancel
 - [ ] **AUDIO-06**: Mic device priority configurable, defaults to built-in (not Bluetooth)
 - [ ] **AUDIO-07**: Works with USB audio dongles (e.g., headset via USB instead of Bluetooth to avoid macOS BT bugs)
-- [ ] **AUDIO-08**: Echo suppression: when no headset detected, mute mic during TTS playback to prevent feedback loop
-- [ ] **AUDIO-09**: Headset detection: distinguish speaker-only vs headset (mic+speaker) to auto-configure echo handling
+- [ ] **AUDIO-08**: Bluetooth A2DP dead-mic detection: auto-detect when BT headset is on A2DP profile (mic returns zeros) and fall back to built-in mic
+- [ ] **AUDIO-09**: Echo suppression: when no headset detected (speaker mode), mute mic during TTS playback to prevent feedback loop
+- [ ] **AUDIO-10**: Headset detection: distinguish speaker-only vs headset (mic+speaker) to auto-configure echo handling
+- [ ] **AUDIO-11**: BT profile switch latency handling: buffer/wait 1-3s for stable audio after A2DP→HFP switch before starting STT (prevent "dead silence" at recording start)
+- [ ] **AUDIO-12**: TTS output volume follows macOS system volume (not fixed/hardcoded); respect current output device volume level
 
 ### Input & Target Detection (INPT)
 
@@ -154,6 +157,9 @@
 | AUDIO-07 | Phase 2: Audio + Input Pipeline | Pending |
 | AUDIO-08 | Phase 2: Audio + Input Pipeline | Pending |
 | AUDIO-09 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-10 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-11 | Phase 2: Audio + Input Pipeline | Pending |
+| AUDIO-12 | Phase 3: CLI + TTS Output | Pending |
 | INPT-01 | Phase 2: Audio + Input Pipeline | Pending |
 | INPT-02 | Phase 2: Audio + Input Pipeline | Pending |
 | INPT-03 | Phase 2: Audio + Input Pipeline | Pending |
@@ -188,8 +194,8 @@
 | HUD-08 | Phase 5: HUD Overlay | Pending |
 
 **Coverage:**
-- v1 requirements: 56 total
-- Mapped to phases: 56
+- v1 requirements: 59 total
+- Mapped to phases: 59
 - Unmapped: 0
 
 ---
