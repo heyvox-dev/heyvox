@@ -105,6 +105,10 @@ def bootout() -> tuple[bool, str]:
     Returns:
         Tuple of (success: bool, message: str).
     """
+    # If plist doesn't exist, the service was never installed — nothing to stop
+    if not PLIST_PATH.exists():
+        return True, "Not running (service not installed)"
+
     result = subprocess.run(
         ["launchctl", "bootout", GUI_DOMAIN, str(PLIST_PATH)],
         capture_output=True,
@@ -112,9 +116,10 @@ def bootout() -> tuple[bool, str]:
     )
 
     # returncode 3 = not loaded (no such process)
+    # returncode 5 = boot-out failed (service not loaded)
     if result.returncode == 0:
         return True, "Vox service stopped"
-    elif result.returncode == 3:
+    elif result.returncode in (3, 5):
         return True, "Not running"
     else:
         err = result.stderr.strip() or result.stdout.strip()

@@ -151,6 +151,14 @@ def start_recording(ptt: bool = False, config: VoxConfig = None) -> None:
         _audio_buffer = []
         _triggered_by_ptt = ptt
 
+    # Interrupt any active TTS immediately when recording starts (TTS-03)
+    # This stops Kokoro mid-sentence so the user's voice is not drowned out.
+    try:
+        from vox.audio.tts import interrupt as _tts_int
+        _tts_int()
+    except ImportError:
+        pass
+
     # Signal TTS orchestrator to pause while recording
     # Requirement: DECP-04
     try:
@@ -271,8 +279,31 @@ def _send_local(duration: float, audio_chunks: list, config: VoxConfig, adapter)
         cmd_result = check_voice_command(text)
         if cmd_result:
             action_key, feedback = cmd_result
-            tts_script = config.tts.script_path if config.tts.enabled else None
-            execute_voice_command(action_key, feedback, tts_script_path=tts_script, log_fn=log)
+            log(f"Voice command: {action_key} ({feedback})")
+
+            # Dispatch to native TTS engine for skip/stop/mute when enabled
+            # Requirement: TTS-03
+            _handled_natively = False
+            if config.tts.enabled:
+                if action_key == "tts-skip":
+                    from vox.audio.tts import skip_current
+                    skip_current()
+                    _handled_natively = True
+                elif action_key == "tts-stop":
+                    from vox.audio.tts import stop_all
+                    stop_all()
+                    _handled_natively = True
+                elif action_key == "tts-mute":
+                    from vox.audio.tts import set_muted, is_muted
+                    set_muted(not is_muted())
+                    _handled_natively = True
+
+            # Fall through to execute_voice_command for tts-next/tts-replay
+            # (not yet implemented natively) or when TTS is disabled.
+            if not _handled_natively:
+                tts_script = config.tts.script_path if config.tts.enabled else None
+                execute_voice_command(action_key, feedback, tts_script_path=tts_script, log_fn=log)
+
             audio_cue("paused", cues_dir)
             return
 
@@ -324,6 +355,13 @@ def main() -> None:
     # Requirement: CONF-01
     config = load_config()
     _init_log(config.log_file, config.log_max_bytes)
+
+    # Start native TTS worker if enabled
+    # Requirement: TTS-03
+    from vox.audio.tts import start_worker as _start_tts, shutdown as _shutdown_tts
+    if config.tts.enabled:
+        _start_tts(config)
+        log("TTS worker started (Kokoro native engine)")
 
     # Signal handlers for clean shutdown
     def handle_signal(signum, frame):
@@ -576,6 +614,11 @@ def main() -> None:
     finally:
         log("Cleaning up...")
         _show_recording_indicator(False)
+        # Shut down native TTS worker cleanly (drains queue + joins thread)
+        # Requirement: TTS-03
+        if config.tts.enabled:
+            _shutdown_tts()
+            log("TTS worker stopped")
         try:
             stream.stop_stream()
             stream.close()
