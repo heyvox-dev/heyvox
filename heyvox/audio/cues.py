@@ -29,9 +29,9 @@ def get_cues_dir(config_cues_dir: str = "") -> str:
     if config_cues_dir and os.path.isdir(config_cues_dir):
         return config_cues_dir
 
-    # Package root is two levels up from this file (vox/audio/cues.py -> vox/ -> package_root/)
-    package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    resolved = os.path.join(package_root, "cues")
+    # Package dir is two levels up from this file (heyvox/audio/cues.py -> heyvox/audio/ -> heyvox/)
+    package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    resolved = os.path.join(package_dir, "cues")
 
     if not os.path.isdir(resolved):
         # Log warning — no crash, cues are optional
