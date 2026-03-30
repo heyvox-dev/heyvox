@@ -86,16 +86,19 @@ def _register_mcp_agent(agent: dict, mcp_entry: dict) -> tuple[bool, str]:
             settings[key] = {}
 
         # Check if already registered
-        if "vox" in settings[key]:
+        if "heyvox" in settings[key]:
             return True, f"{agent['name']}: already registered ({config_file})"
 
-        settings[key]["vox"] = mcp_entry
+        # Remove old "vox" key if present (renamed to heyvox)
+        settings[key].pop("vox", None)
+
+        settings[key]["heyvox"] = mcp_entry
 
         # Claude Code: also add to allowedTools if present
         if agent["name"] == "Claude Code" and "allowedTools" in settings:
             allowed = settings["allowedTools"]
-            if isinstance(allowed, list) and "vox" not in allowed:
-                allowed.append("vox")
+            if isinstance(allowed, list) and "heyvox" not in allowed:
+                allowed.append("heyvox")
 
         config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(config_file, "w") as f:
@@ -123,7 +126,7 @@ def run_setup(config) -> None:
     from rich.live import Live
     from rich.table import Table
 
-    from vox import __version__
+    from heyvox import __version__
     from heyvox.setup.permissions import (
         check_accessibility,
         check_microphone,
@@ -142,10 +145,32 @@ def run_setup(config) -> None:
         f"[bold cyan]HeyVox v{__version__}[/bold cyan]\n"
         "Voice layer for AI coding agents\n\n"
         "[dim]This wizard checks permissions, downloads the Kokoro TTS model,\n"
-        "tests your microphone, and configures Vox as a launchd service.[/dim]",
-        title="[bold]Vox Setup[/bold]",
+        "tests your microphone, and configures HeyVox as a launchd service.[/dim]",
+        title="[bold]HeyVox Setup[/bold]",
         border_style="cyan",
     ))
+    console.print()
+
+    # ---------------------------------------------------------------------------
+    # Step 1b: System dependency check (PortAudio)
+    # ---------------------------------------------------------------------------
+    import shutil
+    if not shutil.which("brew"):
+        console.print("  [yellow]![/yellow] Homebrew not found — install from https://brew.sh")
+    else:
+        import subprocess as _sp
+        pa_check = _sp.run(["brew", "list", "portaudio"], capture_output=True)
+        if pa_check.returncode != 0:
+            console.print("  [yellow]![/yellow] PortAudio not found (required by pyaudio)")
+            console.print("  [dim]Install with: brew install portaudio[/dim]")
+            install_pa = console.input("  Install now? [Y/n] ").strip().lower()
+            if install_pa != "n":
+                _sp.run(["brew", "install", "portaudio"])
+                console.print("  [green]✓[/green] PortAudio installed")
+            else:
+                console.print("  [dim]Skipped — pyaudio may fail without portaudio.[/dim]")
+        else:
+            console.print("  [green]✓[/green] PortAudio installed")
     console.print()
 
     # ---------------------------------------------------------------------------
@@ -321,7 +346,7 @@ def run_setup(config) -> None:
     from heyvox.setup.launchd import PLIST_PATH
 
     install_plist = console.input(
-        "  Install vox as a launchd service (starts automatically at login)? [Y/n] "
+        "  Install HeyVox as a launchd service (starts automatically at login)? [Y/n] "
     ).strip().lower()
 
     if install_plist != "n":

@@ -68,7 +68,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
         tts_shutdown()
 
 
-mcp = FastMCP("vox", lifespan=lifespan)
+mcp = FastMCP("heyvox", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
