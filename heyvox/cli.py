@@ -54,7 +54,7 @@ def _cmd_status(args):
 
     Requirement: CLI-01
     """
-    from vox import __version__
+    from heyvox import __version__
     from heyvox.setup.launchd import get_status, PLIST_PATH
 
     status = get_status()
@@ -248,7 +248,7 @@ def _cmd_register(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="heyvox",
-        description="Vox — voice layer for AI coding agents",
+        description="HeyVox — voice layer for AI coding agents",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
 

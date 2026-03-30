@@ -6,7 +6,7 @@ license = {text = "MIT"}
 requires-python = ">=3.12"
 readme = "README.md"
 authors = [
-    { name = "Franz Felberer" },
+    { name = "Franz Felberer", email = "franz@felberer.at" },
 ]
 keywords = [
     "voice", "speech", "tts", "stt", "wake-word", "mcp",

@@ -1,4 +1,4 @@
-# Vox — Voice Coding, not Vibe Coding
+# HeyVox — Voice Coding, not Vibe Coding
 
 Talk to your AI coding agent. Hands-free, fully local, zero cloud.
 
@@ -8,12 +8,12 @@ HeyVox adds a voice layer to any MCP-compatible AI coding agent (Claude Code, Cu
 
 **Voice IN** — Speak to your agent:
 1. Say the wake word (or hold your push-to-talk key)
-2. Vox records and transcribes your speech locally (MLX Whisper / sherpa-onnx)
+2. HeyVox records and transcribes your speech locally (MLX Whisper / sherpa-onnx)
 3. Your words are pasted into the agent's input field and sent
 
 **Voice OUT** — Your agent speaks back:
 1. The agent calls `voice_speak("Done! Tests passing.")` via MCP
-2. Vox generates speech locally (Kokoro TTS) and plays it
+2. HeyVox generates speech locally (Kokoro TTS) and plays it
 3. System media (YouTube, Spotify) auto-pauses during playback
 
 **HUD** — See what's happening:
@@ -29,6 +29,9 @@ HeyVox adds a voice layer to any MCP-compatible AI coding agent (Claude Code, Cu
 ## Install
 
 ```bash
+# Prerequisite: PortAudio (required by pyaudio for mic access)
+brew install portaudio
+
 # Install from PyPI
 pip install heyvox
 
@@ -117,7 +120,7 @@ ptt:
 
 ## Supported Agents
 
-Vox works with any app that supports MCP (Model Context Protocol):
+HeyVox works with any app that supports MCP (Model Context Protocol):
 
 | Agent | Voice IN | Voice OUT (MCP) | Auto-register |
 |-------|----------|----------------|---------------|
@@ -127,7 +130,7 @@ Vox works with any app that supports MCP (Model Context Protocol):
 | Continue.dev | Yes | Yes | Yes |
 | Any focused app | Yes | — | — |
 
-**Voice IN** works with any app — Vox pastes transcribed text into whatever's focused.
+**Voice IN** works with any app — HeyVox pastes transcribed text into whatever's focused.
 **Voice OUT** requires MCP support — the agent calls `voice_speak()` to talk back.
 
 ## Architecture
@@ -141,7 +144,7 @@ Vox works with any app that supports MCP (Model Context Protocol):
 └────────┼─────────────────────────────────────┘
          │ stdio / JSON-RPC
 ┌────────┼─────────────────────────────────────┐
-│  Vox   ▼                                     │
+│  HeyVox   ▼                                     │
 │  ┌───────────┐  ┌──────────┐  ┌───────────┐ │
 │  │ MCP Server│  │ Wake Word│  │ HUD       │ │
 │  │ (TTS out) │  │ (mic in) │  │ (overlay) │ │
@@ -182,7 +185,7 @@ Vox works with any app that supports MCP (Model Context Protocol):
 
 ## Audio Devices
 
-Vox works best with a dedicated microphone. Bluetooth headsets have a fundamental limitation that affects voice coding:
+HeyVox works best with a dedicated microphone. Bluetooth headsets have a fundamental limitation that affects voice coding:
 
 | Device Type | Mic Quality | Playback Quality | Recommended |
 |-------------|-------------|------------------|-------------|
@@ -199,7 +202,7 @@ Vox works best with a dedicated microphone. Bluetooth headsets have a fundamenta
 
 ## Privacy
 
-Vox processes everything locally:
+HeyVox processes everything locally:
 - Wake word detection: openwakeword (on-device)
 - Speech-to-text: MLX Whisper or sherpa-onnx (on-device)
 - Text-to-speech: Kokoro (on-device)
