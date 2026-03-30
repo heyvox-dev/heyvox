@@ -13,7 +13,7 @@ keywords = [
     "ai-coding", "macos", "local", "privacy",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: MacOS X",
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
@@ -38,9 +38,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/heyvox/heyvox"
-Repository = "https://github.com/heyvox/heyvox"
-Issues = "https://github.com/heyvox/heyvox/issues"
+Homepage = "https://heyvox.dev"
+Repository = "https://github.com/heyvox-dev/heyvox"
+Issues = "https://github.com/heyvox-dev/heyvox/issues"
 
 [project.optional-dependencies]
 apple-silicon = [
