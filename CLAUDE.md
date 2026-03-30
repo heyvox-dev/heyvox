@@ -6,7 +6,7 @@
 - **context**: Personal product (lifestyle business, OSS core + Pro tier)
 - **tech**: Python, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, sherpa-onnx, Kokoro TTS, MCP SDK, pyaudio, launchd
 - **current_focus**: Decoupling from Conductor, initial project structure, v1 MVP
-- **keywords**: vox, voice, wake word, STT, TTS, speech, microphone, MCP, HUD, recording indicator, push-to-talk
+- **keywords**: heyvox, vox, voice, wake word, STT, TTS, speech, microphone, MCP, HUD, recording indicator, push-to-talk
 
 ## Existing Codebase
 
@@ -34,7 +34,7 @@ Key files:
 
 ### Target Module Structure
 ```
-vox/
+heyvox/
 ├── __init__.py
 ├── main.py              # Entry point, main event loop
 ├── audio/
@@ -57,18 +57,18 @@ vox/
 │   ├── conductor.py     # Conductor-specific adapter
 │   └── cursor.py        # Cursor-specific adapter
 ├── config.py            # YAML config loading
-└── cli.py               # CLI entry point (vox start/stop/status/setup)
+└── cli.py               # CLI entry point (heyvox start/stop/status/setup)
 ```
 
 ### IPC
-- Unix domain socket: `/tmp/vox-hud.sock`
+- Unix domain socket: `/tmp/heyvox-hud.sock`
 - JSON messages (state, audio_level, transcript, tts_*, queue_update, error)
-- File flag: `/tmp/vox-recording` (for TTS coordination)
+- File flag: `/tmp/heyvox-recording` (for TTS coordination)
 
 ## Key Architecture Decisions
 
 - **Hybrid voice model**: Voice IN = OS-level (wake word → STT → osascript), Voice OUT = MCP (`voice_speak`). Community-validated.
-- **MCP lean (4-5 tools) + CLI commands**: MCP for agent-initiated speech, CLI (`vox speak/skip/mute`) for hooks. Avoids MCP approval friction.
+- **MCP lean (4-5 tools) + CLI commands**: MCP for agent-initiated speech, CLI (`heyvox speak/skip/mute`) for hooks. Avoids MCP approval friction.
 - **Echo suppression**: Mute mic during TTS when no headset detected (speaker mode picks up TTS output).
 - **USB dongle support**: Must handle non-default audio devices properly (common Bluetooth bug workaround).
 - **TTS verbosity**: Configurable full/summary/short/skip, per-message override via MCP param.

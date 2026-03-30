@@ -156,7 +156,7 @@ Everything for single-user, single-agent voice input:
 - Recording indicator overlay
 - Audio cue feedback
 - Silence timeout + cancellation
-- CLI (`vox start|stop|restart|status|logs`)
+- CLI (`heyvox start|stop|restart|status|logs`)
 - YAML configuration
 - launchd service
 - Adapter interface for AI agents
@@ -234,11 +234,11 @@ Clone, pyenv, pip install, brew install portaudio, 3 permission grants, fn key s
 **Homebrew (OSS):**
 ```bash
 brew install vox-voice
-vox setup    # interactive guided setup
-vox start
+heyvox setup    # interactive guided setup
+heyvox start
 ```
 
-`vox setup` handles: portaudio, bundled Python, model download, permission deep-links with verification, fn key config, mic test, wake word test.
+`heyvox setup` handles: portaudio, bundled Python, model download, permission deep-links with verification, fn key config, mic test, wake word test.
 
 **Native .app (Pro):**
 `.dmg` → guided SwiftUI wizard → permissions with screenshots → model download → agent selection → menubar icon → done.
@@ -256,10 +256,10 @@ vox start
 | Recording indicator | Done | Remove bundle ID check |
 | Audio cues | Done | License check |
 | Silence timeout | Done | — |
-| CLI (rename to `vox`) | Done | Rename + add `vox setup` |
+| CLI (rename to `vox`) | Done | Rename + add `heyvox setup` |
 | YAML config | Done | Add adapter selection |
 | Homebrew formula | Not started | Write formula + tap |
-| `vox setup` installer | Not started | Interactive setup |
+| `heyvox setup` installer | Not started | Interactive setup |
 | 3 adapters | Not started | Conductor, Cursor, Generic |
 | README + landing page | Partial | Rewrite for public |
 
@@ -326,7 +326,7 @@ This is a **lifestyle business**, not a VC-scale startup.
 ## Go-to-Market
 
 1. **Weeks 1-2:** Clean up repo, decouple from Conductor, adapter protocol
-2. **Weeks 3-4:** Homebrew formula, `vox setup`, demo video
+2. **Weeks 3-4:** Homebrew formula, `heyvox setup`, demo video
 3. **Week 5:** Soft launch — Claude Code Discord, r/ClaudeAI, r/LocalLLaMA
 4. **Week 6:** Show HN with demo video
 5. **Weeks 7-8:** Iterate on feedback
@@ -387,13 +387,13 @@ Missing from `pyproject.toml`:
 
 **Phase 1: Make it not crash for non-Conductor users (1-2 days)**
 1. Make TTS script path configurable in config.yaml (or gracefully disable voice commands when missing)
-2. Rename IPC flag to `/tmp/vox-recording`
+2. Rename IPC flag to `/tmp/heyvox-recording`
 3. Change `target_app` default to empty (paste into focused app)
 4. Fix `recording_indicator.py` to accept `--bundle-id` arg, default to main screen
 
 **Phase 2: Rebrand (1 day)**
 5. Rename package in pyproject.toml
-6. Rename launchd label to `com.vox.listener`
+6. Rename launchd label to `com.heyvox.listener`
 7. Rename CLI from `ww` to chosen name
 8. Rename log files
 
@@ -429,7 +429,7 @@ wake_word_listener.py  (reads config, runs main loop)
     |---> recording_indicator.py  (subprocess, SIGKILL to stop)
     |---> afplay                  (audio cues)
     |---> osascript               (clipboard, keystroke, app focus)
-    |---> /tmp/vox-recording      (IPC flag to TTS process)
+    |---> /tmp/heyvox-recording      (IPC flag to TTS process)
     |---> tts-ctl.sh              (voice command actions — needs config path)
     |
     +-- openwakeword   (wake word)
@@ -695,7 +695,7 @@ All major clients support **Tools**. This is the universal interface.
 The LLM calls `voice_speak("I've finished the refactoring")` when it decides to speak. Natural — LLM sees the tool and uses it.
 
 **Pattern B: Hook-triggered TTS (works today)**
-Claude Code post-response hook calls `vox speak "summary"` via CLI. The hook triggers the MCP server.
+Claude Code post-response hook calls `heyvox speak "summary"` via CLI. The hook triggers the MCP server.
 
 **Pattern C: Voice input → user message (current approach stays)**
 Wake word → STT → osascript paste → text appears in chat. Bypasses MCP entirely. Works with ANY app.
@@ -854,7 +854,7 @@ Shadow:        0 2px 8px rgba(0, 0, 0, 0.3)
 - **Extend `recording_indicator.py`** — same NSWindow patterns, same permissions
 - **NSVisualEffectView** with `.hudWindow` material (enum value 13 in PyObjC)
 - **CATextLayer** for status text and transcription
-- **Unix domain socket** (`/tmp/vox-hud.sock`) for IPC
+- **Unix domain socket** (`/tmp/heyvox-hud.sock`) for IPC
 - **Window level:** `NSStatusWindowLevel + 1` (proven in existing code)
 - **Collection behavior:** `canJoinAllSpaces | fullScreenAuxiliary` (proven)
 - **No new macOS permissions required**

@@ -1,0 +1,817 @@
+"""
+HUD overlay process for Vox voice layer.
+
+Implements a frosted-glass pill window positioned at the top-right of the
+main screen (avoiding the macOS notch/camera area), communicating voice
+state visually.
+
+State machine:
+- idle:       compact gray pill (12x12), click-through, no content
+- listening:  expanded red pill (200x28), waveform amplitude bars
+- processing: expanded amber pill (200x28), "Transcribing..." label
+- speaking:   expanded green pill (200x28), text snippet + Skip/Stop buttons
+
+IPC: HUDServer receives JSON messages over /tmp/heyvox-hud.sock on a daemon
+thread and dispatches state changes to the main AppKit thread via
+performSelectorOnMainThread_withObject_waitUntilDone_.
+
+Requirements: HUD-01 through HUD-08
+"""
+
+import json
+import os
+import signal
+import sys
+
+
+# ---------------------------------------------------------------------------
+# Layout constants
+# ---------------------------------------------------------------------------
+
+PILL_W_IDLE = 90
+PILL_H_IDLE = 28
+PILL_W_ACTIVE = 90
+PILL_H_ACTIVE = 28
+PILL_MARGIN_TOP = 8
+PILL_MARGIN_RIGHT = 16  # Default distance from right edge of screen
+ANIM_DURATION = 0.2
+POSITION_FILE = "/tmp/heyvox-hud-position.json"  # Persists user-dragged position
+
+# State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
+STATE_COLORS = {
+    "idle":       (0.3, 0.3, 0.3, 0.7),
+    "listening":  (1.0, 0.2, 0.2, 0.8),
+    "processing": (1.0, 0.7, 0.0, 0.8),
+    "speaking":   (0.2, 0.8, 0.3, 0.8),
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _default_position(screen_frame, pill_w, pill_h):
+    """Return default (x, y) — top-right of screen, avoiding notch."""
+    x = screen_frame.origin.x + screen_frame.size.width - pill_w - PILL_MARGIN_RIGHT
+    y = screen_frame.origin.y + screen_frame.size.height - pill_h - PILL_MARGIN_TOP
+    return x, y
+
+
+def _load_position():
+    """Load user-dragged position from disk. Returns (x, y) or None."""
+    try:
+        with open(POSITION_FILE) as f:
+            data = json.load(f)
+        return float(data["x"]), float(data["y"])
+    except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _save_position(x, y):
+    """Persist user-dragged position to disk."""
+    try:
+        with open(POSITION_FILE, "w") as f:
+            json.dump({"x": x, "y": y}, f)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Custom NSView subclasses (defined inside main() to ensure AppKit is loaded)
+# ---------------------------------------------------------------------------
+
+def _make_waveform_view_class():
+    from AppKit import NSView, NSColor, NSBezierPath
+
+    _HISTORY_SIZE = 64  # ~3.2 seconds at 20fps
+
+    class WaveformView(NSView):
+        """Scrolling waveform — mirrored amplitude history, like Voice Memos.
+
+        Keeps a ring buffer of recent audio levels. New samples push in from
+        the right, old ones scroll left. Drawn as a mirrored filled area
+        around the vertical center, with a subtle gradient fade on older
+        samples.
+        """
+        _level = 0.0
+        _history = None  # Lazily initialized list of floats
+        _smoothed = 0.0  # Exponentially smoothed current level
+
+        def setLevel_(self, level):
+            level = max(0.0, min(1.0, level))
+            # Exponential smoothing: fast attack (0.6), slow release (0.15)
+            alpha = 0.6 if level > self._smoothed else 0.15
+            self._smoothed = alpha * level + (1.0 - alpha) * self._smoothed
+            if self._history is None:
+                self._history = [0.0] * _HISTORY_SIZE
+            self._history.append(self._smoothed)
+            if len(self._history) > _HISTORY_SIZE:
+                self._history.pop(0)
+            self.setNeedsDisplay_(True)
+
+        def drawRect_(self, rect):
+            if self._history is None:
+                return
+
+            history = self._history
+            n = len(history)
+            if n == 0:
+                return
+
+            w = rect.size.width
+            h = rect.size.height
+            ox = rect.origin.x
+            oy = rect.origin.y
+            cy = oy + h / 2.0  # vertical center
+            step = w / max(1, n - 1)
+            min_amp = h * 0.04  # minimum visible amplitude
+
+            # Draw mirrored filled waveform
+            top_path = NSBezierPath.bezierPath()
+            bot_path = NSBezierPath.bezierPath()
+            top_path.moveToPoint_((ox, cy))
+            bot_path.moveToPoint_((ox, cy))
+
+            for i, val in enumerate(history):
+                x = ox + i * step
+                amp = max(min_amp, val * (h / 2.0) * 0.9)
+                top_path.lineToPoint_((x, cy + amp))
+                bot_path.lineToPoint_((x, cy - amp))
+
+            # Close paths back to center
+            top_path.lineToPoint_((ox + (n - 1) * step, cy))
+            top_path.lineToPoint_((ox, cy))
+            bot_path.lineToPoint_((ox + (n - 1) * step, cy))
+            bot_path.lineToPoint_((ox, cy))
+
+            # Fill with white, higher opacity on recent samples
+            NSColor.whiteColor().colorWithAlphaComponent_(0.85).setFill()
+            top_path.fill()
+            bot_path.fill()
+
+            # Thin center line
+            NSColor.whiteColor().colorWithAlphaComponent_(0.3).setStroke()
+            center_line = NSBezierPath.bezierPath()
+            center_line.moveToPoint_((ox, cy))
+            center_line.lineToPoint_((ox + w, cy))
+            center_line.setLineWidth_(0.5)
+            center_line.stroke()
+
+    return WaveformView
+
+
+def _make_content_view_class():
+    """Create HUDContentView — draggable background, buttons respond."""
+    from AppKit import NSView
+    import objc
+
+    class HUDContentView(NSView):
+        """Content view that supports dragging and click-to-menu.
+
+        Dragging the background moves the window and saves the position.
+        Clicking without drag shows the transcript dropdown menu.
+        Clicking on button subviews works normally (TTS controls).
+
+        Requirement: HUD-04
+        """
+        _drag_origin = None
+        _drag_started = False
+        _menu_callback = None  # Set from main() — callable(event)
+
+        def mouseDown_(self, event):
+            self._drag_origin = event.locationInWindow()
+            self._drag_started = False
+
+        def mouseDragged_(self, event):
+            if self._drag_origin is None:
+                return
+            self._drag_started = True
+            win = self.window()
+            if win is None:
+                return
+            screen_loc = event.locationInWindow()
+            frame = win.frame()
+            dx = screen_loc.x - self._drag_origin.x
+            dy = screen_loc.y - self._drag_origin.y
+            new_x = frame.origin.x + dx
+            new_y = frame.origin.y + dy
+            win.setFrameOrigin_((new_x, new_y))
+
+        def mouseUp_(self, event):
+            if not self._drag_started and self._menu_callback:
+                self._menu_callback(event)
+            elif self._drag_started:
+                win = self.window()
+                if win:
+                    _save_position(win.frame().origin.x, win.frame().origin.y)
+            self._drag_origin = None
+            self._drag_started = False
+
+        def hitTest_(self, point):
+            hit = objc.super(HUDContentView, self).hitTest_(point)
+            if hit is self:
+                return self   # Background captures mouse for dragging
+            return hit        # Subviews (buttons) respond normally
+
+    return HUDContentView
+
+
+# ---------------------------------------------------------------------------
+# State application
+# ---------------------------------------------------------------------------
+
+def _apply_state(
+    state_str,
+    window,
+    content_view,
+    waveform_view,
+    transcript_label,
+    tts_controls,
+    color_overlay,
+    idle_label=None,
+    tts_text=None,
+):
+    """Apply HUD visual state on the main thread.
+
+    Requirements: HUD-01 (pill), HUD-02 (waveform), HUD-03 (transcript),
+                  HUD-04 (TTS controls), HUD-05 (colors)
+    """
+    from AppKit import NSAnimationContext, NSColor, NSScreen
+
+    r, g, b, a = STATE_COLORS.get(state_str, STATE_COLORS["idle"])
+    color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
+    color_overlay.setBackgroundColor_(color)
+    color_overlay.setNeedsDisplay_(True)
+
+    screen = NSScreen.mainScreen().frame()
+    is_active = state_str in ("listening", "processing", "speaking")
+
+    # Determine pill size — idle = small circle, active = expanded pill
+    if is_active:
+        new_pill_w = PILL_W_ACTIVE
+        new_pill_h = PILL_H_ACTIVE
+    else:
+        new_pill_w = PILL_W_IDLE
+        new_pill_h = PILL_H_IDLE
+
+    # Use saved position if user dragged the window, else default top-right
+    saved = _load_position()
+    if saved:
+        x, y = saved
+    else:
+        x, y = _default_position(screen, new_pill_w, new_pill_h)
+
+    # Show window if it was hidden
+    if not window.isVisible():
+        window.orderFrontRegardless()
+
+    # Animate window frame
+    NSAnimationContext.beginGrouping()
+    NSAnimationContext.currentContext().setDuration_(ANIM_DURATION)
+    window.animator().setFrame_display_(((x, y), (new_pill_w, new_pill_h)), True)
+    NSAnimationContext.endGrouping()
+
+    # Update subview frames to match new pill size
+    content_view.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+    color_overlay.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+
+    # Update corner radius for pill shape (circle when idle)
+    ve = window.contentView()
+    if ve and ve.layer():
+        ve.layer().setCornerRadius_(new_pill_h / 2)
+    if color_overlay.layer():
+        color_overlay.layer().setCornerRadius_(new_pill_h / 2)
+
+    # Hide all content subviews for idle, show idle label
+    if not is_active:
+        waveform_view.setHidden_(True)
+        transcript_label.setHidden_(True)
+        skip_btn, stop_btn = tts_controls
+        skip_btn.setHidden_(True)
+        stop_btn.setHidden_(True)
+        if idle_label is not None:
+            idle_label.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+            idle_label.setHidden_(False)
+        # Clickable in all states (idle = dropdown menu, active = drag + buttons)
+        window.setIgnoresMouseEvents_(False)
+        return
+
+    # Hide idle label during active states
+    if idle_label is not None:
+        idle_label.setHidden_(True)
+
+    # Waveform (visible only when listening)
+    wf_visible = state_str == "listening"
+    waveform_view.setHidden_(not wf_visible)
+
+    # Transcript label
+    label_visible = state_str in ("processing", "speaking")
+    transcript_label.setHidden_(not label_visible)
+    if state_str == "processing":
+        transcript_label.setStringValue_("Transcribing...")
+    elif state_str == "speaking" and tts_text:
+        snippet = tts_text[:40] + "..." if len(tts_text) > 40 else tts_text
+        transcript_label.setStringValue_(snippet)
+
+    # TTS controls
+    skip_btn, stop_btn = tts_controls
+    tts_visible = state_str == "speaking"
+    skip_btn.setHidden_(not tts_visible)
+    stop_btn.setHidden_(not tts_visible)
+
+    # Clickable in all states
+    window.setIgnoresMouseEvents_(False)
+
+
+# ---------------------------------------------------------------------------
+# NSObject dispatcher for thread-safe UI updates
+# ---------------------------------------------------------------------------
+
+def _make_dispatcher_class(window, content_view, waveform_view, transcript_label, tts_controls, color_overlay, idle_label=None):
+    """Build a _Dispatcher NSObject that applies incoming IPC messages."""
+    from Foundation import NSObject
+
+    class _Dispatcher(NSObject):
+        """Receives messages from the HUD socket server on the main thread.
+
+        Called via performSelectorOnMainThread_withObject_waitUntilDone_.
+        All AppKit mutations happen here, safely on the main thread.
+
+        Requirement: HUD-08
+        """
+
+        def applyMessage_(self, msg_dict):
+            msg_type = msg_dict.get("type", "")
+
+            if msg_type == "state":
+                state = msg_dict.get("state", "idle")
+                _apply_state(
+                    state, window, content_view,
+                    waveform_view, transcript_label, tts_controls, color_overlay,
+                    idle_label=idle_label,
+                )
+
+            elif msg_type == "audio_level":
+                level = msg_dict.get("level", 0.0)
+                waveform_view.setLevel_(level)
+
+            elif msg_type == "transcript":
+                text = msg_dict.get("text", "")
+                transcript_label.setStringValue_(text)
+                transcript_label.setHidden_(False)
+
+            elif msg_type == "tts_start":
+                text = msg_dict.get("text", "")
+                _apply_state(
+                    "speaking", window, content_view,
+                    waveform_view, transcript_label, tts_controls, color_overlay,
+                    idle_label=idle_label, tts_text=text,
+                )
+
+            elif msg_type == "tts_end":
+                _apply_state(
+                    "idle", window, content_view,
+                    waveform_view, transcript_label, tts_controls, color_overlay,
+                    idle_label=idle_label,
+                )
+
+            elif msg_type == "queue_update":
+                pass  # v1: ignore; future: show badge count
+
+            elif msg_type == "error":
+                print(f"[HUD] Error from client: {msg_dict.get('message', '')}", file=sys.stderr)
+
+    return _Dispatcher
+
+
+# ---------------------------------------------------------------------------
+# TTS button action handler
+# ---------------------------------------------------------------------------
+
+def _make_tts_action_class():
+    from Foundation import NSObject
+
+    class _TTSActionHandler(NSObject):
+        """Writes TTS control commands to the command file."""
+
+        def skipTTS_(self, sender):
+            _write_tts_cmd("skip")
+
+        def stopTTS_(self, sender):
+            _write_tts_cmd("stop")
+
+    return _TTSActionHandler
+
+
+def _write_tts_cmd(cmd: str) -> None:
+    """Write a TTS command to the command file (same IPC as CLI heyvox skip/stop)."""
+    try:
+        # Import inside handler to avoid top-level vox import failure
+        # when running overlay.py standalone without full vox package.
+        from heyvox.constants import TTS_CMD_FILE
+        cmd_path = TTS_CMD_FILE
+    except ImportError:
+        cmd_path = "/tmp/heyvox-tts-cmd"
+    try:
+        with open(cmd_path, "w") as f:
+            f.write(cmd)
+    except OSError as e:
+        print(f"[HUD] Failed to write TTS command '{cmd}': {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Transcript dropdown menu
+# ---------------------------------------------------------------------------
+
+def _make_menu_action_class():
+    """NSObject handler for transcript menu item actions."""
+    from Foundation import NSObject
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    _TTS_MUTE_FLAG = "/tmp/claude-tts-mute"
+
+    class _MenuActionHandler(NSObject):
+        def copyTranscript_(self, sender):
+            text = sender.representedObject()
+            if text:
+                pb = NSPasteboard.generalPasteboard()
+                pb.clearContents()
+                pb.setString_forType_(text, NSPasteboardTypeString)
+
+        def toggleMute_(self, sender):
+            import os
+            if os.path.exists(_TTS_MUTE_FLAG):
+                os.unlink(_TTS_MUTE_FLAG)
+            else:
+                with open(_TTS_MUTE_FLAG, "w") as f:
+                    f.write("")
+
+        def openLog_(self, sender):
+            import subprocess
+            subprocess.Popen(["open", "-a", "Console", "/tmp/vox.log"])
+
+        def openConfig_(self, sender):
+            import subprocess
+            cfg = os.path.expanduser("~/.config/heyvox/config.yaml")
+            if os.path.exists(cfg):
+                subprocess.Popen(["open", cfg])
+
+        def openHelp_(self, sender):
+            import webbrowser
+            webbrowser.open("https://heyvox.dev")
+
+        def quitHeyVox_(self, sender):
+            """Send SIGTERM to parent heyvox.main process, then quit overlay."""
+            import subprocess
+            subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+            from AppKit import NSApplication
+            NSApplication.sharedApplication().terminate_(None)
+
+    return _MenuActionHandler
+
+
+def _build_transcript_menu(handler):
+    """Build an NSMenu with recent transcripts, toggles, and info.
+
+    Sections:
+    1. Recent transcripts (click to copy, hover for full text)
+    2. Quick toggles (Mute TTS)
+    3. Info & actions (version, help, open log, quit)
+
+    Args:
+        handler: An instance of _MenuActionHandler for action targets.
+    """
+    from AppKit import NSMenu, NSMenuItem
+
+    menu = NSMenu.alloc().init()
+    menu.setAutoenablesItems_(False)
+
+    # -- Section 1: Recent transcripts --
+    header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Recent Transcripts", None, "",
+    )
+    header.setEnabled_(False)
+    menu.addItem_(header)
+
+    try:
+        from heyvox.history import load as _load_history
+        entries = _load_history(limit=5)
+    except Exception:
+        entries = []
+
+    if not entries:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "  No transcripts yet", None, "",
+        )
+        item.setEnabled_(False)
+        menu.addItem_(item)
+    else:
+        for entry in entries:
+            text = entry.get("text", "")
+            ts = entry.get("ts", "?")
+            # Show time (HH:MM) + truncated text
+            time_part = ts[-8:-3] if len(ts) >= 8 else ts  # "HH:MM"
+            display = text[:40] + "..." if len(text) > 40 else text
+            title = f"  {time_part}  {display}"
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, "copyTranscript:", "",
+            )
+            item.setTarget_(handler)
+            item.setRepresentedObject_(text)  # Full text for clipboard
+            item.setToolTip_(text)  # Full text on hover
+            item.setEnabled_(True)
+            menu.addItem_(item)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    # -- Section 2: Quick toggles --
+    is_muted = os.path.exists("/tmp/claude-tts-mute")
+    mute_title = "Unmute TTS" if is_muted else "Mute TTS"
+    mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        mute_title, "toggleMute:", "",
+    )
+    mute_item.setTarget_(handler)
+    mute_item.setEnabled_(True)
+    if is_muted:
+        mute_item.setState_(1)  # NSOnState — checkmark
+    menu.addItem_(mute_item)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    # -- Section 3: Info & actions --
+    try:
+        from heyvox import __version__
+        ver = __version__
+    except Exception:
+        ver = "0.1.0"
+    version_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"HeyVox v{ver}", None, "",
+    )
+    version_item.setEnabled_(False)
+    menu.addItem_(version_item)
+
+    help_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Help", "openHelp:", "",
+    )
+    help_item.setTarget_(handler)
+    help_item.setEnabled_(True)
+    menu.addItem_(help_item)
+
+    log_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Open Log", "openLog:", "",
+    )
+    log_item.setTarget_(handler)
+    log_item.setEnabled_(True)
+    menu.addItem_(log_item)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Quit HeyVox", "quitHeyVox:", "",
+    )
+    quit_item.setTarget_(handler)
+    quit_item.setEnabled_(True)
+    menu.addItem_(quit_item)
+
+    return menu
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    """Launch the HUD overlay NSApplication.
+
+    Builds the frosted-glass pill window, starts the HUDServer on a daemon
+    thread, installs SIGTERM/SIGINT handlers, and runs the AppKit event loop.
+
+    Requirements: HUD-01 through HUD-08
+    """
+    # ---- AppKit imports (lazy — must be inside main() for standalone use) ----
+    from AppKit import (
+        NSApplication, NSWindow, NSColor, NSView,
+        NSWindowStyleMaskBorderless, NSScreen, NSBackingStoreBuffered,
+        NSStatusWindowLevel, NSVisualEffectView,
+        NSTextField, NSButton,
+        NSTextAlignmentCenter, NSAnimationContext,
+        NSWindowCollectionBehaviorCanJoinAllSpaces,
+        NSWindowCollectionBehaviorFullScreenAuxiliary,
+        NSWindowCollectionBehaviorStationary,
+        NSWindowCollectionBehaviorIgnoresCycle,
+    )
+    from Foundation import NSObject, NSTimer, NSMakeRect
+
+    try:
+        from AppKit import NSVisualEffectMaterialHUDWindow as HUD_MATERIAL
+    except ImportError:
+        HUD_MATERIAL = 23  # Raw enum value, stable since macOS 10.11
+
+    from heyvox.hud.ipc import HUDServer, DEFAULT_SOCKET_PATH
+
+    # ---- Application setup ----
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(2)  # NSApplicationActivationPolicyProhibited — no dock icon
+
+    # ---- Screen layout ----
+    screen = NSScreen.mainScreen().frame()
+    saved = _load_position()
+    if saved:
+        x, y = saved
+    else:
+        x, y = _default_position(screen, PILL_W_ACTIVE, PILL_H_ACTIVE)
+
+    # ---- NSWindow (borderless, status level, transparent) ----
+    # Starts hidden (idle) — shown on first active state
+    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((x, y), (PILL_W_ACTIVE, PILL_H_ACTIVE)),
+        NSWindowStyleMaskBorderless,
+        NSBackingStoreBuffered,
+        False,
+    )
+    window.setLevel_(NSStatusWindowLevel + 1)
+    window.setOpaque_(False)
+    window.setBackgroundColor_(NSColor.clearColor())
+    window.setIgnoresMouseEvents_(True)  # Click-through by default (idle state)
+
+    # All Spaces + fullscreen apps (HUD-07)
+    window.setCollectionBehavior_(
+        NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorStationary |
+        NSWindowCollectionBehaviorIgnoresCycle
+    )
+
+    # ---- Frosted glass (NSVisualEffectView as content view) — HUD-06 ----
+    ve = NSVisualEffectView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    ve.setMaterial_(HUD_MATERIAL)
+    ve.setBlendingMode_(0)   # NSVisualEffectBlendingModeBehindWindow
+    ve.setState_(1)          # NSVisualEffectStateActive
+    ve.setWantsLayer_(True)
+    ve.layer().setCornerRadius_(PILL_H_ACTIVE / 2)  # pill shape (HUD-06)
+    ve.layer().setMasksToBounds_(True)
+    window.setContentView_(ve)
+
+    # ---- Color overlay (semi-transparent tint for state colors) ----
+    WaveformView = _make_waveform_view_class()
+    HUDContentView = _make_content_view_class()
+
+    color_overlay = NSView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    r, g, b, a = STATE_COLORS["idle"]
+    color_overlay.setWantsLayer_(True)
+    color_overlay.layer().setCornerRadius_(PILL_H_ACTIVE / 2)
+    color_overlay.layer().setMasksToBounds_(True)
+    idle_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 0.3)
+    color_overlay.setBackgroundColor_(idle_color)
+    ve.addSubview_(color_overlay)
+
+    # ---- HUDContentView (selective hit-testing for mixed click-through) ----
+    content_view = HUDContentView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    ve.addSubview_(content_view)
+
+    # ---- Waveform view — HUD-02 ----
+    # Sized for active state — hidden when idle
+    wf_margin = 4
+    wf_w = PILL_W_ACTIVE - wf_margin * 2 - 40  # leave room for buttons
+    wf_h = PILL_H_ACTIVE - 4
+    wf_x = wf_margin
+    wf_y = (PILL_H_ACTIVE - wf_h) / 2
+    waveform_view = WaveformView.alloc().initWithFrame_(((wf_x, wf_y), (wf_w, wf_h)))
+    waveform_view.setHidden_(True)
+    content_view.addSubview_(waveform_view)
+
+    # ---- Transcript label — HUD-03 ----
+    label_margin = 4
+    label_w = PILL_W_ACTIVE - label_margin * 2 - 40
+    label_h = PILL_H_ACTIVE - 2
+    label_y = (PILL_H_ACTIVE - label_h) / 2
+    transcript_label = NSTextField.alloc().initWithFrame_(
+        ((label_margin, label_y), (label_w, label_h))
+    )
+    transcript_label.setEditable_(False)
+    transcript_label.setSelectable_(False)
+    transcript_label.setDrawsBackground_(False)
+    transcript_label.setBezeled_(False)
+    transcript_label.setTextColor_(NSColor.whiteColor())
+    transcript_label.setFont_(
+        __import__("AppKit", fromlist=["NSFont"]).NSFont.boldSystemFontOfSize_(11)
+    )
+    transcript_label.setAlignment_(NSTextAlignmentCenter)
+    transcript_label.setStringValue_("")
+    transcript_label.setHidden_(True)
+    content_view.addSubview_(transcript_label)
+
+    # ---- Idle label ("Vox" text shown in idle pill) ----
+    NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
+    idle_label = NSTextField.alloc().initWithFrame_(((0, 0), (PILL_W_IDLE, PILL_H_IDLE)))
+    idle_label.setEditable_(False)
+    idle_label.setSelectable_(False)
+    idle_label.setDrawsBackground_(False)
+    idle_label.setBezeled_(False)
+    idle_label.setTextColor_(NSColor.whiteColor())
+    idle_label.setFont_(NSFont.boldSystemFontOfSize_(12))
+    idle_label.setAlignment_(NSTextAlignmentCenter)
+    idle_label.setStringValue_("🎙 Vox")
+    idle_label.setHidden_(True)  # Shown only in idle state
+    content_view.addSubview_(idle_label)
+
+    # ---- TTS control buttons — HUD-04 ----
+    TTSActionHandler = _make_tts_action_class()
+    tts_handler = TTSActionHandler.alloc().init()
+
+    btn_w = 22
+    btn_h = 14
+    btn_y = (PILL_H_ACTIVE - btn_h) / 2
+    btn_gap = 1
+    btn_margin_right = 4
+    stop_x = PILL_W_ACTIVE - btn_margin_right - btn_w
+    skip_x = stop_x - btn_gap - btn_w
+
+    skip_btn = NSButton.alloc().initWithFrame_(((skip_x, btn_y), (btn_w, btn_h)))
+    skip_btn.setTitle_("Skip")
+    skip_btn.setBezelStyle_(0)   # NSBezelStyleSmallSquare / bezel-less
+    skip_btn.setBordered_(False)
+    skip_btn.setFont_(
+        __import__("AppKit", fromlist=["NSFont"]).NSFont.systemFontOfSize_(7)
+    )
+    skip_btn.setTarget_(tts_handler)
+    skip_btn.setAction_("skipTTS:")
+    skip_btn.setHidden_(True)
+
+    stop_btn = NSButton.alloc().initWithFrame_(((stop_x, btn_y), (btn_w, btn_h)))
+    stop_btn.setTitle_("Stop")
+    stop_btn.setBezelStyle_(0)
+    stop_btn.setBordered_(False)
+    stop_btn.setFont_(
+        __import__("AppKit", fromlist=["NSFont"]).NSFont.systemFontOfSize_(7)
+    )
+    stop_btn.setTarget_(tts_handler)
+    stop_btn.setAction_("stopTTS:")
+    stop_btn.setHidden_(True)
+
+    content_view.addSubview_(skip_btn)
+    content_view.addSubview_(stop_btn)
+
+    tts_controls = (skip_btn, stop_btn)
+
+    # ---- Transcript dropdown menu ----
+    MenuActionHandler = _make_menu_action_class()
+    menu_handler = MenuActionHandler.alloc().init()
+
+    def _show_dropdown(event):
+        menu = _build_transcript_menu(menu_handler)
+        loc_in_view = content_view.convertPoint_fromView_(
+            event.locationInWindow(), None,
+        )
+        menu.popUpMenuPositioningItem_atLocation_inView_(
+            None, loc_in_view, content_view,
+        )
+
+    content_view._menu_callback = _show_dropdown
+
+    # ---- Dispatcher (thread-safe UI updates) ----
+    DispatcherClass = _make_dispatcher_class(
+        window, content_view, waveform_view, transcript_label, tts_controls, color_overlay,
+        idle_label=idle_label,
+    )
+    dispatcher = DispatcherClass.alloc().init()
+
+    # ---- HUD IPC server ----
+    def on_message(msg: dict) -> None:
+        """Called on background socket thread — dispatch to main thread."""
+        dispatcher.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyMessage:", msg, False
+        )
+
+    hud_server = HUDServer(path=DEFAULT_SOCKET_PATH, on_message=on_message)
+    hud_server.start()
+
+    # ---- Show idle pill on startup (labeled pill, clickable for dropdown) ----
+    _apply_state(
+        "idle", window, content_view, waveform_view,
+        transcript_label, tts_controls, color_overlay,
+        idle_label=idle_label,
+    )
+
+    # ---- SIGTERM / SIGINT handler (NSTimer pattern — proven in codebase) ----
+    class Terminator(NSObject):
+        def terminate_(self, timer):
+            hud_server.shutdown()
+            app.terminate_(None)
+
+    terminator = Terminator.alloc().init()
+
+    def handle_signal(signum, frame):
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.0, terminator, "terminate:", None, False
+        )
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    # ---- Run loop ----
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
