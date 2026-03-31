@@ -67,11 +67,22 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             _log(f"  [{index}] {name}: error - {e}")
             return False
 
-    for prio_name in mic_priority:
+    for rank, prio_name in enumerate(mic_priority):
         for index, dev_name in devices_by_priority[prio_name]:
             _log(f"Testing {dev_name}...")
             if test_mic(index, dev_name):
                 return index
+            # First-priority device: accept even at zero level if stream opened OK.
+            # This supports virtual devices (BlackHole) that have no ambient audio.
+            if rank == 0:
+                try:
+                    s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
+                                input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                    s.close()
+                    _log(f"  [{index}] {dev_name}: no audio but stream OK (first priority), accepting")
+                    return index
+                except Exception:
+                    pass
 
     for index, dev_name in other_devices:
         _log(f"Testing fallback {dev_name}...")

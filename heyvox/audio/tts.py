@@ -318,7 +318,6 @@ def _tts_worker(voice_default: str, speed_default: float, volume_boost: int, duc
         # Clear stop flag for this new item
         _stop_event.clear()
 
-        original_volume = _get_system_volume()
         media_was_paused = False
 
         try:
@@ -328,15 +327,6 @@ def _tts_worker(voice_default: str, speed_default: float, volume_boost: int, duc
             if pause_media:
                 from heyvox.audio.media import pause_media as _pause_media
                 media_was_paused = _pause_media()
-
-            # Audio ducking: reduce system volume during TTS playback (TTS-04)
-            if ducking_percent > 0 and ducking_percent < 100:
-                ducked = max(0, int(original_volume * ducking_percent / 100))
-                _set_system_volume(ducked)
-
-            # Set boosted TTS playback volume
-            boosted = min(100, original_volume + volume_boost)
-            _set_system_volume(boosted)
 
             # Synthesize and play in chunks
             pipeline = _get_pipeline()
@@ -368,7 +358,6 @@ def _tts_worker(voice_default: str, speed_default: float, volume_boost: int, duc
             log.exception("TTS playback error")
         finally:
             _last_tts_end = time.time()
-            _set_system_volume(original_volume)
             _set_tts_flag(False)
             # Resume system media after grace period (don't jolt the user)
             if media_was_paused:

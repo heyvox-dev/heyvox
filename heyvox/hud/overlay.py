@@ -28,8 +28,8 @@ import sys
 # Layout constants
 # ---------------------------------------------------------------------------
 
-PILL_W_IDLE = 90
-PILL_H_IDLE = 28
+PILL_W_IDLE = 100
+PILL_H_IDLE = 34
 PILL_W_ACTIVE = 90
 PILL_H_ACTIVE = 28
 PILL_MARGIN_TOP = 8
@@ -39,7 +39,7 @@ POSITION_FILE = "/tmp/heyvox-hud-position.json"  # Persists user-dragged positio
 
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
 STATE_COLORS = {
-    "idle":       (0.3, 0.3, 0.3, 0.7),
+    "idle":       (0.72, 0.53, 0.04, 0.75),  # Starfleet gold
     "listening":  (1.0, 0.2, 0.2, 0.8),
     "processing": (1.0, 0.7, 0.0, 0.8),
     "speaking":   (0.2, 0.8, 0.3, 0.8),
@@ -79,6 +79,65 @@ def _save_position(x, y):
 # ---------------------------------------------------------------------------
 # Custom NSView subclasses (defined inside main() to ensure AppKit is loaded)
 # ---------------------------------------------------------------------------
+
+def _make_comm_badge_view_class():
+    """Create an NSView subclass that draws the TNG Starfleet communicator badge."""
+    from AppKit import NSView, NSColor, NSBezierPath, NSFont, NSFontAttributeName, \
+        NSForegroundColorAttributeName, NSParagraphStyleAttributeName
+    from Foundation import NSMakeRect, NSDictionary, NSAttributedString
+    import AppKit
+
+    class CommBadgeView(NSView):
+        def drawRect_(self, rect):
+            w = rect.size.width
+            h = rect.size.height
+            cx = w / 2 - 10  # shift badge left to make room for "Vox"
+            cy = h / 2
+
+            # -- Background oval --
+            oval_w = 26
+            oval_h = 22
+            oval_rect = NSMakeRect(cx - oval_w/2, cy - oval_h/2, oval_w, oval_h)
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.45, 0.35, 0.05, 0.5).set()
+            NSBezierPath.bezierPathWithOvalInRect_(oval_rect).fill()
+
+            # -- "V" chevron (our brand mark) --
+            v = NSBezierPath.bezierPath()
+            v.setLineWidth_(2.5)
+            # Left arm of V
+            v.moveToPoint_((cx - 7, cy + 8))
+            v.lineToPoint_((cx, cy - 5))
+            # Right arm of V
+            v.lineToPoint_((cx + 7, cy + 8))
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.78, 0.15, 1.0).set()
+            v.stroke()
+
+            # -- Small sound wave arcs (right side of V) --
+            for i, radius in enumerate([4, 7]):
+                arc = NSBezierPath.bezierPath()
+                arc.setLineWidth_(1.5)
+                # Quarter arc from ~30° to ~-30° (rightward sound waves)
+                arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+                    (cx + 3, cy + 1), radius, 40, -40, True
+                )
+                alpha = 0.7 - i * 0.25
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.78, 0.15, alpha).set()
+                arc.stroke()
+
+            # -- "ox" text to complete "Vox" --
+            font = NSFont.boldSystemFontOfSize_(12)
+            style = AppKit.NSMutableParagraphStyle.alloc().init()
+            style.setAlignment_(AppKit.NSTextAlignmentLeft)
+            attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+                [font, NSColor.whiteColor(), style],
+                [NSFontAttributeName, NSForegroundColorAttributeName,
+                 NSParagraphStyleAttributeName],
+            )
+            text = NSAttributedString.alloc().initWithString_attributes_("ox", attrs)
+            text.drawAtPoint_((cx + oval_w/2 + 2, cy - 8))
+
+    return CommBadgeView
+
 
 def _make_waveform_view_class():
     from AppKit import NSView, NSColor, NSBezierPath
@@ -230,6 +289,8 @@ def _apply_state(
     color_overlay,
     idle_label=None,
     tts_text=None,
+    status_item=None,
+    update_status_menu=None,
 ):
     """Apply HUD visual state on the main thread.
 
@@ -237,6 +298,20 @@ def _apply_state(
                   HUD-04 (TTS controls), HUD-05 (colors)
     """
     from AppKit import NSAnimationContext, NSColor, NSScreen
+
+    # Update menu bar status icon + label
+    _STATUS_LABELS = {
+        "idle":       ("\U0001f399", ""),                # 🎙 (icon only)
+        "listening":  ("\U0001f534", " Recording..."),   # 🔴 Recording...
+        "processing": ("\U0001f7e1", " Transcribing..."),# 🟡 Transcribing...
+        "speaking":   ("\U0001f7e2", " Speaking..."),    # 🟢 Speaking...
+    }
+    if status_item is not None:
+        icon, label = _STATUS_LABELS.get(state_str, _STATUS_LABELS["idle"])
+        status_item.button().setTitle_(f"{icon}{label}")
+        # Refresh menu on state change (updates transcript list, mute state)
+        if update_status_menu is not None:
+            update_status_menu()
 
     r, g, b, a = STATE_COLORS.get(state_str, STATE_COLORS["idle"])
     color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
@@ -246,54 +321,39 @@ def _apply_state(
     screen = NSScreen.mainScreen().frame()
     is_active = state_str in ("listening", "processing", "speaking")
 
-    # Determine pill size — idle = small circle, active = expanded pill
-    if is_active:
+    # Floating pill: only visible during active states (recording/processing/speaking)
+    # When idle, the menu bar icon is sufficient — no need for floating window.
+    if not is_active:
+        window.orderOut_(None)
+    else:
         new_pill_w = PILL_W_ACTIVE
         new_pill_h = PILL_H_ACTIVE
-    else:
-        new_pill_w = PILL_W_IDLE
-        new_pill_h = PILL_H_IDLE
 
-    # Use saved position if user dragged the window, else default top-right
-    saved = _load_position()
-    if saved:
-        x, y = saved
-    else:
-        x, y = _default_position(screen, new_pill_w, new_pill_h)
+        saved = _load_position()
+        if saved:
+            x, y = saved
+        else:
+            x, y = _default_position(screen, new_pill_w, new_pill_h)
 
-    # Show window if it was hidden
-    if not window.isVisible():
-        window.orderFrontRegardless()
+        if not window.isVisible():
+            window.orderFrontRegardless()
 
-    # Animate window frame
-    NSAnimationContext.beginGrouping()
-    NSAnimationContext.currentContext().setDuration_(ANIM_DURATION)
-    window.animator().setFrame_display_(((x, y), (new_pill_w, new_pill_h)), True)
-    NSAnimationContext.endGrouping()
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.currentContext().setDuration_(ANIM_DURATION)
+        window.animator().setFrame_display_(((x, y), (new_pill_w, new_pill_h)), True)
+        NSAnimationContext.endGrouping()
 
-    # Update subview frames to match new pill size
-    content_view.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
-    color_overlay.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+        content_view.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+        color_overlay.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
 
-    # Update corner radius for pill shape (circle when idle)
-    ve = window.contentView()
-    if ve and ve.layer():
-        ve.layer().setCornerRadius_(new_pill_h / 2)
-    if color_overlay.layer():
-        color_overlay.layer().setCornerRadius_(new_pill_h / 2)
+        ve = window.contentView()
+        if ve and ve.layer():
+            ve.layer().setCornerRadius_(new_pill_h / 2)
+        if color_overlay.layer():
+            color_overlay.layer().setCornerRadius_(new_pill_h / 2)
 
-    # Hide all content subviews for idle, show idle label
+    # Idle: floating window is hidden, menu bar icon handles everything
     if not is_active:
-        waveform_view.setHidden_(True)
-        transcript_label.setHidden_(True)
-        skip_btn, stop_btn = tts_controls
-        skip_btn.setHidden_(True)
-        stop_btn.setHidden_(True)
-        if idle_label is not None:
-            idle_label.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
-            idle_label.setHidden_(False)
-        # Clickable in all states (idle = dropdown menu, active = drag + buttons)
-        window.setIgnoresMouseEvents_(False)
         return
 
     # Hide idle label during active states
@@ -327,7 +387,7 @@ def _apply_state(
 # NSObject dispatcher for thread-safe UI updates
 # ---------------------------------------------------------------------------
 
-def _make_dispatcher_class(window, content_view, waveform_view, transcript_label, tts_controls, color_overlay, idle_label=None):
+def _make_dispatcher_class(window, content_view, waveform_view, transcript_label, tts_controls, color_overlay, idle_label=None, status_item=None, update_status_menu=None):
     """Build a _Dispatcher NSObject that applies incoming IPC messages."""
     from Foundation import NSObject
 
@@ -349,6 +409,8 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                     state, window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
                     idle_label=idle_label,
+                    status_item=status_item,
+                    update_status_menu=update_status_menu,
                 )
 
             elif msg_type == "audio_level":
@@ -366,6 +428,7 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                     "speaking", window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
                     idle_label=idle_label, tts_text=text,
+                    status_item=status_item, update_status_menu=update_status_menu,
                 )
 
             elif msg_type == "tts_end":
@@ -373,6 +436,7 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                     "idle", window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
                     idle_label=idle_label,
+                    status_item=status_item, update_status_menu=update_status_menu,
                 )
 
             elif msg_type == "queue_update":
@@ -481,16 +545,27 @@ def _build_transcript_menu(handler):
     Args:
         handler: An instance of _MenuActionHandler for action targets.
     """
-    from AppKit import NSMenu, NSMenuItem
+    from AppKit import NSMenu, NSMenuItem, NSFont, NSAttributedString
+    from Foundation import NSDictionary
 
     menu = NSMenu.alloc().init()
     menu.setAutoenablesItems_(False)
+    menu.setMinimumWidth_(180)  # Compact dropdown width
+    _menu_font = NSFont.systemFontOfSize_(13)  # System default
+
+    def _styled(item, title=None):
+        """Apply compact font to a menu item."""
+        t = title if title else item.title()
+        attrs = NSDictionary.dictionaryWithObject_forKey_(_menu_font, "NSFont")
+        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(t, attrs))
+        return item
 
     # -- Section 1: Recent transcripts --
     header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Recent Transcripts", None, "",
     )
     header.setEnabled_(False)
+    _styled(header)
     menu.addItem_(header)
 
     try:
@@ -504,6 +579,7 @@ def _build_transcript_menu(handler):
             "  No transcripts yet", None, "",
         )
         item.setEnabled_(False)
+        _styled(item)
         menu.addItem_(item)
     else:
         for entry in entries:
@@ -511,7 +587,7 @@ def _build_transcript_menu(handler):
             ts = entry.get("ts", "?")
             # Show time (HH:MM) + truncated text
             time_part = ts[-8:-3] if len(ts) >= 8 else ts  # "HH:MM"
-            display = text[:40] + "..." if len(text) > 40 else text
+            display = text[:25] + "..." if len(text) > 25 else text
             title = f"  {time_part}  {display}"
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 title, "copyTranscript:", "",
@@ -520,6 +596,7 @@ def _build_transcript_menu(handler):
             item.setRepresentedObject_(text)  # Full text for clipboard
             item.setToolTip_(text)  # Full text on hover
             item.setEnabled_(True)
+            _styled(item)
             menu.addItem_(item)
 
     menu.addItem_(NSMenuItem.separatorItem())
@@ -534,6 +611,7 @@ def _build_transcript_menu(handler):
     mute_item.setEnabled_(True)
     if is_muted:
         mute_item.setState_(1)  # NSOnState — checkmark
+    _styled(mute_item)
     menu.addItem_(mute_item)
 
     menu.addItem_(NSMenuItem.separatorItem())
@@ -548,6 +626,7 @@ def _build_transcript_menu(handler):
         f"HeyVox v{ver}", None, "",
     )
     version_item.setEnabled_(False)
+    _styled(version_item)
     menu.addItem_(version_item)
 
     help_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -555,6 +634,7 @@ def _build_transcript_menu(handler):
     )
     help_item.setTarget_(handler)
     help_item.setEnabled_(True)
+    _styled(help_item)
     menu.addItem_(help_item)
 
     log_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -562,6 +642,7 @@ def _build_transcript_menu(handler):
     )
     log_item.setTarget_(handler)
     log_item.setEnabled_(True)
+    _styled(log_item)
     menu.addItem_(log_item)
 
     menu.addItem_(NSMenuItem.separatorItem())
@@ -571,6 +652,7 @@ def _build_transcript_menu(handler):
     )
     quit_item.setTarget_(handler)
     quit_item.setEnabled_(True)
+    _styled(quit_item)
     menu.addItem_(quit_item)
 
     return menu
@@ -701,18 +783,24 @@ def main():
     transcript_label.setHidden_(True)
     content_view.addSubview_(transcript_label)
 
-    # ---- Idle label ("Vox" text shown in idle pill) ----
+    # ---- Idle label ("🎙 Vox" centered in idle pill) ----
     NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
-    idle_label = NSTextField.alloc().initWithFrame_(((0, 0), (PILL_W_IDLE, PILL_H_IDLE)))
+    idle_label_h = 18
+    idle_label_y = (PILL_H_IDLE - idle_label_h) / 2
+    idle_label = NSTextField.alloc().initWithFrame_(
+        ((0, idle_label_y), (PILL_W_IDLE, idle_label_h))
+    )
     idle_label.setEditable_(False)
     idle_label.setSelectable_(False)
     idle_label.setDrawsBackground_(False)
     idle_label.setBezeled_(False)
     idle_label.setTextColor_(NSColor.whiteColor())
-    idle_label.setFont_(NSFont.boldSystemFontOfSize_(12))
+    idle_label.setFont_(NSFont.boldSystemFontOfSize_(11))
     idle_label.setAlignment_(NSTextAlignmentCenter)
-    idle_label.setStringValue_("🎙 Vox")
-    idle_label.setHidden_(True)  # Shown only in idle state
+    idle_label.cell().setWraps_(False)
+    idle_label.cell().setScrollable_(False)
+    idle_label.setStringValue_("\U0001f399 Vox")
+    idle_label.setHidden_(True)
     content_view.addSubview_(idle_label)
 
     # ---- TTS control buttons — HUD-04 ----
@@ -754,10 +842,32 @@ def main():
 
     tts_controls = (skip_btn, stop_btn)
 
-    # ---- Transcript dropdown menu ----
+    # ---- Menu bar status item (lives next to Bluetooth/WiFi icons) ----
+    from AppKit import NSStatusBar, NSVariableStatusItemLength, NSImage, NSFont as _NSFont
+    status_bar = NSStatusBar.systemStatusBar()
+    status_item = status_bar.statusItemWithLength_(NSVariableStatusItemLength)
+    status_button = status_item.button()
+
+    # State icons for menu bar — using Unicode text rendered as the icon
+    _STATUS_ICONS = {
+        "idle":       "\U0001f399",     # 🎙 mic
+        "listening":  "\U0001f534",     # 🔴 red circle
+        "processing": "\U0001f7e1",     # 🟡 yellow circle
+        "speaking":   "\U0001f7e2",     # 🟢 green circle
+    }
+    status_button.setTitle_(_STATUS_ICONS["idle"])
+
     MenuActionHandler = _make_menu_action_class()
     menu_handler = MenuActionHandler.alloc().init()
 
+    def _update_status_menu():
+        """Rebuild and assign menu to status item (called on state change)."""
+        menu = _build_transcript_menu(menu_handler)
+        status_item.setMenu_(menu)
+
+    _update_status_menu()
+
+    # Also keep pill dropdown for floating window (click on pill during recording)
     def _show_dropdown(event):
         menu = _build_transcript_menu(menu_handler)
         loc_in_view = content_view.convertPoint_fromView_(
@@ -773,6 +883,7 @@ def main():
     DispatcherClass = _make_dispatcher_class(
         window, content_view, waveform_view, transcript_label, tts_controls, color_overlay,
         idle_label=idle_label,
+        status_item=status_item, update_status_menu=_update_status_menu,
     )
     dispatcher = DispatcherClass.alloc().init()
 
@@ -786,11 +897,12 @@ def main():
     hud_server = HUDServer(path=DEFAULT_SOCKET_PATH, on_message=on_message)
     hud_server.start()
 
-    # ---- Show idle pill on startup (labeled pill, clickable for dropdown) ----
+    # ---- Show idle state on startup ----
     _apply_state(
         "idle", window, content_view, waveform_view,
         transcript_label, tts_controls, color_overlay,
         idle_label=idle_label,
+        status_item=status_item, update_status_menu=_update_status_menu,
     )
 
     # ---- SIGTERM / SIGINT handler (NSTimer pattern — proven in codebase) ----

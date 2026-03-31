@@ -5,11 +5,14 @@ Supports two backends:
 - "mlx": MLX Whisper (Metal GPU, Apple Silicon only) — fast, preferred
 - "sherpa": sherpa-onnx Whisper (CPU, int8 quantized) — universal fallback
 
-Lazy imports keep the module importable without either library installed.
+MLX model is lazy-loaded on first use and unloaded after idle timeout
+to free ~855MB of GPU/unified memory when not dictating.
 """
 
 import os
 import sys
+import threading
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -19,6 +22,89 @@ from heyvox.constants import DEFAULT_SAMPLE_RATE
 
 # Global sherpa recognizer (initialized once, reused across calls)
 _recognizer = None
+
+# MLX lazy-load state
+_mlx_model_id: str = ""
+_mlx_language: str = ""
+_mlx_loaded = threading.Event()  # Set when model is ready
+_mlx_lock = threading.Lock()
+_mlx_last_use: float = 0.0
+_mlx_unload_secs: float = 120.0  # 2 minutes idle → unload
+_mlx_unloader: threading.Timer | None = None
+_log_fn: Callable[[str], None] | None = None
+
+
+def _log(msg: str) -> None:
+    if _log_fn:
+        _log_fn(msg)
+    else:
+        print(msg, flush=True)
+
+
+def _load_mlx_model() -> None:
+    """Load MLX Whisper model into GPU memory (blocking)."""
+    global _mlx_last_use
+    if _mlx_loaded.is_set():
+        return
+    with _mlx_lock:
+        if _mlx_loaded.is_set():
+            return  # Another thread loaded while we waited
+        import mlx_whisper
+        _log(f"Loading MLX whisper model ({_mlx_model_id})...")
+        t0 = time.perf_counter()
+        dummy = np.zeros(16000, dtype=np.float32)
+        mlx_whisper.transcribe(dummy, path_or_hf_repo=_mlx_model_id)
+        elapsed = time.perf_counter() - t0
+        _mlx_last_use = time.time()
+        _mlx_loaded.set()
+        _log(f"MLX model loaded in {elapsed:.1f}s")
+        _schedule_unload()
+
+
+def _unload_mlx_model() -> None:
+    """Unload MLX Whisper model to free GPU memory."""
+    global _mlx_unloader
+    with _mlx_lock:
+        if not _mlx_loaded.is_set():
+            return
+        idle = time.time() - _mlx_last_use
+        if idle < _mlx_unload_secs:
+            # Not idle long enough — reschedule
+            _schedule_unload()
+            return
+        import mlx.core as mx
+        mx.metal.clear_cache()
+        # Force Python to release the module's cached model
+        import mlx_whisper
+        # Clear any cached state in mlx_whisper
+        import importlib
+        importlib.reload(mlx_whisper)
+        import gc
+        gc.collect()
+        _mlx_loaded.clear()
+        _log(f"MLX model unloaded after {idle:.0f}s idle (memory freed)")
+
+
+def _schedule_unload() -> None:
+    """Schedule model unload after idle timeout."""
+    global _mlx_unloader
+    if _mlx_unloader is not None:
+        _mlx_unloader.cancel()
+    _mlx_unloader = threading.Timer(_mlx_unload_secs, _unload_mlx_model)
+    _mlx_unloader.daemon = True
+    _mlx_unloader.start()
+
+
+def preload_model() -> None:
+    """Start loading MLX model in background thread.
+
+    Call this when wake word triggers to hide load latency behind
+    the user's speaking time. No-op if model is already loaded.
+    """
+    if _mlx_loaded.is_set():
+        return
+    t = threading.Thread(target=_load_mlx_model, daemon=True)
+    t.start()
 
 
 def init_local_stt(
@@ -31,7 +117,8 @@ def init_local_stt(
 ) -> None:
     """Initialize local STT engine.
 
-    Must be called before transcribe_audio when using local backend.
+    For MLX: stores config but does NOT load the model (lazy loading).
+    For sherpa: loads immediately (small model, always needed).
 
     Args:
         engine: "mlx" (Metal GPU) or "sherpa" (CPU int8).
@@ -41,23 +128,15 @@ def init_local_stt(
         threads: CPU thread count for sherpa backend.
         log_fn: Optional callable(str) for log messages. Defaults to print.
     """
-    global _recognizer
-
-    def _log(msg):
-        if log_fn:
-            log_fn(msg)
-        else:
-            print(msg, flush=True)
+    global _recognizer, _mlx_model_id, _mlx_language, _log_fn
+    _log_fn = log_fn
 
     if engine == "mlx":
-        import mlx_whisper  # lazy: not available on Intel Macs
-        # Warm up: first call downloads/loads weights into GPU memory
-        _log(f"Loading MLX whisper model ({mlx_model})...")
-        dummy = np.zeros(16000, dtype=np.float32)
-        mlx_whisper.transcribe(dummy, path_or_hf_repo=mlx_model)
-        _log(f"Local STT ready (MLX Metal GPU, lang={'auto' if not language else language})")
+        _mlx_model_id = mlx_model
+        _mlx_language = language
+        _log(f"Local STT configured (MLX Metal GPU, lazy load, lang={'auto' if not language else language})")
     else:
-        import sherpa_onnx  # lazy: large binary dependency
+        import sherpa_onnx
 
         encoder = os.path.join(model_dir, "small-encoder.int8.onnx")
         decoder = os.path.join(model_dir, "small-decoder.int8.onnx")
@@ -92,6 +171,8 @@ def transcribe_audio(
 ) -> str:
     """Transcribe recorded audio chunks using the configured engine.
 
+    For MLX: loads model on first call if not already loaded (lazy).
+
     Args:
         audio_chunks: List of numpy int16 arrays from the mic stream.
         engine: "mlx" or "sherpa" — must match what init_local_stt used.
@@ -102,6 +183,7 @@ def transcribe_audio(
     Returns:
         Transcribed text string (stripped), or "" if audio_chunks is empty.
     """
+    global _mlx_last_use
     if not audio_chunks:
         return ""
 
@@ -109,11 +191,19 @@ def transcribe_audio(
     samples = audio.astype(np.float32) / 32768.0
 
     if engine == "mlx":
-        import mlx_whisper  # lazy import
-        kwargs = dict(path_or_hf_repo=mlx_model)
-        if language:
-            kwargs["language"] = language
+        # Ensure model is loaded (blocks if preload hasn't finished yet)
+        if not _mlx_loaded.is_set():
+            _load_mlx_model()
+        else:
+            _mlx_loaded.wait()  # Wait if preload is in progress
+
+        import mlx_whisper
+        kwargs = dict(path_or_hf_repo=_mlx_model_id or mlx_model)
+        if _mlx_language or language:
+            kwargs["language"] = _mlx_language or language
         result = mlx_whisper.transcribe(samples, **kwargs)
+        _mlx_last_use = time.time()
+        _schedule_unload()  # Reset the idle timer
         return result["text"].strip()
     else:
         # sherpa-onnx: split into <=30s segments (Whisper's input limit)
@@ -128,3 +218,15 @@ def transcribe_audio(
             if text:
                 parts.append(text)
         return " ".join(parts)
+
+
+def model_loaded() -> bool:
+    """Return True if the MLX model is currently loaded in memory."""
+    return _mlx_loaded.is_set()
+
+
+def memory_mb() -> float:
+    """Return approximate memory used by the STT model (MB)."""
+    if _mlx_loaded.is_set():
+        return 855.0  # Measured: whisper-small-mlx baseline
+    return 0.0

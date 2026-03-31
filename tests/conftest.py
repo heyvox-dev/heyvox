@@ -32,3 +32,60 @@ vox_running = pytest.mark.skipif(
     not _vox_running(),
     reason="Vox is not running (start with: heyvox start)",
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_flags(tmp_path, monkeypatch):
+    """Redirect all flag files to a temp directory so tests never interfere
+    with a running HeyVox instance.
+
+    Patches both the constants module AND all modules that import constants
+    at module level (e.g. tts.py imports RECORDING_FLAG on load).
+    """
+    rec_flag = str(tmp_path / "heyvox-recording")
+    tts_flag = str(tmp_path / "heyvox-tts-playing")
+    cmd_file = str(tmp_path / "heyvox-tts-cmd")
+    hud_sock = str(tmp_path / "heyvox-hud.sock")
+
+    # Patch source of truth
+    monkeypatch.setattr("heyvox.constants.RECORDING_FLAG", rec_flag)
+    monkeypatch.setattr("heyvox.constants.TTS_PLAYING_FLAG", tts_flag)
+    monkeypatch.setattr("heyvox.constants.TTS_CMD_FILE", cmd_file)
+    monkeypatch.setattr("heyvox.constants.HUD_SOCKET_PATH", hud_sock)
+
+    # Patch consumers that imported at module level
+    try:
+        monkeypatch.setattr("heyvox.audio.tts.RECORDING_FLAG", rec_flag)
+        monkeypatch.setattr("heyvox.audio.tts.TTS_PLAYING_FLAG", tts_flag)
+        monkeypatch.setattr("heyvox.audio.tts.TTS_CMD_FILE", cmd_file)
+    except AttributeError:
+        pass  # Module not imported yet — fine, will pick up patched constants
+
+    try:
+        monkeypatch.setattr("heyvox.main.RECORDING_FLAG", rec_flag)
+        monkeypatch.setattr("heyvox.main.TTS_PLAYING_FLAG", tts_flag)
+        monkeypatch.setattr("heyvox.main.HUD_SOCKET_PATH", hud_sock)
+    except AttributeError:
+        pass
+
+    yield {
+        "recording_flag": rec_flag,
+        "tts_flag": tts_flag,
+        "cmd_file": cmd_file,
+        "hud_sock": hud_sock,
+    }
+
+
+@pytest.fixture
+def mock_config():
+    """Return a HeyvoxConfig with test-friendly defaults."""
+    from heyvox.config import HeyvoxConfig
+
+    return HeyvoxConfig(
+        target_mode="always-focused",
+        enter_count=0,
+        push_to_talk={"enabled": False, "key": "fn"},
+        tts={"enabled": False},
+        mic_priority=["BlackHole 2ch", "MacBook Pro Microphone"],
+        log_file="/dev/null",
+    )
