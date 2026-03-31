@@ -56,6 +56,9 @@ tts = [
 aec = [
     "livekit>=1.0.0",
 ]
+chrome = [
+    "websockets>=13.0",
+]
 dev = [
     "pytest",
     "ruff",
@@ -63,6 +66,7 @@ dev = [
 
 [project.scripts]
 heyvox = "heyvox.cli:main"
+heyvox-chrome-bridge = "heyvox.chrome.bridge:run_bridge"
 
 [tool.setuptools.packages.find]
 include = ["heyvox*"]
