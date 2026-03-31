@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HeyVox — Voice Coding for AI Agents</title>
+  <meta name="description" content="Talk to your AI coding agent. Hands-free, fully local, zero cloud. Wake word detection, local STT, local TTS, and HUD overlay for macOS." />
+  <meta property="og:title" content="HeyVox — Voice Coding for AI Agents" />
+  <meta property="og:description" content="Talk to your AI coding agent. Hands-free, fully local, zero cloud." />
+  <meta property="og:url" content="https://heyvox.dev" />
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg:          #0a0a0b;
+      --bg-raised:   #111114;
+      --bg-elevated: #18181d;
+      --border:      #242430;
+      --border-soft: #1c1c24;
+      --text:        #e4e4e7;
+      --text-muted:  #71717a;
+      --text-dim:    #52525b;
+      --accent-from: #8b5cf6;
+      --accent-to:   #06b6d4;
+      --accent-mid:  #6366f1;
+      --code-bg:     #0f0f14;
+      --radius:      10px;
+      --radius-lg:   16px;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ─── LAYOUT ─── */
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    section {
+      padding: 96px 0;
+    }
+
+    /* ─── SCROLL REVEAL ─── */
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(28px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ─── NAVBAR ─── */
+
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      padding: 0 24px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(10, 10, 11, 0.8);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .nav-logo {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 28px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+    }
+
+    .nav-cta {
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      color: #fff !important;
+      padding: 7px 16px;
+      border-radius: 7px;
+      font-size: 13px !important;
+      font-weight: 600 !important;
+      transition: opacity 0.2s !important;
+    }
+
+    .nav-cta:hover {
+      color: #fff !important;
+      opacity: 0.88;
+    }
+
+    /* ─── HERO ─── */
+
+    #hero {
+      padding-top: 160px;
+      padding-bottom: 96px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #hero::before {
+      content: "";
+      position: absolute;
+      top: -120px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 700px;
+      height: 500px;
+      background: radial-gradient(ellipse at center, rgba(139, 92, 246, 0.15) 0%, rgba(6, 182, 212, 0.07) 50%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: var(--bg-raised);
+      margin-bottom: 32px;
+      letter-spacing: 0.03em;
+    }
+
+    .hero-badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(0.85); }
+    }
+
+    h1 {
+      font-size: clamp(40px, 6vw, 72px);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1.1;
+      margin-bottom: 20px;
+      background: linear-gradient(160deg, #ffffff 0%, #c4c4d4 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-subline {
+      font-size: clamp(16px, 2.2vw, 20px);
+      color: var(--text-muted);
+      max-width: 540px;
+      margin: 0 auto 48px;
+      line-height: 1.55;
+    }
+
+    .hero-install {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 20px;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", Menlo, monospace;
+      font-size: 14px;
+      color: #a5b4fc;
+      margin-bottom: 36px;
+      letter-spacing: 0.01em;
+    }
+
+    .hero-install .prompt {
+      color: var(--text-dim);
+      user-select: none;
+    }
+
+    .copy-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 5px;
+      transition: color 0.2s, background 0.2s;
+      line-height: 1;
+    }
+
+    .copy-btn:hover {
+      color: var(--text);
+      background: var(--border);
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 22px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+      cursor: pointer;
+      border: none;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      color: #fff;
+      box-shadow: 0 0 0 0 rgba(139, 92, 246, 0);
+      transition: box-shadow 0.3s, transform 0.2s;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 30px rgba(139, 92, 246, 0.35);
+    }
+
+    .btn-secondary {
+      background: var(--bg-elevated);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-raised);
+      border-color: #3a3a4a;
+    }
+
+    /* ─── SECTION HEADER ─── */
+
+    .section-header {
+      text-align: center;
+      margin-bottom: 64px;
+    }
+
+    .section-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent-from);
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: clamp(28px, 4vw, 42px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      color: #fff;
+      margin-bottom: 14px;
+    }
+
+    .section-sub {
+      font-size: 16px;
+      color: var(--text-muted);
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    /* ─── HOW IT WORKS ─── */
+
+    #how-it-works {
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg-raised) 50%, var(--bg) 100%);
+    }
+
+    .how-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    @media (max-width: 768px) {
+      .how-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .how-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 32px 28px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.3s, transform 0.3s;
+    }
+
+    .how-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent-from), var(--accent-to));
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .how-card:hover {
+      border-color: #353545;
+      transform: translateY(-3px);
+    }
+
+    .how-card:hover::before {
+      opacity: 1;
+    }
+
+    .how-icon {
+      font-size: 28px;
+      margin-bottom: 20px;
+      display: block;
+    }
+
+    .how-card h3 {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: #fff;
+      margin-bottom: 10px;
+    }
+
+    .how-card p {
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+
+    .how-card code {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 12px;
+      color: #a5b4fc;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* ─── AGENTS ─── */
+
+    #agents {
+      text-align: center;
+    }
+
+    .agents-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: center;
+      margin-bottom: 24px;
+    }
+
+    .agent-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 18px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .agent-chip:hover {
+      border-color: #353545;
+      background: var(--bg-raised);
+    }
+
+    .agents-note {
+      font-size: 13px;
+      color: var(--text-dim);
+      max-width: 480px;
+      margin: 0 auto;
+    }
+
+    .agents-note strong {
+      color: var(--text-muted);
+    }
+
+    /* ─── FEATURES ─── */
+
+    #features {
+      background: var(--bg-raised);
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    @media (max-width: 900px) {
+      .features-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 520px) {
+      .features-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .feature-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+      padding: 22px 20px;
+      transition: border-color 0.25s, transform 0.25s;
+    }
+
+    .feature-card:hover {
+      border-color: #2e2e3e;
+      transform: translateY(-2px);
+    }
+
+    .feature-icon {
+      font-size: 20px;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .feature-card h4 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 6px;
+      letter-spacing: -0.01em;
+    }
+
+    .feature-card p {
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.6;
+    }
+
+    /* ─── INSTALL ─── */
+
+    #install {
+      text-align: center;
+    }
+
+    .install-box {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 36px 40px;
+      max-width: 640px;
+      margin: 0 auto 32px;
+      text-align: left;
+    }
+
+    .install-box pre {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", Menlo, monospace;
+      font-size: 14px;
+      line-height: 2;
+      color: #e4e4e7;
+    }
+
+    .install-box .line-comment {
+      color: #4a4a5e;
+    }
+
+    .install-box .line-cmd::before {
+      content: "$ ";
+      color: var(--text-dim);
+      user-select: none;
+    }
+
+    .install-box .line-cmd {
+      color: #a5b4fc;
+    }
+
+    .install-note {
+      font-size: 14px;
+      color: var(--text-muted);
+      max-width: 560px;
+      margin: 0 auto;
+      line-height: 1.7;
+    }
+
+    .install-note strong {
+      color: var(--text);
+    }
+
+    /* ─── PRIVACY ─── */
+
+    #privacy {
+      background: linear-gradient(135deg, #0d0d18 0%, #0a0a0b 100%);
+    }
+
+    .privacy-inner {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: center;
+    }
+
+    @media (max-width: 768px) {
+      .privacy-inner {
+        grid-template-columns: 1fr;
+        gap: 40px;
+      }
+    }
+
+    .privacy-headline {
+      font-size: clamp(24px, 3vw, 36px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      color: #fff;
+      margin-bottom: 16px;
+    }
+
+    .privacy-headline span {
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .privacy-sub {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+
+    .privacy-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .privacy-item {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      transition: border-color 0.2s;
+    }
+
+    .privacy-item:hover {
+      border-color: #353545;
+    }
+
+    .privacy-item-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      flex-shrink: 0;
+    }
+
+    .privacy-item-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      flex-shrink: 0;
+      min-width: 140px;
+    }
+
+    .privacy-item-desc {
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    /* ─── AUDIO DEVICES ─── */
+
+    #audio-devices {
+      background: var(--bg-raised);
+    }
+
+    .devices-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    @media (max-width: 1024px) {
+      .devices-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 768px) {
+      .devices-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .device-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+      padding: 24px 22px;
+    }
+
+    .device-tier {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    .tier-best   { color: #34d399; }
+    .tier-good   { color: #60a5fa; }
+    .tier-avoid  { color: #f87171; }
+
+    .device-card h4 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .device-card p {
+      font-size: 13px;
+      color: var(--text-dim);
+      line-height: 1.6;
+    }
+
+    /* ─── FOOTER ─── */
+
+    footer {
+      border-top: 1px solid var(--border-soft);
+      padding: 48px 0;
+    }
+
+    .footer-inner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      text-align: center;
+    }
+
+    .footer-logo {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 20px;
+      justify-content: center;
+      list-style: none;
+    }
+
+    .footer-links a {
+      font-size: 14px;
+      color: var(--text-muted);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    .footer-links a:hover {
+      color: var(--text);
+    }
+
+    .footer-divider {
+      color: var(--border);
+    }
+
+    .footer-meta {
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    .footer-meta a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    .footer-meta a:hover {
+      color: var(--text-muted);
+    }
+
+    /* ─── UTILITY ─── */
+
+    @media (max-width: 640px) {
+      .nav-links {
+        display: none;
+      }
+
+      section {
+        padding: 72px 0;
+      }
+
+      .install-box {
+        padding: 24px 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── NAVBAR ── -->
+  <nav>
+    <a href="#" class="nav-logo">HeyVox</a>
+    <ul class="nav-links">
+      <li><a href="#how-it-works">How it works</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#privacy">Privacy</a></li>
+      <li><a href="https://github.com/heyvox-dev/heyvox" class="nav-cta">GitHub</a></li>
+    </ul>
+  </nav>
+
+  <!-- ── HERO ── -->
+  <section id="hero">
+    <div class="container">
+      <div class="reveal visible">
+        <div class="hero-badge">
+          <span class="hero-badge-dot"></span>
+          macOS &middot; Fully Local &middot; Open Source
+        </div>
+
+        <h1>Voice Coding,<br>not Vibe Coding</h1>
+
+        <p class="hero-subline">
+          Talk to your AI coding agent.<br>
+          Hands-free, fully local, zero cloud.
+        </p>
+
+        <div style="margin-bottom: 36px;">
+          <div class="hero-install">
+            <span class="prompt">$</span>
+            <span id="install-cmd">pip install heyvox &amp;&amp; heyvox setup</span>
+            <button class="copy-btn" onclick="copyInstall(this)" title="Copy to clipboard">&#x2398;</button>
+          </div>
+        </div>
+
+        <div class="hero-actions">
+          <a href="https://github.com/heyvox-dev/heyvox" class="btn btn-primary">
+            View on GitHub
+          </a>
+          <a href="#install" class="btn btn-secondary">
+            Get Started
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── HOW IT WORKS ── -->
+  <section id="how-it-works">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-label">How it works</div>
+        <h2>You talk. It codes. All local.</h2>
+        <p class="section-sub">Three independent layers that turn your voice into shipped code — without any audio leaving your machine.</p>
+      </div>
+
+      <div class="how-grid">
+        <div class="how-card reveal">
+          <span class="how-icon">&#x1F399;</span>
+          <h3>Voice IN</h3>
+          <p>
+            Say the wake word &rarr; HeyVox transcribes locally via
+            <code>MLX Whisper</code> or <code>sherpa-onnx</code> &rarr; text is pasted
+            directly into your agent. Works with any app.
+          </p>
+        </div>
+
+        <div class="how-card reveal">
+          <span class="how-icon">&#x1F50A;</span>
+          <h3>Voice OUT</h3>
+          <p>
+            Your agent calls <code>voice_speak()</code> via MCP &rarr; HeyVox
+            speaks with Kokoro TTS at configurable voice and speed.
+            Media pauses automatically while speaking.
+          </p>
+        </div>
+
+        <div class="how-card reveal">
+          <span class="how-icon">&#x1F5A5;</span>
+          <h3>HUD Overlay</h3>
+          <p>
+            Frosted-glass overlay lives above all Spaces and Dock.
+            Shows recording state, live waveform bars, and TTS
+            status in real time. No visual clutter.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SUPPORTED AGENTS ── -->
+  <section id="agents">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-label">Supported agents</div>
+        <h2>Works where you work</h2>
+      </div>
+
+      <div class="agents-grid reveal">
+        <div class="agent-chip">&#x26A1; Claude Code</div>
+        <div class="agent-chip">&#x1F4AB; Cursor</div>
+        <div class="agent-chip">&#x1F32A; Windsurf</div>
+        <div class="agent-chip">&#x1F501; Continue.dev</div>
+        <div class="agent-chip">&#x2795; Any app with a text field</div>
+      </div>
+
+      <p class="agents-note reveal">
+        <strong>Voice IN works with any app</strong> &mdash; HeyVox pastes transcribed text
+        into whatever window has focus. <strong>Voice OUT</strong> (agent speaks back to you)
+        requires MCP support in your agent.
+      </p>
+    </div>
+  </section>
+
+  <!-- ── FEATURES ── -->
+  <section id="features">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-label">Features</div>
+        <h2>Everything you need, nothing you don't</h2>
+      </div>
+
+      <div class="features-grid">
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F441;</span>
+          <h4>Wake Word Detection</h4>
+          <p>Powered by openwakeword. Always listening locally, never to the cloud.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F5E3;</span>
+          <h4>Local STT</h4>
+          <p>MLX Whisper on Apple Silicon. sherpa-onnx fallback on Intel Macs.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F50A;</span>
+          <h4>Local TTS</h4>
+          <p>Kokoro TTS with configurable voice, speed, and verbosity per message.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F3AE;</span>
+          <h4>Push-to-Talk</h4>
+          <p>Configurable key binding. Hold to record, release to transcribe.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x23F8;</span>
+          <h4>Media Pause/Resume</h4>
+          <p>Automatically pauses music and podcasts during TTS and recording.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x2728;</span>
+          <h4>HUD Overlay</h4>
+          <p>NSVisualEffectView frosted-glass panel, visible on all Spaces and over fullscreen apps.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F527;</span>
+          <h4>MCP Integration</h4>
+          <p>4 tools: speak, status, queue, config. Agents control TTS directly.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F680;</span>
+          <h4>Auto-Start via launchd</h4>
+          <p>Runs as a macOS launch agent. Always ready when you open your Mac.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── INSTALL ── -->
+  <section id="install">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-label">Install</div>
+        <h2>Up and running in minutes</h2>
+        <p class="section-sub">Requires macOS 13+, Python 3.12+, and Apple Silicon (Intel supported via sherpa-onnx).</p>
+      </div>
+
+      <div class="install-box reveal">
+        <pre><span class="line-comment"># 1. Install system dependency</span>
+<span class="line-cmd">brew install portaudio</span>
+
+<span class="line-comment"># 2. Install HeyVox</span>
+<span class="line-cmd">pip install heyvox</span>
+
+<span class="line-comment"># 3. Run setup wizard</span>
+<span class="line-cmd">heyvox setup</span></pre>
+      </div>
+
+      <p class="install-note reveal">
+        The <strong>setup wizard</strong> walks you through permissions (Microphone, Accessibility),
+        model download, mic test, config generation, launchd agent registration, and MCP server
+        configuration &mdash; all in one guided flow.
+      </p>
+    </div>
+  </section>
+
+  <!-- ── PRIVACY ── -->
+  <section id="privacy">
+    <div class="container">
+      <div class="privacy-inner">
+        <div class="reveal">
+          <p class="section-label">Privacy</p>
+          <p class="privacy-headline">All processing runs <span>on your machine</span>. No audio ever leaves.</p>
+          <p class="privacy-sub">
+            HeyVox was designed privacy-first from day one.
+            Zero telemetry, zero cloud APIs, zero subscriptions.
+            Your voice data belongs to you.
+          </p>
+        </div>
+
+        <div class="privacy-stack reveal">
+          <div class="privacy-item">
+            <div class="privacy-item-dot"></div>
+            <div class="privacy-item-label">openwakeword</div>
+            <div class="privacy-item-desc">On-device wake word detection, runs in real time</div>
+          </div>
+          <div class="privacy-item">
+            <div class="privacy-item-dot"></div>
+            <div class="privacy-item-label">MLX Whisper</div>
+            <div class="privacy-item-desc">Apple Silicon speech recognition, fully offline</div>
+          </div>
+          <div class="privacy-item">
+            <div class="privacy-item-dot"></div>
+            <div class="privacy-item-label">Kokoro TTS</div>
+            <div class="privacy-item-desc">Local neural text-to-speech, no API keys needed</div>
+          </div>
+          <div class="privacy-item">
+            <div class="privacy-item-dot"></div>
+            <div class="privacy-item-label">sherpa-onnx</div>
+            <div class="privacy-item-desc">Intel fallback STT engine, also fully on-device</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── AUDIO DEVICES ── -->
+  <section id="audio-devices">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-label">Audio devices</div>
+        <h2>Choosing the right mic</h2>
+        <p class="section-sub">Your microphone has a bigger impact on accuracy than the STT model.</p>
+      </div>
+
+      <div class="devices-grid">
+        <div class="device-card reveal">
+          <div class="device-tier tier-best">Best</div>
+          <h4>2.4 GHz USB Wireless Headsets</h4>
+          <p>
+            USB dongle headsets (Logitech, Jabra, EPOS) use their own USB audio device.
+            Full-quality mic channel at all times, no OS audio switching, no echo issues.
+          </p>
+        </div>
+
+        <div class="device-card reveal">
+          <div class="device-tier tier-good">Good</div>
+          <h4>Wired Headset / Built-in Mic &amp; Speakers</h4>
+          <p>
+            Wired headsets, the built-in Mac microphone, and built-in speakers all work reliably.
+            Echo suppression mutes the mic during TTS when using speakers without a headset.
+          </p>
+        </div>
+
+        <div class="device-card reveal">
+          <div class="device-tier tier-good">Good</div>
+          <h4>Bluetooth for Playback + Built-in Mic</h4>
+          <p>
+            Use Bluetooth headphones for TTS playback (A2DP, full quality) while
+            using the built-in Mac mic for voice input. Best of both worlds.
+          </p>
+        </div>
+
+        <div class="device-card reveal">
+          <div class="device-tier tier-avoid">Not Recommended</div>
+          <h4>Bluetooth Mic Mode</h4>
+          <p>
+            When a Bluetooth headset's mic is active, macOS switches to HFP mode,
+            dropping audio to 8&ndash;16 kHz mono. Use the built-in mic instead.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ── -->
+  <footer>
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-logo">HeyVox</div>
+
+        <ul class="footer-links">
+          <li><a href="https://github.com/heyvox-dev/heyvox">GitHub</a></li>
+          <li class="footer-divider">&middot;</li>
+          <li><a href="https://x.com/heyvox">Twitter</a></li>
+          <li class="footer-divider">&middot;</li>
+          <li><a href="https://bsky.app/profile/heyvox.bsky.social">Bluesky</a></li>
+          <li class="footer-divider">&middot;</li>
+          <li><a href="https://youtube.com/@heyvoxai">YouTube</a></li>
+          <li class="footer-divider">&middot;</li>
+          <li><a href="mailto:hello@heyvox.dev">hello@heyvox.dev</a></li>
+        </ul>
+
+        <p class="footer-meta">
+          MIT License &middot; Made by <a href="https://github.com/FranzFelberer">Franz Felberer</a>
+        </p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // ── Scroll reveal ──
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("visible");
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12 });
+
+    document.querySelectorAll(".reveal:not(.visible)").forEach(el => {
+      observer.observe(el);
+    });
+
+    // ── Copy install command ──
+    function copyInstall(btn) {
+      const text = "pip install heyvox && heyvox setup";
+      navigator.clipboard.writeText(text).then(() => {
+        const original = btn.innerHTML;
+        btn.innerHTML = "&#x2713;";
+        btn.style.color = "#34d399";
+        setTimeout(() => {
+          btn.innerHTML = original;
+          btn.style.color = "";
+        }, 1800);
+      });
+    }
+  </script>
+
+</body>
+</html>
