@@ -148,6 +148,22 @@ _WAKE_WORD_PHRASES: dict[str, list[str]] = {
         "hrvs", "hrs", "hr",
         "j.a.r.v.i.s", "jar",
     ],
+    "hey_vox": [
+        "hey vox", "hey, vox",
+        "hey box", "hey, box",
+        "hey fox", "hey, fox",
+        "hey vocs", "hey, vocs",
+        "hey vokes", "hey, vokes",
+        "hey vos", "hey, vos",
+        "hey boks", "hey, boks",
+        "hey vaux", "hey, vaux",
+        "hey voxx", "hey, voxx",
+        "hey rocks", "hey, rocks",
+        "hey docs", "hey, docs",
+        "hey locks", "hey, locks",
+        "hey socks", "hey, socks",
+        "vox", "vox.",
+    ],
 }
 
 
@@ -351,6 +367,12 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         # Pre-roll: prepend recent audio so first words aren't clipped
         _audio_buffer = list(preroll) if preroll else []
         _triggered_by_ptt = ptt
+
+    # Preload STT model in background while user speaks — hides the ~1s
+    # model load latency behind recording time. No-op if already loaded.
+    if config.stt.backend == "local":
+        from heyvox.audio.stt import preload_model
+        preload_model()
 
     # Signal TTS that recording is active — stops current playback and blocks
     # new items from playing until recording ends. (TTS-03)
@@ -648,14 +670,6 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
 
         paste_text = f"{config.transcription_prefix}{text}" if config.transcription_prefix else text
 
-        # Save to transcript history BEFORE paste attempt — if paste fails,
-        # the text is still recoverable via the HUD dropdown or CLI.
-        try:
-            from heyvox.history import save as _save_history
-            _save_history(text, duration=duration, ptt=_triggered_by_ptt)
-        except Exception as e:
-            log(f"WARNING: Failed to save transcript history: {e}")
-
         # Re-check cancellation right before typing
         if _cancel_transcription.is_set():
             log("Transcription cancelled by user (Escape)")
@@ -894,10 +908,11 @@ def main() -> None:
         start_ptt_listener(config.push_to_talk.key, ptt_callbacks, log_fn=log)
 
     # Load wake word models
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(script_dir, "training", "models")
+    # Phase 8: supports custom models dir from config, with fallback search
     from heyvox.audio.wakeword import load_models
-    model, use_separate_words = load_models(start_word, stop_word, models_dir)
+    model, use_separate_words = load_models(
+        start_word, stop_word, config.wake_word.models_dir
+    )
 
     # Build text injection adapter based on config.target_mode
     # Requirement: INPT-03
@@ -956,6 +971,11 @@ def main() -> None:
     _zero_streak = 0
     HEALTH_CHECK_INTERVAL = 30.0
     last_health_check = time.time()
+
+    # Memory watchdog — warn if RSS exceeds threshold
+    _MEM_WARN_MB = 1500
+    _last_mem_check = time.time()
+    _MEM_CHECK_INTERVAL = 60.0  # Check every 60s
 
     try:
         while not _shutdown.is_set():
@@ -1056,6 +1076,15 @@ def main() -> None:
                             continue
                     else:
                         _zero_streak = 0
+
+                # Memory watchdog — check RSS every 60s
+                if now - _last_mem_check >= _MEM_CHECK_INTERVAL:
+                    _last_mem_check = now
+                    import resource
+                    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+                    if rss_mb > _MEM_WARN_MB:
+                        log(f"WARNING: Memory usage high: {rss_mb:.0f} MB (threshold: {_MEM_WARN_MB} MB)")
+                        _hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
 
             # Silence watchdog — end recording after silence_timeout seconds of quiet
             # Only for wake-word triggered recordings (PTT has natural release)

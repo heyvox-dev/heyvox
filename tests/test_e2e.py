@@ -57,24 +57,25 @@ def write_wav(path: str, samples: np.ndarray, sample_rate: int = 16000):
 def play_to_blackhole(wav_path: str):
     """Play a WAV file through BlackHole output device.
 
-    Uses afplay with the BlackHole device ID. The audio appears on
-    BlackHole's input, which heyvox reads as its microphone.
+    Uses sounddevice (which accepts PyAudio-style device indices) instead of
+    afplay (which needs CoreAudio UIDs). The audio appears on BlackHole's
+    input, which heyvox reads as its microphone.
     """
-    # Find BlackHole device ID
-    device_id = _find_blackhole_device_id()
-    if device_id is None:
-        pytest.skip("Could not find BlackHole device ID")
+    import sounddevice as sd
+    import soundfile as sf
 
-    subprocess.run(
-        ["afplay", "--device", str(device_id), wav_path],
-        timeout=30,
-    )
+    device_idx = _find_blackhole_device_id()
+    if device_idx is None:
+        pytest.skip("Could not find BlackHole device")
+
+    data, sr = sf.read(wav_path, dtype="int16")
+    sd.play(data, samplerate=sr, device=device_idx)
+    sd.wait()
 
 
 def _find_blackhole_device_id() -> int | None:
-    """Find the CoreAudio device ID for BlackHole 2ch."""
+    """Find the PyAudio/sounddevice device index for BlackHole 2ch output."""
     try:
-        # Use Python to query audio devices via pyaudio
         import pyaudio
         pa = pyaudio.PyAudio()
         for i in range(pa.get_device_count()):
@@ -90,7 +91,8 @@ def _find_blackhole_device_id() -> int | None:
 
 def read_vox_log(since_time: float) -> list[str]:
     """Read heyvox log lines since a given timestamp."""
-    log_path = "/tmp/heyvox.log"
+    # Check both possible log paths (config may override default)
+    log_path = "/tmp/vox.log" if os.path.exists("/tmp/vox.log") else "/tmp/heyvox.log"
     if not os.path.exists(log_path):
         return []
     lines = []

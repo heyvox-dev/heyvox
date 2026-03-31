@@ -39,8 +39,10 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://heyvox.dev"
+Documentation = "https://github.com/heyvox-dev/heyvox#readme"
 Repository = "https://github.com/heyvox-dev/heyvox"
 Issues = "https://github.com/heyvox-dev/heyvox/issues"
+Changelog = "https://github.com/heyvox-dev/heyvox/releases"
 
 [project.optional-dependencies]
 apple-silicon = [

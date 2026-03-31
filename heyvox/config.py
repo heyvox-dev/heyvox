@@ -33,6 +33,7 @@ class WakeWordConfig(BaseModel):
     """Wake word model names for start and stop triggers."""
     start: str = "hey_jarvis_v0.1"
     stop: str = ""  # Empty = use same as start
+    models_dir: str = ""  # Custom models directory (empty = use default locations)
 
     @model_validator(mode="after")
     def set_stop_default(self) -> "WakeWordConfig":
