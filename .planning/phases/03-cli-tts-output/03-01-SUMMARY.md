@@ -114,6 +114,10 @@ None — no external service configuration required. Kokoro and sounddevice must
 - `tts.speak()` ready for wiring into MCP `voice_speak` tool (Phase 4)
 - Cross-process CLI control (skip/mute/quiet) verified via command file IPC
 
+## Self-Check: PASSED
+
+All files verified present. All task commits verified in git log.
+
 ---
 *Phase: 03-cli-tts-output*
 *Completed: 2026-03-27*
