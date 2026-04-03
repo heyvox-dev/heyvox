@@ -1,8 +1,8 @@
 # HeyVox — Voice Coding, not Vibe Coding
 
-Talk to your AI coding agent. Hands-free, fully local, zero cloud.
+> **Early Access** — HeyVox is in beta. We're onboarding testers who use AI coding agents daily. [Request access](https://heyvox.dev#early-access) or install from source below.
 
-HeyVox adds a voice layer to any MCP-compatible AI coding agent (Claude Code, Cursor, Windsurf, Continue.dev). Wake word detection, speech-to-text, text-to-speech, and browser media control — all running locally on your Mac.
+Your AI coding agent doesn't just listen — it talks back. HeyVox adds a voice layer to any MCP-compatible AI coding agent (Claude Code, Cursor, Windsurf, Continue.dev). Wake word detection, speech-to-text, text-to-speech with configurable verbosity, and browser media control — all running locally on your Mac.
 
 ## How It Works
 
