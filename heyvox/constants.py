@@ -63,6 +63,11 @@ GRACE_BEFORE_MEDIA_RESUME = 1.5  # Pause after TTS ends before resuming YouTube/
 # Written by heyvox skip/mute/quiet CLI commands; read and deleted by TTS worker.
 TTS_CMD_FILE = "/tmp/heyvox-tts-cmd"
 
+# Verbosity state file — shared across all processes (main, Herald, watcher).
+# Contains one of: full, summary, short, skip.
+# Absent = full (default).
+VERBOSITY_FILE = "/tmp/heyvox-verbosity"
+
 # ---------------------------------------------------------------------------
 # Echo suppression constants (ECHO-01 through ECHO-06)
 # ---------------------------------------------------------------------------
@@ -107,3 +112,11 @@ STT_DEBUG_LOG = "/tmp/heyvox-stt-debug.log"
 # ipc.py uses its own DEFAULT_SOCKET_PATH as a module-level fallback for standalone use.
 # Requirement: HUD-08
 HUD_SOCKET_PATH = "/tmp/heyvox-hud.sock"
+
+# Active mic name file — written by main.py on startup and device switch.
+# Read by HUD overlay to display the current mic in the menu bar.
+ACTIVE_MIC_FILE = "/tmp/heyvox-active-mic"
+
+# Mic switch request file — written by HUD overlay menu action.
+# Contains the device name substring to switch to. Read and deleted by main.py.
+MIC_SWITCH_REQUEST_FILE = "/tmp/heyvox-mic-switch"
