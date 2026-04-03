@@ -30,12 +30,15 @@ from heyvox.constants import (
     HUD_SOCKET_PATH,
     STT_DEBUG_DIR,
     GRACE_AFTER_TTS,
+    ACTIVE_MIC_FILE,
+    MIC_SWITCH_REQUEST_FILE,
 )
 from heyvox.audio.mic import find_best_mic, open_mic_stream, detect_headset
 from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir, device_change_cue
 from heyvox.audio.stt import init_local_stt, transcribe_audio
 from heyvox.audio.tts import check_voice_command, execute_voice_command
 from heyvox.input.injection import type_text
+from heyvox.input.target import snapshot_target, restore_target
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,7 @@ recording_start_time = 0.0
 busy = False
 _audio_buffer = []
 _triggered_by_ptt = False
+_recording_target = None  # TargetSnapshot: app + text field at recording start
 _cancel_transcription = threading.Event()
 _shutdown = threading.Event()
 _adapter = None  # Initialized in main() via _build_adapter(config)
@@ -444,7 +448,7 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         preroll: Iterable of audio chunks captured before the wake word trigger.
             Prepended to the audio buffer so the first words aren't clipped.
     """
-    global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt
+    global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt, _recording_target
     if config is None:
         return
 
@@ -456,6 +460,10 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         # Pre-roll: prepend recent audio so first words aren't clipped
         _audio_buffer = list(preroll) if preroll else []
         _triggered_by_ptt = ptt
+
+    # Snapshot which app/text field is focused right now, so we can
+    # restore it at injection time even if the user clicks away.
+    _recording_target = snapshot_target()
 
     # Preload STT model in background while user speaks — hides the ~1s
     # model load latency behind recording time. No-op if already loaded.
@@ -835,23 +843,42 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
                 return
             _last_inject_time = now
 
+        # Restore the app + text field that was focused when recording started.
+        # This ensures text goes to the right place even if the user clicked
+        # away during transcription.
+        target_restored = False
+        if _recording_target:
+            log(f"Restoring target: {_recording_target.app_name} "
+                f"(field={_recording_target.element_role or 'none'})")
+            target_restored = restore_target(_recording_target)
+            if target_restored:
+                time.sleep(0.3)  # Let app/field activation settle
+
         # PTT mode: always paste into currently focused app (bypass adapter)
         # Requirement: INPT-05 (PTT = always-focused regardless of target_mode)
         if _triggered_by_ptt:
             log("Typing into active app (PTT mode)...")
             type_text(paste_text)
             log("Pasted (PTT mode, no auto-Enter)")
+        elif target_restored:
+            # Target snapshot restored the exact app + field — just paste directly
+            log("Typing into restored target field...")
+            type_text(paste_text)
+            if adapter.should_auto_send():
+                time.sleep(1.0)
+                from heyvox.input.injection import press_enter as _press_enter
+                target_app = _recording_target.app_name
+                log(f"Pressing Enter x{adapter.enter_count} → {target_app}...")
+                _press_enter(adapter.enter_count, app_name=target_app)
+                log("Sent!")
+            else:
+                log("Pasted (no auto-send)")
         else:
-            log(f"Injecting via {type(adapter).__name__}...")
+            # Fallback: use adapter's own focusing logic
+            log(f"Injecting via {type(adapter).__name__} (no target snapshot)...")
             adapter.inject_text(paste_text)
             if adapter.should_auto_send():
-                # Wait for the paste to settle — apps need time to process
-                # clipboard content, especially after focus switches.
-                # Electron apps (Conductor, Cursor) need more time than native apps.
                 time.sleep(1.0)
-                # Send Enter directly to the target app's process, not just
-                # the frontmost app. This prevents Enter going to the wrong
-                # window when another workspace steals focus during paste.
                 target_app = (
                     getattr(adapter, '_last_agent_name', None)
                     or getattr(adapter, '_target_app', None)
@@ -1094,6 +1121,16 @@ def main() -> None:
     log(f"Using input: [{dev_index}] {dev_name}")
     stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
 
+    # Write active mic name so HUD menu can display it
+    def _write_active_mic(name: str) -> None:
+        try:
+            with open(ACTIVE_MIC_FILE, "w") as f:
+                f.write(name)
+        except OSError:
+            pass
+
+    _write_active_mic(dev_name)
+
     headset_mode = detect_headset(pa, dev_index)
     log(f"Headset detected: {headset_mode} (echo suppression {'inactive' if headset_mode else 'active'})")
 
@@ -1181,6 +1218,7 @@ def main() -> None:
                 dev_name = pa.get_device_info_by_index(dev_index)['name']
                 log(f"Switched to: [{dev_index}] {dev_name}")
                 stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
+                _write_active_mic(dev_name)
                 device_change_cue(dev_name, "input")
                 _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
                 consecutive_errors = 0
@@ -1246,6 +1284,7 @@ def main() -> None:
                             log(f"Reinitialized audio: [{dev_index}] {dev_name}")
                             stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
                             headset_mode = detect_headset(pa, dev_index)
+                            _write_active_mic(dev_name)
                             device_change_cue(dev_name, "input")
                             _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
                             consecutive_errors = 0
@@ -1282,16 +1321,19 @@ def main() -> None:
             if not _is_rec and not _is_busy and now - _last_device_scan >= _DEVICE_SCAN_INTERVAL:
                 _last_device_scan = now
                 try:
-                    # Quick scan: check if device list has changed
-                    current_count = pa.get_device_count()
+                    # PortAudio caches the device list — create a temporary instance
+                    # to discover newly connected devices (e.g. USB/Bluetooth hotplug)
+                    _scan_pa = pyaudio.PyAudio()
+                    current_count = _scan_pa.get_device_count()
                     current_names = set()
                     for _di in range(current_count):
                         try:
-                            _info = pa.get_device_info_by_index(_di)
+                            _info = _scan_pa.get_device_info_by_index(_di)
                             if _info['maxInputChannels'] > 0:
                                 current_names.add(_info['name'])
                         except Exception:
                             pass
+                    _scan_pa.terminate()
 
                     # Check if a higher-priority device is available but not currently selected
                     current_dev_name = pa.get_device_info_by_index(dev_index)['name']
@@ -1324,8 +1366,54 @@ def main() -> None:
                             stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
                             headset_mode = detect_headset(pa, dev_index)
                             log(f"Headset mode: {headset_mode}")
+                            _write_active_mic(dev_name)
                             device_change_cue(dev_name, "input")
                             _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                    # Check for manual mic switch request from HUD menu
+                    if os.path.exists(MIC_SWITCH_REQUEST_FILE):
+                        try:
+                            with open(MIC_SWITCH_REQUEST_FILE) as f:
+                                requested_name = f.read().strip()
+                            os.unlink(MIC_SWITCH_REQUEST_FILE)
+                            if requested_name:
+                                log(f"Mic switch requested from menu: {requested_name}")
+                                # Find the requested device in fresh scan results
+                                target_index = None
+                                for n in current_names:
+                                    if requested_name.lower() in n.lower():
+                                        # Get index from scan PA
+                                        _scan2 = pyaudio.PyAudio()
+                                        for _di2 in range(_scan2.get_device_count()):
+                                            try:
+                                                _d2 = _scan2.get_device_info_by_index(_di2)
+                                                if _d2['name'] == n and _d2['maxInputChannels'] > 0:
+                                                    target_index = _di2
+                                                    break
+                                            except Exception:
+                                                pass
+                                        _scan2.terminate()
+                                        break
+                                if target_index is not None:
+                                    try:
+                                        stream.stop_stream()
+                                        stream.close()
+                                    except Exception:
+                                        pass
+                                    pa.terminate()
+                                    pa = pyaudio.PyAudio()
+                                    dev_index = target_index
+                                    dev_name = pa.get_device_info_by_index(dev_index)['name']
+                                    log(f"Switched to: [{dev_index}] {dev_name}")
+                                    stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
+                                    headset_mode = detect_headset(pa, dev_index)
+                                    _write_active_mic(dev_name)
+                                    device_change_cue(dev_name, "input")
+                                    _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                                else:
+                                    log(f"Requested mic not found: {requested_name}")
+                        except Exception as e:
+                            log(f"Mic switch request error: {e}")
+
                     # Also check if the default output device changed (AUDIO-11)
                     try:
                         _cur_out = pa.get_default_output_device_info()
@@ -1489,6 +1577,11 @@ def main() -> None:
         except Exception:
             pass
         pa.terminate()
+        # Clean up active mic file
+        try:
+            os.unlink(ACTIVE_MIC_FILE)
+        except FileNotFoundError:
+            pass
         log("Shutdown complete.")
 
 
