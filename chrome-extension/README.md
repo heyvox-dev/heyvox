@@ -1,6 +1,9 @@
-# HeyVox Chrome Companion
+# HeyVox Chrome Companion (WebSocket Bridge)
 
-Connects browser media (YouTube, Spotify Web, etc.) to HeyVox for voice-controlled pause/play.
+> **Note**: This is the WebSocket-based media bridge. For more reliable browser media control,
+> see the **Hush** native messaging extension at `heyvox/hush/extension/`.
+
+Connects browser media (YouTube, Spotify Web, etc.) to HeyVox for voice-controlled pause/play via WebSocket.
 
 ## Install
 
@@ -22,16 +25,14 @@ heyvox-chrome-bridge
 
 The bridge runs on `ws://127.0.0.1:9285` (localhost only). The extension reconnects automatically if the bridge restarts.
 
-## How it works
+## Hush vs Chrome Companion
 
-```
-Chrome tab (content.js)  →  background.js  →  WebSocket  →  bridge.py  →  HeyVox
-          ← pause/play ←                  ←             ←
-```
-
-- **Content script**: detects `<video>`/`<audio>`, reports play/pause state, executes commands
-- **Background worker**: relays state + commands over WebSocket
-- **Bridge server**: Python async WebSocket server, tracks per-tab state
+| | Hush (recommended) | Chrome Companion |
+|---|---|---|
+| Protocol | Native Messaging (Chrome → Python host) | WebSocket |
+| Reliability | High (Chrome manages lifecycle) | Medium (separate process) |
+| Setup | `install.sh` + load extension | Load extension + start bridge |
+| Path | `heyvox/hush/extension/` | `chrome-extension/` |
 
 ## Permissions
 

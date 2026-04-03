@@ -229,6 +229,91 @@ def _cmd_chrome_bridge(args):
     run_bridge(host=host, port=port)
 
 
+def _cmd_debug(args):
+    """Show recent STT debug recordings and pipeline info."""
+    import json
+    from heyvox.constants import STT_DEBUG_DIR, STT_DEBUG_LOG
+
+    if args.enable:
+        os.makedirs(STT_DEBUG_DIR, exist_ok=True)
+        print(f"Debug capturing enabled. Audio saved to: {STT_DEBUG_DIR}")
+        print(f"Pipeline log: {STT_DEBUG_LOG}")
+        print("Restart heyvox for changes to take effect.")
+        return
+
+    if args.disable:
+        import shutil
+        if os.path.isdir(STT_DEBUG_DIR):
+            shutil.rmtree(STT_DEBUG_DIR)
+            print(f"Debug directory removed: {STT_DEBUG_DIR}")
+        try:
+            os.remove(STT_DEBUG_LOG)
+            print(f"Debug log removed: {STT_DEBUG_LOG}")
+        except FileNotFoundError:
+            pass
+        return
+
+    if not os.path.isdir(STT_DEBUG_DIR):
+        print(f"Debug capturing is OFF. Enable with: heyvox debug --enable")
+        print(f"Then restart heyvox to start saving raw audio.")
+        return
+
+    # Read and display recent debug log entries
+    if not os.path.exists(STT_DEBUG_LOG):
+        print("No debug entries yet. Record something and check again.")
+        return
+
+    with open(STT_DEBUG_LOG) as f:
+        lines = f.readlines()
+
+    # Group entries by timestamp (raw, trimmed, _stt_result, _final share same ts)
+    recordings = {}
+    for line in lines:
+        try:
+            entry = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+        ts = entry.get("timestamp", "unknown")
+        label = entry.get("label", "")
+        if label == "raw":
+            recordings[ts] = {"raw": entry}
+        elif ts in recordings:
+            recordings[ts][label] = entry
+
+    # Show most recent N recordings
+    recent = list(recordings.items())[-args.n:]
+
+    if not recent:
+        print("No recordings captured yet.")
+        return
+
+    for ts, group in recent:
+        raw = group.get("raw", {})
+        trimmed = group.get("trimmed", {})
+        stt = group.get("_stt_result", {})
+        final = group.get("_final", {})
+
+        print(f"\n{'='*60}")
+        print(f"  Recording: {ts}")
+        print(f"  Raw:     {raw.get('duration_s', '?')}s, {raw.get('rms_dbfs', '?')} dBFS, {raw.get('num_chunks', '?')} chunks")
+        if trimmed:
+            print(f"  Trimmed: {trimmed.get('duration_s', '?')}s, {trimmed.get('rms_dbfs', '?')} dBFS, {trimmed.get('num_chunks', '?')} chunks")
+        if stt:
+            print(f"  STT raw: \"{stt.get('stt_raw', '')}\"  ({stt.get('stt_engine', '?')}, {stt.get('stt_time_s', '?')}s)")
+        if final:
+            print(f"  Echo filtered: {final.get('echo_filtered', False)}")
+            print(f"  WW stripped:   {final.get('wake_word_stripped', False)}")
+            print(f"  Final text:    \"{final.get('final_text', '')}\"")
+
+        # List WAV files for this timestamp
+        wav_files = [f for f in os.listdir(STT_DEBUG_DIR) if f.startswith(ts) and f.endswith('.wav')]
+        if wav_files:
+            print(f"  Files: {', '.join(sorted(wav_files))}")
+
+    print(f"\n  Debug dir: {STT_DEBUG_DIR}")
+    print(f"  Log file:  {STT_DEBUG_LOG}")
+
+
 def _cmd_register(args):
     """Register (or re-register) HeyVox MCP server with AI coding agents."""
     from heyvox.setup.wizard import _detect_mcp_agents, _register_mcp_agent
@@ -377,6 +462,26 @@ def main():
         help="WebSocket port (default: 9285)",
     )
     sub_chrome.set_defaults(func=_cmd_chrome_bridge)
+
+    # debug — show recent STT debug info
+    sub_debug = subparsers.add_parser("debug", help="Show recent STT recordings and debug info")
+    sub_debug.add_argument(
+        "-n",
+        type=int,
+        default=10,
+        help="Number of recent entries to show (default: 10)",
+    )
+    sub_debug.add_argument(
+        "--enable",
+        action="store_true",
+        help="Create the debug directory to start capturing",
+    )
+    sub_debug.add_argument(
+        "--disable",
+        action="store_true",
+        help="Remove the debug directory to stop capturing",
+    )
+    sub_debug.set_defaults(func=_cmd_debug)
 
     # register — register MCP server with AI agents
     sub_register = subparsers.add_parser("register", help="Register HeyVox MCP server with AI coding agents")

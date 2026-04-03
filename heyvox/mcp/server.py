@@ -90,7 +90,7 @@ def voice_status() -> str:
     from heyvox.audio.tts import is_muted, get_verbosity
 
     recording = os.path.exists(RECORDING_FLAG)
-    speaking = os.path.exists(TTS_PLAYING_FLAG)
+    speaking = os.path.exists(TTS_PLAYING_FLAG) or os.path.exists("/tmp/herald-playing.pid")
 
     if recording:
         state = "recording"
@@ -107,10 +107,10 @@ def voice_queue(action: str = "list") -> str:
     """Manage TTS queue. action: list|skip|stop|clear|mute|unmute"""
     from heyvox.audio.tts import (
         skip_current, stop_all, clear_queue,
-        set_muted, is_muted, _tts_queue,
+        set_muted, is_muted,
     )
     if action == "list":
-        return f"queued={_tts_queue.qsize()} muted={is_muted()}"
+        return f"muted={is_muted()}"
     elif action == "skip":
         skip_current()
         return "skipped"

@@ -74,10 +74,14 @@ def press_enter(count: int = 1, app_name: str | None = None) -> None:
         )
     else:
         script = f'tell application "System Events"\n    {enter_script}\nend tell'
-    subprocess.run(
+    result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT,
     )
+    if result.returncode != 0:
+        import sys
+        print(f"[injection] press_enter failed (rc={result.returncode}): "
+              f"{result.stderr.decode().strip()}", file=sys.stderr)
 
 
 def focus_app(app_name: str) -> None:

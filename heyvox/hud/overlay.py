@@ -28,18 +28,17 @@ import sys
 # Layout constants
 # ---------------------------------------------------------------------------
 
-PILL_W_IDLE = 100
-PILL_H_IDLE = 34
-PILL_W_ACTIVE = 90
-PILL_H_ACTIVE = 28
+PILL_W = 100
+PILL_H = 28
 PILL_MARGIN_TOP = 8
 PILL_MARGIN_RIGHT = 16  # Default distance from right edge of screen
 ANIM_DURATION = 0.2
 POSITION_FILE = "/tmp/heyvox-hud-position.json"  # Persists user-dragged position
+_MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
 
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
 STATE_COLORS = {
-    "idle":       (0.72, 0.53, 0.04, 0.75),  # Starfleet gold
+    "idle":       (0.35, 0.35, 0.40, 0.65),  # Subtle gray
     "listening":  (1.0, 0.2, 0.2, 0.8),
     "processing": (1.0, 0.7, 0.0, 0.8),
     "speaking":   (0.2, 0.8, 0.3, 0.8),
@@ -321,44 +320,56 @@ def _apply_state(
     screen = NSScreen.mainScreen().frame()
     is_active = state_str in ("listening", "processing", "speaking")
 
-    # Floating pill: only visible during active states (recording/processing/speaking)
-    # When idle, the menu bar icon is sufficient — no need for floating window.
-    if not is_active:
+    # In menu-bar-only mode, the pill is never shown.
+    # Otherwise, show pill always — idle uses compact size, active uses active size.
+    if _MENU_BAR_ONLY:
         window.orderOut_(None)
     else:
-        new_pill_w = PILL_W_ACTIVE
-        new_pill_h = PILL_H_ACTIVE
-
         saved = _load_position()
         if saved:
             x, y = saved
         else:
-            x, y = _default_position(screen, new_pill_w, new_pill_h)
+            x, y = _default_position(screen, PILL_W, PILL_H)
 
         if not window.isVisible():
             window.orderFrontRegardless()
 
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(ANIM_DURATION)
-        window.animator().setFrame_display_(((x, y), (new_pill_w, new_pill_h)), True)
+        window.animator().setFrame_display_(((x, y), (PILL_W, PILL_H)), True)
         NSAnimationContext.endGrouping()
 
-        content_view.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
-        color_overlay.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+        content_view.setFrame_(((0, 0), (PILL_W, PILL_H)))
+        color_overlay.setFrame_(((0, 0), (PILL_W, PILL_H)))
 
         ve = window.contentView()
         if ve and ve.layer():
-            ve.layer().setCornerRadius_(new_pill_h / 2)
+            ve.layer().setCornerRadius_(PILL_H / 2)
         if color_overlay.layer():
-            color_overlay.layer().setCornerRadius_(new_pill_h / 2)
+            color_overlay.layer().setCornerRadius_(PILL_H / 2)
 
-    # Idle: floating window is hidden, menu bar icon handles everything
-    if not is_active:
-        return
-
-    # Hide idle label during active states
+    # Show/hide idle label
     if idle_label is not None:
-        idle_label.setHidden_(True)
+        idle_label.setHidden_(is_active)
+        # Show temporary status text (e.g. "Sent to Conductor") then revert
+        if not is_active and tts_text:
+            idle_label.setStringValue_(tts_text)
+            # Schedule revert to default label after 3 seconds
+            from Foundation import NSTimer
+            def _revert_label(timer):
+                idle_label.setStringValue_("\U0001f399 HeyVox")
+            NSTimer.scheduledTimerWithTimeInterval_repeats_block_(3.0, False, _revert_label)
+        elif not is_active:
+            idle_label.setStringValue_("\U0001f399 HeyVox")
+
+    if not is_active:
+        # Idle: show label, hide active elements
+        waveform_view.setHidden_(True)
+        transcript_label.setHidden_(True)
+        skip_btn, stop_btn = tts_controls
+        skip_btn.setHidden_(True)
+        stop_btn.setHidden_(True)
+        return
 
     # Waveform (visible only when listening)
     wf_visible = state_str == "listening"
@@ -405,10 +416,11 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
 
             if msg_type == "state":
                 state = msg_dict.get("state", "idle")
+                text = msg_dict.get("text")
                 _apply_state(
                     state, window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
-                    idle_label=idle_label,
+                    idle_label=idle_label, tts_text=text,
                     status_item=status_item,
                     update_status_menu=update_status_menu,
                 )
@@ -506,13 +518,15 @@ def _make_menu_action_class():
             import os
             if os.path.exists(_TTS_MUTE_FLAG):
                 os.unlink(_TTS_MUTE_FLAG)
+                sender.setState_(0)  # NSOffState — no checkmark
             else:
                 with open(_TTS_MUTE_FLAG, "w") as f:
                     f.write("")
+                sender.setState_(1)  # NSOnState — checkmark
 
         def openLog_(self, sender):
             import subprocess
-            subprocess.Popen(["open", "-a", "Console", "/tmp/vox.log"])
+            subprocess.Popen(["open", "-a", "Console", "/tmp/heyvox.log"])
 
         def openConfig_(self, sender):
             import subprocess
@@ -523,6 +537,37 @@ def _make_menu_action_class():
         def openHelp_(self, sender):
             import webbrowser
             webbrowser.open("https://heyvox.dev")
+
+        def toggleOverlay_(self, sender):
+            """Toggle the floating pill overlay on/off at runtime."""
+            global _MENU_BAR_ONLY
+            _MENU_BAR_ONLY = not _MENU_BAR_ONLY
+            if _MENU_BAR_ONLY:
+                sender.setState_(0)  # NSOffState — no checkmark
+                # Hide the pill window
+                from AppKit import NSApplication
+                for w in NSApplication.sharedApplication().windows():
+                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
+                        w.orderOut_(None)
+            else:
+                sender.setState_(1)  # NSOnState — checkmark
+                # Immediately show the pill window
+                from AppKit import NSApplication
+                for w in NSApplication.sharedApplication().windows():
+                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
+                        w.orderFrontRegardless()
+
+        def restartHeyVox_(self, sender):
+            """Kill heyvox.main and relaunch it, then restart the overlay."""
+            import subprocess, sys
+            # Kill the main process
+            subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+            import time; time.sleep(0.5)
+            # Relaunch main process
+            subprocess.Popen(
+                [sys.executable, "-c", "from heyvox.main import run; run()"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
         def quitHeyVox_(self, sender):
             """Send SIGTERM to parent heyvox.main process, then quit overlay."""
@@ -601,18 +646,27 @@ def _build_transcript_menu(handler):
 
     menu.addItem_(NSMenuItem.separatorItem())
 
-    # -- Section 2: Quick toggles --
+    # -- Section 2: Quick toggles (fixed titles, checkmark = active) --
     is_muted = os.path.exists("/tmp/claude-tts-mute")
-    mute_title = "Unmute TTS" if is_muted else "Mute TTS"
     mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        mute_title, "toggleMute:", "",
+        "Mute TTS", "toggleMute:", "",
     )
     mute_item.setTarget_(handler)
     mute_item.setEnabled_(True)
     if is_muted:
-        mute_item.setState_(1)  # NSOnState — checkmark
+        mute_item.setState_(1)  # checkmark = muted
     _styled(mute_item)
     menu.addItem_(mute_item)
+
+    overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Show Overlay", "toggleOverlay:", "",
+    )
+    overlay_item.setTarget_(handler)
+    overlay_item.setEnabled_(True)
+    if not _MENU_BAR_ONLY:
+        overlay_item.setState_(1)  # checkmark = overlay visible
+    _styled(overlay_item)
+    menu.addItem_(overlay_item)
 
     menu.addItem_(NSMenuItem.separatorItem())
 
@@ -647,6 +701,14 @@ def _build_transcript_menu(handler):
 
     menu.addItem_(NSMenuItem.separatorItem())
 
+    restart_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Restart", "restartHeyVox:", "",
+    )
+    restart_item.setTarget_(handler)
+    restart_item.setEnabled_(True)
+    _styled(restart_item)
+    menu.addItem_(restart_item)
+
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Quit HeyVox", "quitHeyVox:", "",
     )
@@ -662,11 +724,14 @@ def _build_transcript_menu(handler):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def main(menu_bar_only: bool = False):
     """Launch the HUD overlay NSApplication.
 
     Builds the frosted-glass pill window, starts the HUDServer on a daemon
     thread, installs SIGTERM/SIGINT handlers, and runs the AppKit event loop.
+
+    Args:
+        menu_bar_only: If True, only show the menu bar status icon (no floating pill).
 
     Requirements: HUD-01 through HUD-08
     """
@@ -691,6 +756,9 @@ def main():
 
     from heyvox.hud.ipc import HUDServer, DEFAULT_SOCKET_PATH
 
+    global _MENU_BAR_ONLY
+    _MENU_BAR_ONLY = menu_bar_only
+
     # ---- Application setup ----
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(2)  # NSApplicationActivationPolicyProhibited — no dock icon
@@ -701,12 +769,12 @@ def main():
     if saved:
         x, y = saved
     else:
-        x, y = _default_position(screen, PILL_W_ACTIVE, PILL_H_ACTIVE)
+        x, y = _default_position(screen, PILL_W, PILL_H)
 
     # ---- NSWindow (borderless, status level, transparent) ----
     # Starts hidden (idle) — shown on first active state
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((x, y), (PILL_W_ACTIVE, PILL_H_ACTIVE)),
+        ((x, y), (PILL_W, PILL_H)),
         NSWindowStyleMaskBorderless,
         NSBackingStoreBuffered,
         False,
@@ -725,12 +793,12 @@ def main():
     )
 
     # ---- Frosted glass (NSVisualEffectView as content view) — HUD-06 ----
-    ve = NSVisualEffectView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    ve = NSVisualEffectView.alloc().initWithFrame_(((0, 0), (PILL_W, PILL_H)))
     ve.setMaterial_(HUD_MATERIAL)
     ve.setBlendingMode_(0)   # NSVisualEffectBlendingModeBehindWindow
     ve.setState_(1)          # NSVisualEffectStateActive
     ve.setWantsLayer_(True)
-    ve.layer().setCornerRadius_(PILL_H_ACTIVE / 2)  # pill shape (HUD-06)
+    ve.layer().setCornerRadius_(PILL_H / 2)  # pill shape (HUD-06)
     ve.layer().setMasksToBounds_(True)
     window.setContentView_(ve)
 
@@ -738,35 +806,35 @@ def main():
     WaveformView = _make_waveform_view_class()
     HUDContentView = _make_content_view_class()
 
-    color_overlay = NSView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    color_overlay = NSView.alloc().initWithFrame_(((0, 0), (PILL_W, PILL_H)))
     r, g, b, a = STATE_COLORS["idle"]
     color_overlay.setWantsLayer_(True)
-    color_overlay.layer().setCornerRadius_(PILL_H_ACTIVE / 2)
+    color_overlay.layer().setCornerRadius_(PILL_H / 2)
     color_overlay.layer().setMasksToBounds_(True)
     idle_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 0.3)
     color_overlay.setBackgroundColor_(idle_color)
     ve.addSubview_(color_overlay)
 
     # ---- HUDContentView (selective hit-testing for mixed click-through) ----
-    content_view = HUDContentView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    content_view = HUDContentView.alloc().initWithFrame_(((0, 0), (PILL_W, PILL_H)))
     ve.addSubview_(content_view)
 
     # ---- Waveform view — HUD-02 ----
     # Sized for active state — hidden when idle
     wf_margin = 4
-    wf_w = PILL_W_ACTIVE - wf_margin * 2 - 40  # leave room for buttons
-    wf_h = PILL_H_ACTIVE - 4
+    wf_w = PILL_W - wf_margin * 2 - 40  # leave room for buttons
+    wf_h = PILL_H - 4
     wf_x = wf_margin
-    wf_y = (PILL_H_ACTIVE - wf_h) / 2
+    wf_y = (PILL_H - wf_h) / 2
     waveform_view = WaveformView.alloc().initWithFrame_(((wf_x, wf_y), (wf_w, wf_h)))
     waveform_view.setHidden_(True)
     content_view.addSubview_(waveform_view)
 
     # ---- Transcript label — HUD-03 ----
     label_margin = 4
-    label_w = PILL_W_ACTIVE - label_margin * 2 - 40
-    label_h = PILL_H_ACTIVE - 2
-    label_y = (PILL_H_ACTIVE - label_h) / 2
+    label_w = PILL_W - label_margin * 2 - 40
+    label_h = PILL_H - 2
+    label_y = (PILL_H - label_h) / 2
     transcript_label = NSTextField.alloc().initWithFrame_(
         ((label_margin, label_y), (label_w, label_h))
     )
@@ -783,12 +851,12 @@ def main():
     transcript_label.setHidden_(True)
     content_view.addSubview_(transcript_label)
 
-    # ---- Idle label ("🎙 Vox" centered in idle pill) ----
+    # ---- Idle label ("🎙 HeyVox" centered in idle pill) ----
     NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
     idle_label_h = 18
-    idle_label_y = (PILL_H_IDLE - idle_label_h) / 2
+    idle_label_y = (PILL_H - idle_label_h) / 2
     idle_label = NSTextField.alloc().initWithFrame_(
-        ((0, idle_label_y), (PILL_W_IDLE, idle_label_h))
+        ((0, idle_label_y), (PILL_W, idle_label_h))
     )
     idle_label.setEditable_(False)
     idle_label.setSelectable_(False)
@@ -799,8 +867,8 @@ def main():
     idle_label.setAlignment_(NSTextAlignmentCenter)
     idle_label.cell().setWraps_(False)
     idle_label.cell().setScrollable_(False)
-    idle_label.setStringValue_("\U0001f399 Vox")
-    idle_label.setHidden_(True)
+    idle_label.setStringValue_("\U0001f399 HeyVox")
+    idle_label.setHidden_(False)
     content_view.addSubview_(idle_label)
 
     # ---- TTS control buttons — HUD-04 ----
@@ -809,10 +877,10 @@ def main():
 
     btn_w = 22
     btn_h = 14
-    btn_y = (PILL_H_ACTIVE - btn_h) / 2
+    btn_y = (PILL_H - btn_h) / 2
     btn_gap = 1
     btn_margin_right = 4
-    stop_x = PILL_W_ACTIVE - btn_margin_right - btn_w
+    stop_x = PILL_W - btn_margin_right - btn_w
     skip_x = stop_x - btn_gap - btn_w
 
     skip_btn = NSButton.alloc().initWithFrame_(((skip_x, btn_y), (btn_w, btn_h)))
@@ -926,4 +994,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    main(menu_bar_only="--menu-bar-only" in _sys.argv)

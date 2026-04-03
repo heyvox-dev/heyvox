@@ -35,6 +35,7 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     - On PTT key release: calls callbacks["on_stop"]()
     - On Escape (busy): calls callbacks["on_cancel_transcription"]()
     - On Escape (recording): calls callbacks["on_cancel_recording"]()
+    - On Escape (speaking): calls callbacks["on_cancel_tts"]()
 
     Args:
         ptt_key: Key name from _PTT_KEY_FLAGS (e.g. "fn", "right_cmd").
@@ -43,8 +44,10 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             - "on_stop": callable() — PTT key released, stop recording
             - "on_cancel_transcription": callable() — Escape during transcription
             - "on_cancel_recording": callable() — Escape during recording
+            - "on_cancel_tts": callable() — Escape during TTS playback
             - "is_busy": callable() -> bool — is transcription in progress?
             - "is_recording": callable() -> bool — is recording active?
+            - "is_speaking": callable() -> bool — is TTS playing?
         log_fn: Optional callable(str) for log output.
 
     Returns:
@@ -85,6 +88,11 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
                     cancel_r = callbacks.get("on_cancel_recording")
                     if cancel_r:
                         cancel_r()
+                elif callbacks.get("is_speaking", lambda: False)():
+                    cancel_tts = callbacks.get("on_cancel_tts")
+                    if cancel_tts:
+                        cancel_tts()
+                    _log("Escape: stopping TTS")
             return event
 
         # Only process modifier flag changes for PTT

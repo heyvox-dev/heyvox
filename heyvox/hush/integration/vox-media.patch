@@ -1,0 +1,100 @@
+--- a/heyvox/audio/media.py
++++ b/heyvox/audio/media.py
+@@ -1,10 +1,12 @@
+ """
+ Media playback control for heyvox.
+
+-Detection & control strategy (in order):
+-1. nowplaying-cli + MediaRemote — for native apps (Spotify, Music, Podcasts)
+-2. AppleScript + Chrome JavaScript — for browser media (YouTube in Chrome)
+-3. Fallback: Chrome tab URL detection + media key — if JS is disabled
++Detection & control strategy (in priority order):
++1. Hush (Chrome extension) — for browser media via Unix socket (most reliable)
++2. nowplaying-cli + MediaRemote — for native apps (Spotify, Music, Podcasts)
++3. AppleScript + Chrome JavaScript — for browser media if Hush unavailable
++4. Fallback: Chrome tab URL detection + media key — if JS is disabled
++Hush is optional — if not running, falls back to existing methods.
+ """
+
+ import ctypes
+@@ -12,6 +14,8 @@
+ import os
+ import subprocess
+ import time
++import json
++import socket as _socket
+
+
+ def _log(msg: str) -> None:
+@@ -56,6 +60,39 @@
+ _VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com"]
+
+
++# ---------------------------------------------------------------------------
++# Hush (Chrome extension) integration
++# ---------------------------------------------------------------------------
++
++_HUSH_SOCK = "/tmp/hush.sock"
++
++
++def _hush_command(action: str) -> dict | None:
++    """Send a command to the Hush Chrome extension via Unix socket.
++
++    Returns the parsed response dict, or None if Hush is unavailable.
++    """
++    if not os.path.exists(_HUSH_SOCK):
++        return None
++    try:
++        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
++        sock.settimeout(3.0)
++        sock.connect(_HUSH_SOCK)
++        sock.sendall(json.dumps({"action": action}).encode() + b"\n")
++        data = b""
++        while True:
++            chunk = sock.recv(4096)
++            if not chunk:
++                break
++            data += chunk
++            if b"\n" in data:
++                break
++        sock.close()
++        resp = json.loads(data)
++        return resp if "error" not in resp else None
++    except (OSError, json.JSONDecodeError, ValueError):
++        return None
++
++
+ def _get_mr():
+@@ -297,6 +334,17 @@
+     if os.path.exists(_PAUSE_FLAG):
+         _log("pause_media: already paused by us (flag exists)")
+         return True
++
++    # --- Tier 1: Try Hush for browser media (most reliable) ---
++    hush_resp = _hush_command("pause")
++    if hush_resp is not None:
++        paused_count = hush_resp.get("pausedCount", 0)
++        if paused_count > 0:
++            with open(_PAUSE_FLAG, "w") as f:
++                f.write("hush")
++            _log(f"pause_media: paused {paused_count} browser tab(s) via Hush")
++            return True
++        _log("pause_media: Hush available but no browser media playing")
+
+     # --- Try native media first (Spotify, Music, Podcasts) ---
+     native_state = _is_media_playing_native()
+@@ -390,6 +438,15 @@
+     # Graceful delay before resuming
+     time.sleep(RESUME_DELAY)
+
++    if method == "hush":
++        hush_resp = _hush_command("resume")
++        if hush_resp is not None:
++            _log(f"resume_media: Hush resume result={hush_resp}")
++            return True
++        # Hush unavailable — can't fall back since we don't know what was playing
++        _log("resume_media: Hush unavailable for resume, media may stay paused")
++        return False
++
+     if method == "mr":
+         mr = _get_mr()

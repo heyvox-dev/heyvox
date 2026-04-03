@@ -75,3 +75,33 @@ def audio_cue(name: str, cues_dir: str | None = None) -> None:
 def is_suppressed() -> bool:
     """Return True if wake word detection should be suppressed right now."""
     return time.time() < _cue_suppress_until
+
+
+def device_change_cue(device_name: str, device_type: str = "input") -> None:
+    """Play a macOS system sound to notify the user of an audio device change.
+
+    Uses the system Tink sound for a subtle notification.
+
+    Args:
+        device_name: Name of the new device (for logging).
+        device_type: "input" (mic) or "output" (speaker).
+
+    Requirement: AUDIO-11
+    """
+    global _cue_suppress_until
+
+    # Use macOS system sounds — subtle ping for device changes
+    sound = "/System/Library/Sounds/Tink.aiff"
+    if not os.path.exists(sound):
+        sound = "/System/Library/Sounds/Pop.aiff"
+    if not os.path.exists(sound):
+        return
+
+    _cue_suppress_until = time.time() + 1.0
+
+    subprocess.Popen(
+        ["afplay", sound],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )

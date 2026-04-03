@@ -91,6 +91,17 @@ AEC_DEFAULT_DELAY_MS = 50
 # HUD overlay constants (Phase 5)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# STT Debug constants
+# ---------------------------------------------------------------------------
+
+# Directory for saving raw audio recordings and debug logs
+STT_DEBUG_DIR = "/tmp/heyvox-debug"
+
+# Structured debug log for STT pipeline analysis
+STT_DEBUG_LOG = "/tmp/heyvox-stt-debug.log"
+
+# ---------------------------------------------------------------------------
 # HUD overlay Unix socket path — single source of truth.
 # Used by HUDClient (sender in main.py/tts.py) and HUDServer (receiver in overlay.py).
 # ipc.py uses its own DEFAULT_SOCKET_PATH as a module-level fallback for standalone use.
