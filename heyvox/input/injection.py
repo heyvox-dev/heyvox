@@ -2,7 +2,9 @@
 Text injection into the focused macOS application.
 
 Uses clipboard + Cmd-V for speed (keystroke simulation is very slow for
-long text). Saves and restores the previous clipboard content around each paste.
+long text). Does NOT restore clipboard after paste — the transcribed text
+remains in the clipboard, which prevents a race condition where Electron
+apps read the restored (old) content instead of the pasted text.
 """
 
 import subprocess
@@ -34,16 +36,14 @@ def _set_clipboard(text: str) -> bool:
 def type_text(text: str) -> None:
     """Paste text into the focused app via clipboard + Cmd-V.
 
-    Saves current clipboard content, sets it to text, sends Cmd-V,
-    then restores the original clipboard.
+    Sets clipboard to text, sends Cmd-V. The transcribed text remains
+    in the clipboard afterward (no restore — prevents race condition
+    with Electron apps reading the clipboard asynchronously).
 
     Args:
         text: Text to inject.
     """
     import sys
-
-    old_clip = get_clipboard_text()
-    old_was_image = clipboard_is_image()
 
     # Set clipboard via pbcopy (handles all characters safely)
     if not _set_clipboard(text):
@@ -62,13 +62,11 @@ def type_text(text: str) -> None:
         ["osascript", "-e", 'tell application "System Events"\n    keystroke "v" using command down\nend tell'],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT,
     )
-    time.sleep(0.3)  # Electron apps need time to read clipboard after Cmd-V
-
-    # Restore previous clipboard
-    if old_was_image:
-        pass  # Cannot restore image clipboard from Python — leave as-is
-    elif old_clip:
-        _set_clipboard(old_clip)
+    # NOTE: We intentionally do NOT restore the previous clipboard.
+    # Electron apps (Conductor, Cursor) read the clipboard asynchronously
+    # after Cmd-V — if we restore too soon, the app reads the old content
+    # instead of the transcribed text. Leaving the transcription in the
+    # clipboard is safe and lets the user re-paste if needed.
 
 
 def press_enter(count: int = 1, app_name: str | None = None) -> None:
