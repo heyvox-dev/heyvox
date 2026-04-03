@@ -133,8 +133,11 @@ def speak(
     if is_muted():
         return
 
-    # Resolve verbosity: per-call > session-level
-    v = Verbosity(verbosity) if verbosity else _verbosity
+    # Resolve verbosity: per-call > file-level > session-level
+    if verbosity:
+        v = Verbosity(verbosity)
+    else:
+        v = Verbosity(get_verbosity())
     filtered = apply_verbosity(text, v)
     if filtered is None:
         return
@@ -188,13 +191,36 @@ def is_muted() -> bool:
 
 
 def set_verbosity(level: str) -> None:
-    """Set session-level verbosity mode."""
+    """Set verbosity mode (persisted to file for cross-process access)."""
     global _verbosity
     _verbosity = Verbosity(level)
+    # Write to shared file so Herald hooks/watcher can read it
+    from heyvox.constants import VERBOSITY_FILE
+    try:
+        if level == "full":
+            # Remove file = default (full)
+            os.remove(VERBOSITY_FILE)
+        else:
+            with open(VERBOSITY_FILE, "w") as f:
+                f.write(level)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning(f"Failed to write verbosity file: {e}")
 
 
 def get_verbosity() -> str:
-    """Return current session-level verbosity as string."""
+    """Return current verbosity (reads from shared file for cross-process consistency)."""
+    from heyvox.constants import VERBOSITY_FILE
+    try:
+        with open(VERBOSITY_FILE) as f:
+            level = f.read().strip()
+        if level in ("full", "summary", "short", "skip"):
+            return level
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
     return _verbosity.value
 
 
@@ -208,6 +234,15 @@ VOICE_COMMANDS = {
     r"^stop(\s+(all|audio|everything))?$": ("tts-stop", "Stopping all audio"),
     r"^(toggle\s+)?mute$": ("tts-mute", "Toggling mute"),
     r"^replay(\s+last)?$": ("tts-replay", "Replaying last message"),
+    # Verbosity voice commands
+    r"^be\s+quiet$": ("verbosity-short", "Short mode"),
+    r"^be\s+brief$": ("verbosity-short", "Short mode"),
+    r"^(be\s+)?verbose$": ("verbosity-full", "Full mode"),
+    r"^full\s+verbosity$": ("verbosity-full", "Full mode"),
+    r"^shut\s+up$": ("verbosity-skip", "Silent mode"),
+    r"^(be\s+)?silent$": ("verbosity-skip", "Silent mode"),
+    r"^summary(\s+mode)?$": ("verbosity-summary", "Summary mode"),
+    r"^speak\s+normally$": ("verbosity-full", "Full mode"),
 }
 
 
@@ -229,6 +264,19 @@ def execute_voice_command(action_key: str, feedback: str, tts_script_path: str =
             print(msg, flush=True)
 
     _log(f"Voice command: {action_key} ({feedback})")
+
+    # Verbosity voice commands
+    verbosity_map = {
+        "verbosity-full": "full",
+        "verbosity-summary": "summary",
+        "verbosity-short": "short",
+        "verbosity-skip": "skip",
+    }
+    if action_key in verbosity_map:
+        level = verbosity_map[action_key]
+        set_verbosity(level)
+        _log(f"Verbosity set to {level}")
+        return
 
     # Map action keys to Herald commands
     herald_cmds = {

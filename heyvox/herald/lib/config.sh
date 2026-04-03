@@ -19,6 +19,7 @@ HERALD_ORCH_LOCK="/tmp/herald-orchestrator.lock"
 HERALD_PLAYING_PID="/tmp/herald-playing.pid"
 
 # State files
+HEYVOX_VERBOSITY_FILE="/tmp/heyvox-verbosity"
 HERALD_MUTE_FLAG="/tmp/herald-mute"
 HERALD_PAUSE_FLAG="/tmp/herald-pause"
 HEYVOX_RECORDING_FLAG="/tmp/heyvox-recording"
@@ -67,6 +68,18 @@ herald_log() {
 
 herald_is_muted() {
   [ -f "$HERALD_MUTE_FLAG" ]
+}
+
+herald_get_verbosity() {
+  if [ -f "$HEYVOX_VERBOSITY_FILE" ]; then
+    cat "$HEYVOX_VERBOSITY_FILE" 2>/dev/null
+  else
+    echo "full"
+  fi
+}
+
+herald_is_skip() {
+  [ "$(herald_get_verbosity)" = "skip" ]
 }
 
 herald_is_paused() {

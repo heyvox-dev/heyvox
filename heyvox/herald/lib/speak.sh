@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/config.sh"
 
 herald_is_muted && exit 0
 herald_is_paused && exit 0
+herald_is_skip && { herald_log "SPEAK: verbosity=skip, skipping"; exit 0; }
 
 RESULT=$(cat | python3 -c "
 import sys, json, re, os, subprocess, time, hashlib

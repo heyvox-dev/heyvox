@@ -110,10 +110,52 @@ def detect_workspace_from_path(jsonl_path):
     return ""
 
 
+VERBOSITY_FILE = "/tmp/heyvox-verbosity"
+
+
+def _get_verbosity():
+    """Read verbosity from shared state file. Returns 'full' if absent."""
+    try:
+        with open(VERBOSITY_FILE) as f:
+            level = f.read().strip()
+        return level if level in ("full", "summary", "short", "skip") else "full"
+    except FileNotFoundError:
+        return "full"
+
+
+def _apply_verbosity(text, verbosity):
+    """Apply verbosity filtering to speech text. Returns None to skip."""
+    if verbosity == "skip":
+        return None
+    if verbosity == "full":
+        return text
+    if verbosity == "short":
+        match = re.search(r'[.!?]', text)
+        if match:
+            return text[:match.end()].strip()[:100]
+        return text[:100]
+    if verbosity == "summary":
+        if len(text) <= 150:
+            return text
+        trunc = text[:150]
+        last_sp = trunc.rfind(' ')
+        if last_sp > 0:
+            trunc = trunc[:last_sp]
+        return trunc + "..."
+    return text
+
+
 def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
                     workspace=""):
     """Send speech text to Kokoro daemon and enqueue result."""
     global last_tts_time
+
+    # Apply verbosity filtering before synthesis
+    verbosity = _get_verbosity()
+    speech = _apply_verbosity(speech, verbosity)
+    if speech is None:
+        log(f"Verbosity=skip, dropping TTS")
+        return False
 
     now = time.time()
     if now - last_tts_time < TTS_DEDUP_SECS:
