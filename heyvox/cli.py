@@ -50,24 +50,54 @@ def _cmd_restart(args):
 
 
 def _cmd_status(args):
-    """Show the current heyvox service state with PID.
+    """Show full HeyVox system status.
 
     Requirement: CLI-01
     """
+    import glob
     from heyvox import __version__
     from heyvox.setup.launchd import get_status, PLIST_PATH
 
     status = get_status()
 
+    # Service status
     if not PLIST_PATH.exists():
-        print(f"HeyVox v{__version__} — Not installed (run: heyvox setup)")
+        svc = "Not installed (run: heyvox setup)"
     elif status["running"]:
-        print(f"HeyVox v{__version__} — Running (PID {status['pid']})")
+        svc = f"Running (PID {status['pid']})"
     elif status["loaded"]:
-        code = status["exit_code"]
-        print(f"HeyVox v{__version__} — Stopped (exit code {code})")
+        svc = f"Stopped (exit code {status['exit_code']})"
     else:
-        print(f"HeyVox v{__version__} — Not loaded")
+        svc = "Not loaded"
+    print(f"HeyVox v{__version__} — {svc}")
+
+    # TTS state
+    from heyvox.audio.tts import is_muted, get_verbosity
+    mute_str = "yes" if is_muted() else "no"
+    print(f"  Verbosity:  {get_verbosity()}")
+    print(f"  Muted:      {mute_str}")
+
+    # Queue
+    queue_files = glob.glob("/tmp/herald-queue/*.wav")
+    hold_files = glob.glob("/tmp/herald-hold/*.wav")
+    print(f"  Queue:      {len(queue_files)} queued, {len(hold_files)} held")
+
+    # Daemons
+    import os
+    def _pid_alive(pidfile):
+        try:
+            pid = int(open(pidfile).read().strip())
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    orch = "running" if _pid_alive("/tmp/herald-orchestrator.pid") else "stopped"
+    kokoro = "running" if (os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")) else "stopped"
+    hud = "running" if os.path.exists("/tmp/heyvox-hud.sock") else "stopped"
+    print(f"  Orchestrator: {orch}")
+    print(f"  Kokoro TTS:   {kokoro}")
+    print(f"  HUD:          {hud}")
 
 
 def _cmd_setup(args):
@@ -131,48 +161,96 @@ def _cmd_speak(args):
 
 
 def _cmd_skip(args):
-    """Write a skip command to the TTS command file.
-
-    The running heyvox TTS worker reads this file between synthesis chunks and
-    stops current playback.
+    """Skip current TTS playback via Herald.
 
     Requirement: CLI-06
     """
-    from heyvox.constants import TTS_CMD_FILE
-    try:
-        with open(TTS_CMD_FILE, "w") as f:
-            f.write("skip\n")
-        print("Skipped current TTS.")
-    except Exception as e:
-        print(f"Error writing TTS command: {e}", file=sys.stderr)
+    from heyvox.audio.tts import skip_current
+    skip_current()
+    print("Skipped current TTS.")
 
 
 def _cmd_mute(args):
-    """Toggle TTS mute state via command file IPC.
+    """Toggle TTS mute on/off.
 
     Requirement: CLI-06
     """
-    from heyvox.constants import TTS_CMD_FILE
-    try:
-        with open(TTS_CMD_FILE, "w") as f:
-            f.write("mute-toggle\n")
-        print("TTS mute toggled.")
-    except Exception as e:
-        print(f"Error writing TTS command: {e}", file=sys.stderr)
+    from heyvox.audio.tts import is_muted, set_muted
+    new_state = not is_muted()
+    set_muted(new_state)
+    # Also toggle Herald's mute flag for the bash pipeline
+    mute_flag = "/tmp/herald-mute"
+    tts_mute_flag = "/tmp/claude-tts-mute"
+    import os
+    if new_state:
+        open(mute_flag, "w").close()
+        open(tts_mute_flag, "w").close()
+        print("TTS muted.")
+    else:
+        for f in (mute_flag, tts_mute_flag):
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+        print("TTS unmuted.")
 
 
 def _cmd_quiet(args):
-    """Set TTS verbosity to short for the session via command file IPC.
+    """Set TTS verbosity to short (first sentence only).
 
     Requirement: CLI-06
     """
-    from heyvox.constants import TTS_CMD_FILE
-    try:
-        with open(TTS_CMD_FILE, "w") as f:
-            f.write("quiet\n")
-        print("TTS verbosity set to short.")
-    except Exception as e:
-        print(f"Error writing TTS command: {e}", file=sys.stderr)
+    from heyvox.audio.tts import set_verbosity, get_verbosity
+    set_verbosity("short")
+    print(f"TTS verbosity set to short (was {get_verbosity()}).")
+
+
+def _cmd_verbose(args):
+    """Set TTS verbosity. Levels: full, summary, short, skip.
+
+    Without arguments: show current level.
+    With argument: set to that level.
+    """
+    from heyvox.audio.tts import set_verbosity, get_verbosity
+    level = getattr(args, "level", None)
+    if not level:
+        print(f"TTS verbosity: {get_verbosity()}")
+        return
+    valid = {"full", "summary", "short", "skip"}
+    if level not in valid:
+        print(f"Invalid level '{level}'. Choose from: {', '.join(sorted(valid))}", file=sys.stderr)
+        return
+    old = get_verbosity()
+    set_verbosity(level)
+    print(f"TTS verbosity: {old} → {level}")
+
+
+def _cmd_commands(args):
+    """Show all available voice commands."""
+    from heyvox.audio.tts import VOICE_COMMANDS
+    print("Voice Commands (say these after the wake word):\n")
+
+    # Group by category
+    categories = {
+        "Playback": ["tts-next", "tts-skip", "tts-stop", "tts-mute", "tts-replay"],
+        "Verbosity": ["verbosity-full", "verbosity-summary", "verbosity-short", "verbosity-skip"],
+    }
+    action_to_patterns = {}
+    for pattern, (action, feedback) in VOICE_COMMANDS.items():
+        if action not in action_to_patterns:
+            action_to_patterns[action] = []
+        # Clean up regex for display
+        display = pattern.lstrip("^").rstrip("$").replace(r"\s+", " ").replace("(", "").replace(")", "").replace("?", "").replace("|", "/")
+        action_to_patterns[action].append(display)
+
+    for cat, actions in categories.items():
+        print(f"  {cat}:")
+        for action in actions:
+            if action in action_to_patterns:
+                phrases = action_to_patterns[action]
+                feedback = next(fb for _, (a, fb) in VOICE_COMMANDS.items() if a == action)
+                print(f"    {' / '.join(phrases):40s} → {feedback}")
+        print()
 
 
 def _cmd_history(args):
@@ -421,9 +499,24 @@ def main():
     sub_mute = subparsers.add_parser("mute", help="Toggle TTS mute on/off")
     sub_mute.set_defaults(func=_cmd_mute)
 
-    # quiet — set verbosity to short for the session (CLI-06)
-    sub_quiet = subparsers.add_parser("quiet", help="Set TTS verbosity to short for this session")
+    # quiet — set verbosity to short (CLI-06)
+    sub_quiet = subparsers.add_parser("quiet", help="Set TTS verbosity to short (first sentence only)")
     sub_quiet.set_defaults(func=_cmd_quiet)
+
+    # verbose — get/set verbosity level
+    sub_verbose = subparsers.add_parser("verbose", help="Get or set TTS verbosity level")
+    sub_verbose.add_argument(
+        "level",
+        nargs="?",
+        choices=["full", "summary", "short", "skip"],
+        default=None,
+        help="Verbosity level (omit to show current)",
+    )
+    sub_verbose.set_defaults(func=_cmd_verbose)
+
+    # commands — show available voice commands
+    sub_commands = subparsers.add_parser("commands", help="Show available voice commands")
+    sub_commands.set_defaults(func=_cmd_commands)
 
     # history — show recent transcripts
     sub_history = subparsers.add_parser("history", help="Show recent transcription history")
