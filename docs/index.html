@@ -909,7 +909,6 @@
       <li><a href="#conversation">The conversation</a></li>
       <li><a href="#how-it-works">How it works</a></li>
       <li><a href="#features">Features</a></li>
-      <li><a href="#install">Install</a></li>
       <li><a href="#privacy">Privacy</a></li>
       <li><a href="https://github.com/heyvox-dev/heyvox" class="nav-cta">GitHub</a></li>
     </ul>
@@ -930,14 +929,6 @@
           Your AI agent doesn't just listen &mdash; it talks back.<br>
           Voice layer runs fully local. Open source. Zero cloud fees.
         </p>
-
-        <div style="margin-bottom: 36px;">
-          <div class="hero-install">
-            <span class="prompt">$</span>
-            <span id="install-cmd">pip install git+https://github.com/heyvox-dev/heyvox.git &amp;&amp; heyvox setup</span>
-            <button class="copy-btn" onclick="copyInstall(this)" title="Copy to clipboard">&#x2398;</button>
-          </div>
-        </div>
 
         <div class="hero-actions">
           <a href="#early-access" class="btn btn-primary">
@@ -1161,36 +1152,6 @@
     </div>
   </section>
 
-  <!-- ── INSTALL ── -->
-  <section id="install">
-    <div class="container">
-      <div class="section-header reveal">
-        <div class="section-label">Install (beta testers)</div>
-        <h2>Up and running in minutes</h2>
-        <p class="section-sub">For early access testers. Requires macOS 14+, Python 3.12+, and Apple Silicon (Intel supported via sherpa-onnx).</p>
-      </div>
-
-      <div class="install-box reveal">
-        <pre><span class="line-comment"># 1. Install system dependency</span>
-<span class="line-cmd">brew install portaudio</span>
-
-<span class="line-comment"># 2. Clone and install</span>
-<span class="line-cmd">git clone https://github.com/heyvox-dev/heyvox.git</span>
-<span class="line-cmd">cd heyvox</span>
-<span class="line-cmd">pip install -e ".[apple-silicon,chrome]"</span>
-
-<span class="line-comment"># 3. Run setup wizard</span>
-<span class="line-cmd">heyvox setup</span></pre>
-      </div>
-
-      <p class="install-note reveal">
-        The <strong>setup wizard</strong> walks you through permissions (Microphone, Accessibility),
-        model download, mic test, config generation, launchd service, Herald TTS hooks for Claude Code,
-        and MCP server registration &mdash; all in one guided flow.
-      </p>
-    </div>
-  </section>
-
   <!-- ── PRIVACY ── -->
   <section id="privacy">
     <div class="container">
@@ -1338,19 +1299,6 @@
       observer.observe(el);
     });
 
-    // ── Copy install command ──
-    function copyInstall(btn) {
-      const text = "pip install git+https://github.com/heyvox-dev/heyvox.git && heyvox setup";
-      navigator.clipboard.writeText(text).then(() => {
-        const original = btn.innerHTML;
-        btn.innerHTML = "&#x2713;";
-        btn.style.color = "#34d399";
-        setTimeout(() => {
-          btn.innerHTML = original;
-          btn.style.color = "";
-        }, 1800);
-      });
-    }
   </script>
 
 </body>
