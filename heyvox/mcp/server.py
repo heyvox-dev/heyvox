@@ -99,7 +99,14 @@ def voice_status() -> str:
     else:
         state = "idle"
 
-    return f"state={state} muted={is_muted()} verbosity={get_verbosity()}"
+    import glob
+    queue_count = len(glob.glob("/tmp/herald-queue/*.wav"))
+    hold_count = len(glob.glob("/tmp/herald-hold/*.wav"))
+
+    return (
+        f"state={state} muted={is_muted()} verbosity={get_verbosity()} "
+        f"queue={queue_count} held={hold_count}"
+    )
 
 
 @mcp.tool()
