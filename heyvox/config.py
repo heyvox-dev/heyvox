@@ -199,6 +199,11 @@ class HeyvoxConfig(BaseModel):
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
 
+    # HUD overlay — floating pill with waveform and state indicator
+    hud_enabled: bool = True
+    # Show only the menu bar icon (no floating pill)
+    hud_menu_bar_only: bool = False
+
     mic_priority: list[str] = ["MacBook Pro Microphone"]
 
     # Path to cues directory — empty = auto-detect from package location

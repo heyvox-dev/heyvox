@@ -366,9 +366,35 @@ def run_setup(config) -> None:
     console.print()
 
     # ---------------------------------------------------------------------------
-    # Step 7: Register MCP server with AI coding agents
+    # Step 7: Herald hooks (TTS voice output for Claude Code)
     # ---------------------------------------------------------------------------
-    console.print("[bold]Step 7: MCP Server Registration[/bold]")
+    console.print("[bold]Step 7: Herald TTS Hooks[/bold]")
+    console.print("  Herald provides voice output — Claude speaks via <tts> blocks in responses.")
+    console.print()
+
+    herald_hooks_installed = False
+    install_hooks = console.input(
+        "  Install Herald hooks for Claude Code? [Y/n] "
+    ).strip().lower()
+
+    if install_hooks != "n":
+        try:
+            from heyvox.setup.hooks import install_herald_hooks
+            results = install_herald_hooks()
+            for ok, msg in results:
+                console.print(f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {msg}")
+            herald_hooks_installed = any(ok for ok, _ in results)
+        except Exception as e:
+            console.print(f"  [red]✗[/red] Failed to install hooks: {e}")
+    else:
+        console.print("  [dim]Skipped — run `heyvox setup` again to install later.[/dim]")
+
+    console.print()
+
+    # ---------------------------------------------------------------------------
+    # Step 8: Register MCP server with AI coding agents
+    # ---------------------------------------------------------------------------
+    console.print("[bold]Step 8: MCP Server Registration[/bold]")
     console.print("  Vox exposes voice tools to AI agents via MCP (Model Context Protocol).")
     console.print()
 
@@ -408,9 +434,9 @@ def run_setup(config) -> None:
     console.print()
 
     # ---------------------------------------------------------------------------
-    # Step 8: Summary
+    # Step 9: Summary
     # ---------------------------------------------------------------------------
-    console.print("[bold]Step 8: Setup Summary[/bold]")
+    console.print("[bold]Step 9: Setup Summary[/bold]")
     console.print()
 
     summary_table = Table(show_header=False, box=None, padding=(0, 2))
@@ -438,6 +464,10 @@ def run_setup(config) -> None:
     summary_table.add_row(
         "[green]✓ Running[/green]" if status["running"] else "[dim]Stopped[/dim]",
         f"HeyVox service status (PID: {status.get('pid', '-')})",
+    )
+    summary_table.add_row(
+        "[green]✓[/green]" if herald_hooks_installed else "[dim]-[/dim]",
+        "Herald TTS hooks installed",
     )
     if agents_registered:
         summary_table.add_row(

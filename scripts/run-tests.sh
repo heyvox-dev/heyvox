@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PYTHON="${PYTHON:-/Users/work/.pyenv/versions/3.12.12/bin/python}"
+PYTHON="${PYTHON:-python3}"
 PYTEST="$PYTHON -m pytest"
 LEVEL="${1:-unit}"
 
