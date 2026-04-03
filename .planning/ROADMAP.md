@@ -31,6 +31,7 @@
 | 7. MediaRemote Integration | v2.0 | 0/? | 🔲 Planned | — |
 | 8. Custom Wake Word ("Hey Vox") | v2.0 | 0/? | 🔲 Planned | — |
 | 9. Chrome Companion Extension | v2.0 | 0/? | 🔲 Planned | — |
-| 10. HUD Polish | v2.0 | 0/? | 🔲 Planned | — |
-| 11. Cross-Platform Client | v2.0 | 0/? | 🔲 Planned | — |
-| 12. Transcript History & Safe Paste | v2.0 | 0/? | 🔲 Planned | — |
+| 10. Voice Command Center — Conversation History | v2.0 | 0/? | 🔧 Active | — |
+| 11. Voice Command Center — Verbosity & Controls | v2.0 | 0/? | 🔲 Planned | — |
+| 12. Voice Command Center — Status & Commands | v2.0 | 0/? | 🔲 Planned | — |
+| 13. Cross-Platform Client | v2.0 | 0/? | 🔲 Planned | — |

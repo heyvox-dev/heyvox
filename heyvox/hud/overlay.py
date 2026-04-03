@@ -504,7 +504,7 @@ def _make_menu_action_class():
     from Foundation import NSObject
     from AppKit import NSPasteboard, NSPasteboardTypeString
 
-    _TTS_MUTE_FLAG = "/tmp/claude-tts-mute"
+    _TTS_MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
 
     class _MenuActionHandler(NSObject):
         def copyTranscript_(self, sender):
@@ -516,13 +516,20 @@ def _make_menu_action_class():
 
         def toggleMute_(self, sender):
             import os
-            if os.path.exists(_TTS_MUTE_FLAG):
-                os.unlink(_TTS_MUTE_FLAG)
-                sender.setState_(0)  # NSOffState — no checkmark
+            # Check if currently muted (any flag exists)
+            currently_muted = any(os.path.exists(f) for f in _TTS_MUTE_FLAGS)
+            if currently_muted:
+                for f in _TTS_MUTE_FLAGS:
+                    try:
+                        os.unlink(f)
+                    except FileNotFoundError:
+                        pass
+                sender.setState_(0)
             else:
-                with open(_TTS_MUTE_FLAG, "w") as f:
-                    f.write("")
-                sender.setState_(1)  # NSOnState — checkmark
+                for f in _TTS_MUTE_FLAGS:
+                    with open(f, "w") as fh:
+                        fh.write("")
+                sender.setState_(1)
 
         def setVerbosity_(self, sender):
             """Set verbosity to the level stored in the menu item's representedObject."""
@@ -601,137 +608,59 @@ def _make_menu_action_class():
 
 
 def _build_transcript_menu(handler):
-    """Build an NSMenu with recent transcripts, toggles, and info.
+    """Build a compact NSMenu for the HeyVox menu bar icon.
 
-    Sections:
-    1. Recent transcripts (click to copy, hover for full text)
-    2. Quick toggles (Mute TTS)
-    3. Info & actions (version, help, open log, quit)
+    Layout (Option B — minimal + settings gear):
+    1. Status summary line (mic · verbosity · queue)
+    2. Recent transcripts (last 3, click to copy)
+    3. Mute TTS toggle
+    4. Settings submenu (Verbosity, Microphone, Overlay, Voice Cmds, Status)
+    5. Restart / Quit
 
     Args:
         handler: An instance of _MenuActionHandler for action targets.
     """
     from AppKit import NSMenu, NSMenuItem, NSFont, NSAttributedString, NSColor
+    from AppKit import NSFontAttributeName, NSForegroundColorAttributeName
     from Foundation import NSDictionary
+    import glob as _glob
 
     menu = NSMenu.alloc().init()
     menu.setAutoenablesItems_(False)
-    menu.setMinimumWidth_(180)  # Compact dropdown width
-    _menu_font = NSFont.systemFontOfSize_(13)  # System default
+    menu.setMinimumWidth_(200)
+
+    _font = NSFont.systemFontOfSize_(13)
+    _font_small = NSFont.systemFontOfSize_(12)
+    _font_bold = NSFont.boldSystemFontOfSize_(12)
+    _dimmed = NSColor.secondaryLabelColor()
 
     def _styled(item, title=None):
-        """Apply compact font to a menu item."""
         t = title if title else item.title()
-        attrs = NSDictionary.dictionaryWithObject_forKey_(_menu_font, "NSFont")
+        attrs = NSDictionary.dictionaryWithObject_forKey_(_font, "NSFont")
         item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(t, attrs))
         return item
 
-    # -- Section 0: Live status --
-    import glob as _glob
+    def _dimmed_item(title):
+        attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+            [_font_small, _dimmed],
+            [NSFontAttributeName, NSForegroundColorAttributeName],
+        )
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
+        item.setEnabled_(False)
+        return item
+
+    # -- Gather state --
     queue_count = len(_glob.glob("/tmp/herald-queue/*.wav"))
     hold_count = len(_glob.glob("/tmp/herald-hold/*.wav"))
-    status_parts = []
-    if os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute"):
-        status_parts.append("Muted")
-    if queue_count > 0:
-        status_parts.append(f"{queue_count} queued")
-    if hold_count > 0:
-        status_parts.append(f"{hold_count} held")
-    if status_parts:
-        status_text = "  " + " · ".join(status_parts)
-        status_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            status_text, None, "",
-        )
-        status_item.setEnabled_(False)
-        _styled(status_item)
-        menu.addItem_(status_item)
-        menu.addItem_(NSMenuItem.separatorItem())
+    is_muted = os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute")
 
-    # -- Section 1: Recent transcripts --
-    header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Recent Transcripts", None, "",
-    )
-    header.setEnabled_(False)
-    _styled(header)
-    menu.addItem_(header)
-
-    try:
-        from heyvox.history import load as _load_history
-        entries = _load_history(limit=5)
-    except Exception:
-        entries = []
-
-    if not entries:
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "  No transcripts yet", None, "",
-        )
-        item.setEnabled_(False)
-        _styled(item)
-        menu.addItem_(item)
-    else:
-        for entry in entries:
-            text = entry.get("text", "")
-            ts = entry.get("ts", "?")
-            # Show time (HH:MM) + truncated text
-            time_part = ts[-8:-3] if len(ts) >= 8 else ts  # "HH:MM"
-            display = text[:25] + "..." if len(text) > 25 else text
-            title = f"  {time_part}  {display}"
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                title, "copyTranscript:", "",
-            )
-            item.setTarget_(handler)
-            item.setRepresentedObject_(text)  # Full text for clipboard
-            item.setToolTip_(text)  # Full text on hover
-            item.setEnabled_(True)
-            _styled(item)
-            menu.addItem_(item)
-
-    menu.addItem_(NSMenuItem.separatorItem())
-
-    # -- Section 2: Quick toggles (fixed titles, checkmark = active) --
-
-    # Verbosity submenu
     try:
         from heyvox.audio.tts import get_verbosity
         current_verbosity = get_verbosity()
     except Exception:
         current_verbosity = "full"
 
-    verbosity_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Verbosity", None, "",
-    )
-    _styled(verbosity_parent)
-    verbosity_sub = NSMenu.alloc().init()
-    verbosity_sub.setAutoenablesItems_(False)
-    _VERBOSITY_OPTIONS = [
-        ("full", "Full — speak everything"),
-        ("summary", "Summary — up to 150 chars"),
-        ("short", "Short — first sentence only"),
-        ("skip", "Silent — no TTS"),
-    ]
-    for level, label in _VERBOSITY_OPTIONS:
-        v_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            label, "setVerbosity:", "",
-        )
-        v_item.setTarget_(handler)
-        v_item.setRepresentedObject_(level)
-        v_item.setEnabled_(True)
-        if level == current_verbosity:
-            v_item.setState_(1)  # checkmark on active level
-        _styled(v_item)
-        verbosity_sub.addItem_(v_item)
-    verbosity_parent.setSubmenu_(verbosity_sub)
-    menu.addItem_(verbosity_parent)
-
-    # Microphone submenu — show active mic + available devices for switching
-    mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Microphone", None, "",
-    )
-    _styled(mic_parent)
-    mic_sub = NSMenu.alloc().init()
-    mic_sub.setAutoenablesItems_(False)
-
-    # Read active mic from file
     _active_mic = ""
     try:
         from heyvox.constants import ACTIVE_MIC_FILE
@@ -740,7 +669,10 @@ def _build_transcript_menu(handler):
     except Exception:
         pass
 
-    # Enumerate available input devices
+    # Shorten mic name for display (e.g. "G435 Wireless Gaming Headset" → "G435 Wireless")
+    _mic_short = _active_mic.split(" Gaming")[0].split(" Microphone")[0] if _active_mic else "No mic"
+
+    # ── Section 1: Microphone (top-level with switch submenu) ──
     try:
         import pyaudio as _pa_mod
         _scan = _pa_mod.PyAudio()
@@ -759,21 +691,29 @@ def _build_transcript_menu(handler):
     if not _input_devices and _active_mic:
         _input_devices = [_active_mic]
 
+    mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f399 {_mic_short}", None, "",
+    )
+    _styled(mic_parent)
+    mic_sub = NSMenu.alloc().init()
+    mic_sub.setAutoenablesItems_(False)
+
     for _dev_name in _input_devices:
         _is_active = _dev_name == _active_mic
-        _prefix = "\u2713 " if _is_active else "   "
         _mic_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"{_prefix}{_dev_name}", "switchMic:", "",
+            _dev_name, "switchMic:", "",
         )
         _mic_item.setTarget_(handler)
         _mic_item.setRepresentedObject_(_dev_name)
-        _mic_item.setEnabled_(not _is_active)  # Disable if already selected
+        _mic_item.setEnabled_(not _is_active)
+        if _is_active:
+            _mic_item.setState_(1)
         _styled(_mic_item)
         mic_sub.addItem_(_mic_item)
 
     if not _input_devices:
         _no_mic = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "  No devices found", None, "",
+            "No devices found", None, "",
         )
         _no_mic.setEnabled_(False)
         _styled(_no_mic)
@@ -782,52 +722,95 @@ def _build_transcript_menu(handler):
     mic_parent.setSubmenu_(mic_sub)
     menu.addItem_(mic_parent)
 
-    is_muted = os.path.exists("/tmp/claude-tts-mute")
-    mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Mute TTS", "toggleMute:", "",
+    # ── Section 2: Verbosity (top-level with submenu) ──
+    _VERBOSITY_LABELS = {
+        "full": "Full", "summary": "Summary", "short": "Short", "skip": "Silent",
+    }
+    verbosity_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f50a {_VERBOSITY_LABELS.get(current_verbosity, 'Full')}", None, "",
     )
-    mute_item.setTarget_(handler)
-    mute_item.setEnabled_(True)
-    if is_muted:
-        mute_item.setState_(1)  # checkmark = muted
-    _styled(mute_item)
-    menu.addItem_(mute_item)
+    _styled(verbosity_parent)
+    verbosity_sub = NSMenu.alloc().init()
+    verbosity_sub.setAutoenablesItems_(False)
+    for level, label in [
+        ("full", "Full — speak everything"),
+        ("summary", "Summary — up to 150 chars"),
+        ("short", "Short — first sentence only"),
+        ("skip", "Silent — no TTS"),
+    ]:
+        v_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setVerbosity:", "",
+        )
+        v_item.setTarget_(handler)
+        v_item.setRepresentedObject_(level)
+        v_item.setEnabled_(True)
+        if level == current_verbosity:
+            v_item.setState_(1)
+        _styled(v_item)
+        verbosity_sub.addItem_(v_item)
+    verbosity_parent.setSubmenu_(verbosity_sub)
+    menu.addItem_(verbosity_parent)
 
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    # ── Section 3: Recent transcripts (last 3, click to copy) ──
+    try:
+        from heyvox.history import load as _load_history
+        entries = _load_history(limit=3)
+    except Exception:
+        entries = []
+
+    if entries:
+        for entry in entries:
+            text = entry.get("text", "")
+            ts = entry.get("ts", "?")
+            time_part = ts[-8:-3] if len(ts) >= 8 else ts
+            display = text[:30] + "\u2026" if len(text) > 30 else text
+            title = f"  {time_part}  {display}"
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, "copyTranscript:", "",
+            )
+            item.setTarget_(handler)
+            item.setRepresentedObject_(text)
+            item.setToolTip_(text)
+            item.setEnabled_(True)
+            _styled(item)
+            menu.addItem_(item)
+        menu.addItem_(NSMenuItem.separatorItem())
+
+    # ── Section 3: Settings submenu ──
+    settings_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Settings", None, "",
+    )
+    _styled(settings_parent)
+    settings_sub = NSMenu.alloc().init()
+    settings_sub.setAutoenablesItems_(False)
+
+    # 4a: Show Overlay toggle
     overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Show Overlay", "toggleOverlay:", "",
     )
     overlay_item.setTarget_(handler)
     overlay_item.setEnabled_(True)
     if not _MENU_BAR_ONLY:
-        overlay_item.setState_(1)  # checkmark = overlay visible
+        overlay_item.setState_(1)
     _styled(overlay_item)
-    menu.addItem_(overlay_item)
+    settings_sub.addItem_(overlay_item)
 
-    menu.addItem_(NSMenuItem.separatorItem())
+    settings_sub.addItem_(NSMenuItem.separatorItem())
 
-    # -- Section 3: Voice Commands reference --
-    # Use NSAttributedString for rich styling (readable, not grayed out)
-    from AppKit import NSFontAttributeName, NSForegroundColorAttributeName
-    _cmd_font = NSFont.systemFontOfSize_(12)
-    _cmd_bold = NSFont.boldSystemFontOfSize_(12)
-    _cmd_phrase_color = NSColor.labelColor()
-    _cmd_desc_color = NSColor.secondaryLabelColor()
+    # 4d: Voice Commands reference
+    cmds_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Voice Commands", None, "",
+    )
+    _styled(cmds_parent)
+    cmds_sub = NSMenu.alloc().init()
+    cmds_sub.setAutoenablesItems_(False)
 
     def _cmd_item(phrase, desc):
-        """Create a readable voice command menu item with bold phrase."""
-        title = f"  \U0001f399 {phrase}  \u2014  {desc}"
+        title = f"  {phrase}  \u2014  {desc}"
         attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-            [_cmd_font, _cmd_phrase_color],
-            [NSFontAttributeName, NSForegroundColorAttributeName],
-        )
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
-        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
-        item.setEnabled_(True)  # Full opacity (not grayed out)
-        return item
-
-    def _section_header(title):
-        attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-            [_cmd_bold, _cmd_desc_color],
+            [_font_small, NSColor.labelColor()],
             [NSFontAttributeName, NSForegroundColorAttributeName],
         )
         item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
@@ -835,30 +818,33 @@ def _build_transcript_menu(handler):
         item.setEnabled_(True)
         return item
 
-    cmds_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "\U0001f399 Voice Commands", None, "",
-    )
-    _styled(cmds_parent)
-    cmds_sub = NSMenu.alloc().init()
-    cmds_sub.setAutoenablesItems_(False)
+    def _section_header(title):
+        attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+            [_font_bold, _dimmed],
+            [NSFontAttributeName, NSForegroundColorAttributeName],
+        )
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
+        item.setEnabled_(True)
+        return item
 
     cmds_sub.addItem_(_section_header("Playback"))
     cmds_sub.addItem_(_cmd_item('"skip"', "Skip current"))
-    cmds_sub.addItem_(_cmd_item('"stop"', "Stop all, clear queue"))
+    cmds_sub.addItem_(_cmd_item('"stop"', "Stop all"))
     cmds_sub.addItem_(_cmd_item('"mute"', "Toggle mute"))
-    cmds_sub.addItem_(_cmd_item('"next"', "Play next message"))
     cmds_sub.addItem_(_cmd_item('"replay"', "Replay last"))
     cmds_sub.addItem_(NSMenuItem.separatorItem())
     cmds_sub.addItem_(_section_header("Verbosity"))
-    cmds_sub.addItem_(_cmd_item('"be quiet"', "Short mode"))
-    cmds_sub.addItem_(_cmd_item('"summary"', "Summary mode"))
-    cmds_sub.addItem_(_cmd_item('"speak normally"', "Full mode"))
-    cmds_sub.addItem_(_cmd_item('"shut up"', "Silent mode"))
-
+    cmds_sub.addItem_(_cmd_item('"be quiet"', "Short"))
+    cmds_sub.addItem_(_cmd_item('"summary"', "Summary"))
+    cmds_sub.addItem_(_cmd_item('"speak normally"', "Full"))
+    cmds_sub.addItem_(_cmd_item('"shut up"', "Silent"))
     cmds_parent.setSubmenu_(cmds_sub)
-    menu.addItem_(cmds_parent)
+    settings_sub.addItem_(cmds_parent)
 
-    # -- Section 4: Status with colored indicators --
+    settings_sub.addItem_(NSMenuItem.separatorItem())
+
+    # 4e: Status (daemons + queue)
     def _pid_alive(pidfile):
         try:
             pid = int(open(pidfile).read().strip())
@@ -871,20 +857,12 @@ def _build_transcript_menu(handler):
     kokoro_ok = os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")
     hud_ok = os.path.exists("/tmp/heyvox-hud.sock")
 
-    status_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "\U0001f4ca Status", None, "",
-    )
-    _styled(status_parent)
-    status_sub = NSMenu.alloc().init()
-    status_sub.setAutoenablesItems_(False)
-
     def _status_item(name, ok):
-        icon = "\U0001f7e2" if ok else "\U0001f534"  # green / red circle
+        icon = "\U0001f7e2" if ok else "\U0001f534"
         label = "running" if ok else "stopped"
         title = f"  {icon} {name}: {label}"
-        color = NSColor.labelColor()
         attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-            [_cmd_font, color],
+            [_font_small, NSColor.labelColor()],
             [NSFontAttributeName, NSForegroundColorAttributeName],
         )
         item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
@@ -892,48 +870,24 @@ def _build_transcript_menu(handler):
         item.setEnabled_(True)
         return item
 
-    status_sub.addItem_(_status_item("Orchestrator", orch_ok))
-    status_sub.addItem_(_status_item("Kokoro TTS", kokoro_ok))
-    status_sub.addItem_(_status_item("HUD", hud_ok))
-    status_sub.addItem_(NSMenuItem.separatorItem())
+    settings_sub.addItem_(_status_item("Orchestrator", orch_ok))
+    settings_sub.addItem_(_status_item("Kokoro TTS", kokoro_ok))
+    settings_sub.addItem_(_status_item("HUD", hud_ok))
 
-    # Queue info
-    q_icon = "\U0001f4e8" if queue_count > 0 else "\U0001f4ed"  # envelope / empty mailbox
-    q_title = f"  {q_icon} Queue: {queue_count} queued, {hold_count} held"
-    q_attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-        [_cmd_font, NSColor.labelColor()],
-        [NSFontAttributeName, NSForegroundColorAttributeName],
-    )
-    q_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(q_title, None, "")
-    q_item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(q_title, q_attrs))
-    q_item.setEnabled_(True)
-    status_sub.addItem_(q_item)
+    if queue_count > 0 or hold_count > 0:
+        q_title = f"  Queue: {queue_count} queued, {hold_count} held"
+        settings_sub.addItem_(_dimmed_item(q_title))
 
-    status_parent.setSubmenu_(status_sub)
-    menu.addItem_(status_parent)
+    settings_sub.addItem_(NSMenuItem.separatorItem())
 
-    menu.addItem_(NSMenuItem.separatorItem())
-
-    # -- Section 5: Info & actions --
-    try:
-        from heyvox import __version__
-        ver = __version__
-    except Exception:
-        ver = "0.1.0"
-    version_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"HeyVox v{ver}", None, "",
-    )
-    version_item.setEnabled_(False)
-    _styled(version_item)
-    menu.addItem_(version_item)
-
+    # 4f: Help, Log, Config
     help_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Help", "openHelp:", "",
     )
     help_item.setTarget_(handler)
     help_item.setEnabled_(True)
     _styled(help_item)
-    menu.addItem_(help_item)
+    settings_sub.addItem_(help_item)
 
     log_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Open Log", "openLog:", "",
@@ -941,10 +895,14 @@ def _build_transcript_menu(handler):
     log_item.setTarget_(handler)
     log_item.setEnabled_(True)
     _styled(log_item)
-    menu.addItem_(log_item)
+    settings_sub.addItem_(log_item)
+
+    settings_parent.setSubmenu_(settings_sub)
+    menu.addItem_(settings_parent)
 
     menu.addItem_(NSMenuItem.separatorItem())
 
+    # ── Section 5: Restart / Quit ──
     restart_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Restart", "restartHeyVox:", "",
     )
@@ -953,8 +911,13 @@ def _build_transcript_menu(handler):
     _styled(restart_item)
     menu.addItem_(restart_item)
 
+    try:
+        from heyvox import __version__
+        ver = __version__
+    except Exception:
+        ver = "0.1.0"
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Quit HeyVox", "quitHeyVox:", "",
+        f"Quit HeyVox v{ver}", "quitHeyVox:", "",
     )
     quit_item.setTarget_(handler)
     quit_item.setEnabled_(True)
