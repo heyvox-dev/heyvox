@@ -47,6 +47,30 @@ if not speech or speech == 'SKIP' or len(speech) < 5:
 
 mode = '$MODE'
 
+# Apply verbosity filtering (reads shared state file)
+verbosity = 'full'
+try:
+    with open('/tmp/heyvox-verbosity') as vf:
+        verbosity = vf.read().strip() or 'full'
+except FileNotFoundError:
+    pass
+
+if verbosity == 'skip':
+    sys.exit(1)
+elif verbosity == 'short':
+    m = re.search(r'[.!?]', speech)
+    if m:
+        speech = speech[:m.end()].strip()[:100]
+    else:
+        speech = speech[:100]
+elif verbosity == 'summary':
+    if len(speech) > 150:
+        trunc = speech[:150]
+        last_sp = trunc.rfind(' ')
+        if last_sp > 0:
+            trunc = trunc[:last_sp]
+        speech = trunc + '...'
+
 if mode == 'notify':
     first = re.split(r'[.!?]', speech)[0].strip()
     speech = (first[:57] + '...') if len(first) > 60 else first
