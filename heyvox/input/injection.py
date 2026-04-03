@@ -13,6 +13,24 @@ import time
 SUBPROCESS_TIMEOUT = 5
 
 
+def _set_clipboard(text: str) -> bool:
+    """Set clipboard text via pbcopy (more robust than osascript for special chars).
+
+    Returns True on success, False on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["pbcopy"],
+            input=text.encode("utf-8"),
+            capture_output=True, timeout=SUBPROCESS_TIMEOUT,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError) as e:
+        import sys
+        print(f"[injection] _set_clipboard failed: {e}", file=sys.stderr)
+        return False
+
+
 def type_text(text: str) -> None:
     """Paste text into the focused app via clipboard + Cmd-V.
 
@@ -22,14 +40,23 @@ def type_text(text: str) -> None:
     Args:
         text: Text to inject.
     """
+    import sys
+
     old_clip = get_clipboard_text()
     old_was_image = clipboard_is_image()
 
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(
-        ["osascript", "-e", f'set the clipboard to "{escaped}"'],
-        capture_output=True, timeout=SUBPROCESS_TIMEOUT,
-    )
+    # Set clipboard via pbcopy (handles all characters safely)
+    if not _set_clipboard(text):
+        print("[injection] ERROR: failed to set clipboard, aborting paste", file=sys.stderr)
+        return
+
+    # Verify clipboard was actually set before pasting
+    verify = get_clipboard_text()
+    if verify != text:
+        print(f"[injection] ERROR: clipboard verify failed — expected {len(text)} chars, "
+              f"got {len(verify)} chars, aborting paste", file=sys.stderr)
+        return
+
     time.sleep(0.05)
     subprocess.run(
         ["osascript", "-e", 'tell application "System Events"\n    keystroke "v" using command down\nend tell'],
@@ -41,11 +68,7 @@ def type_text(text: str) -> None:
     if old_was_image:
         pass  # Cannot restore image clipboard from Python — leave as-is
     elif old_clip:
-        old_escaped = old_clip.replace("\\", "\\\\").replace('"', '\\"')
-        subprocess.run(
-            ["osascript", "-e", f'set the clipboard to "{old_escaped}"'],
-            capture_output=True, timeout=SUBPROCESS_TIMEOUT,
-        )
+        _set_clipboard(old_clip)
 
 
 def press_enter(count: int = 1, app_name: str | None = None) -> None:
