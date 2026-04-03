@@ -1,0 +1,53 @@
+name: Install Test
+
+# Validates clean install experience. Only runs on main pushes (not every PR)
+# because heavy deps (openwakeword, sherpa-onnx, pyobjc) make this slow.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  install-test:
+    name: Clean Install
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          brew install portaudio
+
+      - name: Create fresh venv and install package
+        run: |
+          python -m venv .venv-install-test
+          .venv-install-test/bin/pip install --upgrade pip
+          # Non-editable install, matching how a real user would install
+          .venv-install-test/bin/pip install ".[chrome]"
+
+      - name: Verify heyvox CLI works
+        run: |
+          .venv-install-test/bin/heyvox --help
+
+      - name: Verify setup subcommand is available
+        run: |
+          .venv-install-test/bin/heyvox setup --help
+
+      - name: Verify Python imports resolve correctly
+        run: |
+          .venv-install-test/bin/python -c "
+          from heyvox.herald import get_herald_home
+          from heyvox.hush import HUSH_HOME
+          from heyvox.config import HeyvoxConfig
+          import heyvox
+          print('package version:', heyvox.__version__ if hasattr(heyvox, '__version__') else 'ok')
+          print('herald home:', get_herald_home())
+          print('hush home:', HUSH_HOME)
+          print('imports ok')
+          "

@@ -50,24 +50,54 @@ def _cmd_restart(args):
 
 
 def _cmd_status(args):
-    """Show the current heyvox service state with PID.
+    """Show full HeyVox system status.
 
     Requirement: CLI-01
     """
+    import glob
     from heyvox import __version__
     from heyvox.setup.launchd import get_status, PLIST_PATH
 
     status = get_status()
 
+    # Service status
     if not PLIST_PATH.exists():
-        print(f"HeyVox v{__version__} — Not installed (run: heyvox setup)")
+        svc = "Not installed (run: heyvox setup)"
     elif status["running"]:
-        print(f"HeyVox v{__version__} — Running (PID {status['pid']})")
+        svc = f"Running (PID {status['pid']})"
     elif status["loaded"]:
-        code = status["exit_code"]
-        print(f"HeyVox v{__version__} — Stopped (exit code {code})")
+        svc = f"Stopped (exit code {status['exit_code']})"
     else:
-        print(f"HeyVox v{__version__} — Not loaded")
+        svc = "Not loaded"
+    print(f"HeyVox v{__version__} — {svc}")
+
+    # TTS state
+    from heyvox.audio.tts import is_muted, get_verbosity
+    mute_str = "yes" if is_muted() else "no"
+    print(f"  Verbosity:  {get_verbosity()}")
+    print(f"  Muted:      {mute_str}")
+
+    # Queue
+    queue_files = glob.glob("/tmp/herald-queue/*.wav")
+    hold_files = glob.glob("/tmp/herald-hold/*.wav")
+    print(f"  Queue:      {len(queue_files)} queued, {len(hold_files)} held")
+
+    # Daemons
+    import os
+    def _pid_alive(pidfile):
+        try:
+            pid = int(open(pidfile).read().strip())
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    orch = "running" if _pid_alive("/tmp/herald-orchestrator.pid") else "stopped"
+    kokoro = "running" if (os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")) else "stopped"
+    hud = "running" if os.path.exists("/tmp/heyvox-hud.sock") else "stopped"
+    print(f"  Orchestrator: {orch}")
+    print(f"  Kokoro TTS:   {kokoro}")
+    print(f"  HUD:          {hud}")
 
 
 def _cmd_setup(args):
@@ -131,48 +161,96 @@ def _cmd_speak(args):
 
 
 def _cmd_skip(args):
-    """Write a skip command to the TTS command file.
-
-    The running heyvox TTS worker reads this file between synthesis chunks and
-    stops current playback.
+    """Skip current TTS playback via Herald.
 
     Requirement: CLI-06
     """
-    from heyvox.constants import TTS_CMD_FILE
-    try:
-        with open(TTS_CMD_FILE, "w") as f:
-            f.write("skip\n")
-        print("Skipped current TTS.")
-    except Exception as e:
-        print(f"Error writing TTS command: {e}", file=sys.stderr)
+    from heyvox.audio.tts import skip_current
+    skip_current()
+    print("Skipped current TTS.")
 
 
 def _cmd_mute(args):
-    """Toggle TTS mute state via command file IPC.
+    """Toggle TTS mute on/off.
 
     Requirement: CLI-06
     """
-    from heyvox.constants import TTS_CMD_FILE
-    try:
-        with open(TTS_CMD_FILE, "w") as f:
-            f.write("mute-toggle\n")
-        print("TTS mute toggled.")
-    except Exception as e:
-        print(f"Error writing TTS command: {e}", file=sys.stderr)
+    from heyvox.audio.tts import is_muted, set_muted
+    new_state = not is_muted()
+    set_muted(new_state)
+    # Also toggle Herald's mute flag for the bash pipeline
+    mute_flag = "/tmp/herald-mute"
+    tts_mute_flag = "/tmp/claude-tts-mute"
+    import os
+    if new_state:
+        open(mute_flag, "w").close()
+        open(tts_mute_flag, "w").close()
+        print("TTS muted.")
+    else:
+        for f in (mute_flag, tts_mute_flag):
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+        print("TTS unmuted.")
 
 
 def _cmd_quiet(args):
-    """Set TTS verbosity to short for the session via command file IPC.
+    """Set TTS verbosity to short (first sentence only).
 
     Requirement: CLI-06
     """
-    from heyvox.constants import TTS_CMD_FILE
-    try:
-        with open(TTS_CMD_FILE, "w") as f:
-            f.write("quiet\n")
-        print("TTS verbosity set to short.")
-    except Exception as e:
-        print(f"Error writing TTS command: {e}", file=sys.stderr)
+    from heyvox.audio.tts import set_verbosity, get_verbosity
+    set_verbosity("short")
+    print(f"TTS verbosity set to short (was {get_verbosity()}).")
+
+
+def _cmd_verbose(args):
+    """Set TTS verbosity. Levels: full, summary, short, skip.
+
+    Without arguments: show current level.
+    With argument: set to that level.
+    """
+    from heyvox.audio.tts import set_verbosity, get_verbosity
+    level = getattr(args, "level", None)
+    if not level:
+        print(f"TTS verbosity: {get_verbosity()}")
+        return
+    valid = {"full", "summary", "short", "skip"}
+    if level not in valid:
+        print(f"Invalid level '{level}'. Choose from: {', '.join(sorted(valid))}", file=sys.stderr)
+        return
+    old = get_verbosity()
+    set_verbosity(level)
+    print(f"TTS verbosity: {old} → {level}")
+
+
+def _cmd_commands(args):
+    """Show all available voice commands."""
+    from heyvox.audio.tts import VOICE_COMMANDS
+    print("Voice Commands (say these after the wake word):\n")
+
+    # Group by category
+    categories = {
+        "Playback": ["tts-next", "tts-skip", "tts-stop", "tts-mute", "tts-replay"],
+        "Verbosity": ["verbosity-full", "verbosity-summary", "verbosity-short", "verbosity-skip"],
+    }
+    action_to_patterns = {}
+    for pattern, (action, feedback) in VOICE_COMMANDS.items():
+        if action not in action_to_patterns:
+            action_to_patterns[action] = []
+        # Clean up regex for display
+        display = pattern.lstrip("^").rstrip("$").replace(r"\s+", " ").replace("(", "").replace(")", "").replace("?", "").replace("|", "/")
+        action_to_patterns[action].append(display)
+
+    for cat, actions in categories.items():
+        print(f"  {cat}:")
+        for action in actions:
+            if action in action_to_patterns:
+                phrases = action_to_patterns[action]
+                feedback = next(fb for _, (a, fb) in VOICE_COMMANDS.items() if a == action)
+                print(f"    {' / '.join(phrases):40s} → {feedback}")
+        print()
 
 
 def _cmd_history(args):
@@ -212,6 +290,106 @@ def _cmd_history(args):
         # Truncate long entries for display
         display = text if len(text) <= 120 else text[:117] + "..."
         print(f"[{ts}] ({trigger}, {dur}s) {display}")
+
+
+def _cmd_chrome_bridge(args):
+    """Start the Chrome companion WebSocket bridge.
+
+    Runs a local WebSocket server that the HeyVox Chrome extension connects to
+    for per-tab media state detection and control.
+
+    Requirement: CHROME-01
+    """
+    from heyvox.chrome.bridge import run_bridge
+
+    host = getattr(args, "host", "127.0.0.1")
+    port = getattr(args, "port", 9285)
+    run_bridge(host=host, port=port)
+
+
+def _cmd_debug(args):
+    """Show recent STT debug recordings and pipeline info."""
+    import json
+    from heyvox.constants import STT_DEBUG_DIR, STT_DEBUG_LOG
+
+    if args.enable:
+        os.makedirs(STT_DEBUG_DIR, exist_ok=True)
+        print(f"Debug capturing enabled. Audio saved to: {STT_DEBUG_DIR}")
+        print(f"Pipeline log: {STT_DEBUG_LOG}")
+        print("Restart heyvox for changes to take effect.")
+        return
+
+    if args.disable:
+        import shutil
+        if os.path.isdir(STT_DEBUG_DIR):
+            shutil.rmtree(STT_DEBUG_DIR)
+            print(f"Debug directory removed: {STT_DEBUG_DIR}")
+        try:
+            os.remove(STT_DEBUG_LOG)
+            print(f"Debug log removed: {STT_DEBUG_LOG}")
+        except FileNotFoundError:
+            pass
+        return
+
+    if not os.path.isdir(STT_DEBUG_DIR):
+        print(f"Debug capturing is OFF. Enable with: heyvox debug --enable")
+        print(f"Then restart heyvox to start saving raw audio.")
+        return
+
+    # Read and display recent debug log entries
+    if not os.path.exists(STT_DEBUG_LOG):
+        print("No debug entries yet. Record something and check again.")
+        return
+
+    with open(STT_DEBUG_LOG) as f:
+        lines = f.readlines()
+
+    # Group entries by timestamp (raw, trimmed, _stt_result, _final share same ts)
+    recordings = {}
+    for line in lines:
+        try:
+            entry = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+        ts = entry.get("timestamp", "unknown")
+        label = entry.get("label", "")
+        if label == "raw":
+            recordings[ts] = {"raw": entry}
+        elif ts in recordings:
+            recordings[ts][label] = entry
+
+    # Show most recent N recordings
+    recent = list(recordings.items())[-args.n:]
+
+    if not recent:
+        print("No recordings captured yet.")
+        return
+
+    for ts, group in recent:
+        raw = group.get("raw", {})
+        trimmed = group.get("trimmed", {})
+        stt = group.get("_stt_result", {})
+        final = group.get("_final", {})
+
+        print(f"\n{'='*60}")
+        print(f"  Recording: {ts}")
+        print(f"  Raw:     {raw.get('duration_s', '?')}s, {raw.get('rms_dbfs', '?')} dBFS, {raw.get('num_chunks', '?')} chunks")
+        if trimmed:
+            print(f"  Trimmed: {trimmed.get('duration_s', '?')}s, {trimmed.get('rms_dbfs', '?')} dBFS, {trimmed.get('num_chunks', '?')} chunks")
+        if stt:
+            print(f"  STT raw: \"{stt.get('stt_raw', '')}\"  ({stt.get('stt_engine', '?')}, {stt.get('stt_time_s', '?')}s)")
+        if final:
+            print(f"  Echo filtered: {final.get('echo_filtered', False)}")
+            print(f"  WW stripped:   {final.get('wake_word_stripped', False)}")
+            print(f"  Final text:    \"{final.get('final_text', '')}\"")
+
+        # List WAV files for this timestamp
+        wav_files = [f for f in os.listdir(STT_DEBUG_DIR) if f.startswith(ts) and f.endswith('.wav')]
+        if wav_files:
+            print(f"  Files: {', '.join(sorted(wav_files))}")
+
+    print(f"\n  Debug dir: {STT_DEBUG_DIR}")
+    print(f"  Log file:  {STT_DEBUG_LOG}")
 
 
 def _cmd_register(args):
@@ -321,9 +499,24 @@ def main():
     sub_mute = subparsers.add_parser("mute", help="Toggle TTS mute on/off")
     sub_mute.set_defaults(func=_cmd_mute)
 
-    # quiet — set verbosity to short for the session (CLI-06)
-    sub_quiet = subparsers.add_parser("quiet", help="Set TTS verbosity to short for this session")
+    # quiet — set verbosity to short (CLI-06)
+    sub_quiet = subparsers.add_parser("quiet", help="Set TTS verbosity to short (first sentence only)")
     sub_quiet.set_defaults(func=_cmd_quiet)
+
+    # verbose — get/set verbosity level
+    sub_verbose = subparsers.add_parser("verbose", help="Get or set TTS verbosity level")
+    sub_verbose.add_argument(
+        "level",
+        nargs="?",
+        choices=["full", "summary", "short", "skip"],
+        default=None,
+        help="Verbosity level (omit to show current)",
+    )
+    sub_verbose.set_defaults(func=_cmd_verbose)
+
+    # commands — show available voice commands
+    sub_commands = subparsers.add_parser("commands", help="Show available voice commands")
+    sub_commands.set_defaults(func=_cmd_commands)
 
     # history — show recent transcripts
     sub_history = subparsers.add_parser("history", help="Show recent transcription history")
@@ -344,6 +537,44 @@ def main():
         help="Print the transcript file path",
     )
     sub_history.set_defaults(func=_cmd_history)
+
+    # chrome-bridge — start WebSocket bridge for Chrome extension (CHROME-01)
+    sub_chrome = subparsers.add_parser(
+        "chrome-bridge",
+        help="Start Chrome companion WebSocket bridge for per-tab media control",
+    )
+    sub_chrome.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1, localhost only)",
+    )
+    sub_chrome.add_argument(
+        "--port",
+        type=int,
+        default=9285,
+        help="WebSocket port (default: 9285)",
+    )
+    sub_chrome.set_defaults(func=_cmd_chrome_bridge)
+
+    # debug — show recent STT debug info
+    sub_debug = subparsers.add_parser("debug", help="Show recent STT recordings and debug info")
+    sub_debug.add_argument(
+        "-n",
+        type=int,
+        default=10,
+        help="Number of recent entries to show (default: 10)",
+    )
+    sub_debug.add_argument(
+        "--enable",
+        action="store_true",
+        help="Create the debug directory to start capturing",
+    )
+    sub_debug.add_argument(
+        "--disable",
+        action="store_true",
+        help="Remove the debug directory to stop capturing",
+    )
+    sub_debug.set_defaults(func=_cmd_debug)
 
     # register — register MCP server with AI agents
     sub_register = subparsers.add_parser("register", help="Register HeyVox MCP server with AI coding agents")

@@ -1,0 +1,96 @@
+--- a/lib/media.sh
++++ b/lib/media.sh
+@@ -1,6 +1,7 @@
+ #!/bin/bash
+-# Herald Media Control — pause/resume system media during TTS
+-# Uses macOS MediaRemote framework + media key fallback
++# Herald Media Control — pause/resume system media during TTS.
++# Uses Hush (Chrome extension) for browser media when available,
++# falls back to macOS MediaRemote framework + media key.
+ # Only resumes media if WE paused it
+ # Usage: media.sh pause|play [caller-id]
+
+@@ -10,6 +11,33 @@
+ ACTION="${1:-pause}"
+ CALLER="${2:-orch}"
+ FLAG="/tmp/herald-media-paused-${CALLER}"
++
++HUSH_SOCK="/tmp/hush.sock"
++
++# Try Hush (Chrome extension) for browser media — returns 0 on success
++hush_cmd() {
++  local action="$1"
++  [ ! -S "$HUSH_SOCK" ] && return 1
++  local resp
++  resp=$(python3 - "$HUSH_SOCK" "{\"action\": \"$action\"}" <<'PYEOF'
++import json, socket, sys
++sock_path, msg = sys.argv[1], sys.argv[2]
++sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++sock.settimeout(3.0)
++try:
++    sock.connect(sock_path)
++    sock.sendall((msg + "\n").encode("utf-8"))
++    response = b""
++    while True:
++        chunk = sock.recv(4096)
++        if not chunk: break
++        response += chunk
++        if b"\n" in response: break
++    print(response.strip().decode("utf-8"))
++except: sys.exit(1)
++finally: sock.close()
++PYEOF
++  ) 2>/dev/null || return 1
++  echo "$resp" | grep -q '"error"' && return 1
++  return 0
++}
+
+ send_media_key() {
+@@ -67,13 +95,23 @@
+
+ if [ "$ACTION" = "pause" ]; then
+     [ -f "$FLAG" ] && exit 0
+-    RATE=$(nowplaying-cli get playbackRate 2>/dev/null)
+-    if [ "$RATE" != "null" ] && [ "$RATE" != "0" ] && [ -n "$RATE" ]; then
+-        save_pause_position
+-        send_mr_command 1
+-        echo "mr" > "$FLAG"
+-    else
+-        send_media_key
+-        echo "key" > "$FLAG"
+-    fi
++
++    # Tier 1: Try Hush for browser media
++    if hush_cmd pause; then
++        echo "hush" > "$FLAG"
++    else
++        # Tier 2: Try native MediaRemote (Spotify, Music, Podcasts)
++        RATE=$(nowplaying-cli get playbackRate 2>/dev/null)
++        if [ "$RATE" != "null" ] && [ "$RATE" != "0" ] && [ -n "$RATE" ]; then
++            save_pause_position
++            send_mr_command 1
++            echo "mr" > "$FLAG"
++        else
++            # Tier 3: Media key fallback
++            send_media_key
++            echo "key" > "$FLAG"
++        fi
++    fi
++
+ else
+     [ ! -f "$FLAG" ] && exit 0
+     HAS_OTHER=false
+@@ -86,7 +124,12 @@
+     fi
+     METHOD=$(cat "$FLAG" 2>/dev/null)
+     sleep "$HERALD_RESUME_DELAY"
+-    if [ "$METHOD" = "mr" ]; then
++    if [ "$METHOD" = "hush" ]; then
++        if ! hush_cmd resume; then
++            # Hush unavailable — try MediaRemote as fallback
++            send_mr_command 0
++        fi
++    elif [ "$METHOD" = "mr" ]; then
+         send_rewind "$HERALD_REWIND_SECS"
+         sleep 0.3
+         send_mr_command 0

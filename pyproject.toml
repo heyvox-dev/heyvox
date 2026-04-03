@@ -1,7 +1,7 @@
 [project]
 name = "heyvox"
 version = "0.1.0"
-description = "macOS voice layer for AI coding agents — wake word, local STT, local TTS, HUD"
+description = "macOS voice layer for AI coding agents — wake word, STT, TTS, HUD, media control"
 license = {text = "MIT"}
 requires-python = ">=3.12"
 readme = "README.md"
@@ -56,6 +56,9 @@ tts = [
 aec = [
     "livekit>=1.0.0",
 ]
+chrome = [
+    "websockets>=13.0",
+]
 dev = [
     "pytest",
     "ruff",
@@ -63,12 +66,33 @@ dev = [
 
 [project.scripts]
 heyvox = "heyvox.cli:main"
+herald = "heyvox.herald.cli:main"
+heyvox-chrome-bridge = "heyvox.chrome.bridge:run_bridge"
 
 [tool.setuptools.packages.find]
 include = ["heyvox*"]
 
 [tool.setuptools.package-data]
-heyvox = ["cues/*.wav", "cues/*.mp3", "cues/*.aiff"]
+heyvox = [
+    "cues/*.wav", "cues/*.mp3", "cues/*.aiff",
+    # Herald — TTS orchestration (bash scripts + Python daemon)
+    "herald/bin/*",
+    "herald/lib/*.sh",
+    "herald/daemon/*.py",
+    "herald/hooks/*.sh",
+    "herald/modes/*.sh",
+    # Hush — browser media control (Chrome extension + native host)
+    "hush/extension/*.js",
+    "hush/extension/*.html",
+    "hush/extension/*.json",
+    "hush/extension/icons/*.png",
+    "hush/host/*.py",
+    "hush/host/*.json",
+    "hush/scripts/*.sh",
+    "hush/integration/*.sh",
+    "hush/integration/*.py",
+    "hush/integration/*.patch",
+]
 
 [build-system]
 requires = ["setuptools>=61", "wheel"]

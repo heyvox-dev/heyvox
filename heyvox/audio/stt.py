@@ -14,8 +14,13 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 import numpy as np
+
+# Timeout for model loading and transcription calls
+_LOAD_TIMEOUT = 60  # seconds — cold load can be slow
+_TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
 
 from heyvox.constants import DEFAULT_SAMPLE_RATE
 
@@ -195,13 +200,29 @@ def transcribe_audio(
         if not _mlx_loaded.is_set():
             _load_mlx_model()
         else:
-            _mlx_loaded.wait()  # Wait if preload is in progress
+            _mlx_loaded.wait(timeout=_LOAD_TIMEOUT)
+
+        if not _mlx_loaded.is_set():
+            _log("ERROR: MLX model failed to load within timeout")
+            return ""
 
         import mlx_whisper
         kwargs = dict(path_or_hf_repo=_mlx_model_id or mlx_model)
         if _mlx_language or language:
             kwargs["language"] = _mlx_language or language
-        result = mlx_whisper.transcribe(samples, **kwargs)
+
+        # Run transcription with timeout to prevent hangs
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(mlx_whisper.transcribe, samples, **kwargs)
+                result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+        except FuturesTimeout:
+            _log(f"ERROR: MLX transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
+            return ""
+        except Exception as e:
+            _log(f"ERROR: MLX transcription failed: {e}")
+            return ""
+
         _mlx_last_use = time.time()
         _schedule_unload()  # Reset the idle timer
         return result["text"].strip()

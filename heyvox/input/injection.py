@@ -2,7 +2,9 @@
 Text injection into the focused macOS application.
 
 Uses clipboard + Cmd-V for speed (keystroke simulation is very slow for
-long text). Saves and restores the previous clipboard content around each paste.
+long text). Does NOT restore clipboard after paste — the transcribed text
+remains in the clipboard, which prevents a race condition where Electron
+apps read the restored (old) content instead of the pasted text.
 """
 
 import subprocess
@@ -13,39 +15,58 @@ import time
 SUBPROCESS_TIMEOUT = 5
 
 
+def _set_clipboard(text: str) -> bool:
+    """Set clipboard text via pbcopy (more robust than osascript for special chars).
+
+    Returns True on success, False on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["pbcopy"],
+            input=text.encode("utf-8"),
+            capture_output=True, timeout=SUBPROCESS_TIMEOUT,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError) as e:
+        import sys
+        print(f"[injection] _set_clipboard failed: {e}", file=sys.stderr)
+        return False
+
+
 def type_text(text: str) -> None:
     """Paste text into the focused app via clipboard + Cmd-V.
 
-    Saves current clipboard content, sets it to text, sends Cmd-V,
-    then restores the original clipboard.
+    Sets clipboard to text, sends Cmd-V. The transcribed text remains
+    in the clipboard afterward (no restore — prevents race condition
+    with Electron apps reading the clipboard asynchronously).
 
     Args:
         text: Text to inject.
     """
-    old_clip = get_clipboard_text()
-    old_was_image = clipboard_is_image()
+    import sys
 
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(
-        ["osascript", "-e", f'set the clipboard to "{escaped}"'],
-        capture_output=True, timeout=SUBPROCESS_TIMEOUT,
-    )
+    # Set clipboard via pbcopy (handles all characters safely)
+    if not _set_clipboard(text):
+        print("[injection] ERROR: failed to set clipboard, aborting paste", file=sys.stderr)
+        return
+
+    # Verify clipboard was actually set before pasting
+    verify = get_clipboard_text()
+    if verify != text:
+        print(f"[injection] ERROR: clipboard verify failed — expected {len(text)} chars, "
+              f"got {len(verify)} chars, aborting paste", file=sys.stderr)
+        return
+
     time.sleep(0.05)
     subprocess.run(
         ["osascript", "-e", 'tell application "System Events"\n    keystroke "v" using command down\nend tell'],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT,
     )
-    time.sleep(0.3)  # Electron apps need time to read clipboard after Cmd-V
-
-    # Restore previous clipboard
-    if old_was_image:
-        pass  # Cannot restore image clipboard from Python — leave as-is
-    elif old_clip:
-        old_escaped = old_clip.replace("\\", "\\\\").replace('"', '\\"')
-        subprocess.run(
-            ["osascript", "-e", f'set the clipboard to "{old_escaped}"'],
-            capture_output=True, timeout=SUBPROCESS_TIMEOUT,
-        )
+    # NOTE: We intentionally do NOT restore the previous clipboard.
+    # Electron apps (Conductor, Cursor) read the clipboard asynchronously
+    # after Cmd-V — if we restore too soon, the app reads the old content
+    # instead of the transcribed text. Leaving the transcription in the
+    # clipboard is safe and lets the user re-paste if needed.
 
 
 def press_enter(count: int = 1, app_name: str | None = None) -> None:
@@ -74,10 +95,14 @@ def press_enter(count: int = 1, app_name: str | None = None) -> None:
         )
     else:
         script = f'tell application "System Events"\n    {enter_script}\nend tell'
-    subprocess.run(
+    result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT,
     )
+    if result.returncode != 0:
+        import sys
+        print(f"[injection] press_enter failed (rc={result.returncode}): "
+              f"{result.stderr.decode().strip()}", file=sys.stderr)
 
 
 def focus_app(app_name: str) -> None:
