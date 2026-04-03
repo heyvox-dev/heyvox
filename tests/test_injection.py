@@ -14,50 +14,53 @@ class TestTypeText:
 
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.clipboard_is_image", return_value=False)
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="")
-    def test_basic_paste(self, mock_clip, mock_img, mock_sleep, mock_run):
+    @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
+    def test_basic_paste(self, mock_clip, mock_sleep, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
         type_text("hello")
-        # At least: set clipboard, cmd-v
-        assert mock_run.call_count >= 2
-
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.clipboard_is_image", return_value=False)
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="old clipboard")
-    def test_restores_clipboard(self, mock_clip, mock_img, mock_sleep, mock_run):
-        type_text("new text")
-        # Should call subprocess.run 3 times: set, paste, restore
-        assert mock_run.call_count == 3
-
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.clipboard_is_image", return_value=True)
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="")
-    def test_skips_restore_for_image_clipboard(self, mock_clip, mock_img, mock_sleep, mock_run):
-        type_text("test")
-        # Only set clipboard + cmd-v (no restore for image clipboard)
+        # pbcopy (set) + osascript (Cmd-V) = 2 subprocess calls
         assert mock_run.call_count == 2
 
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.clipboard_is_image", return_value=False)
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="")
-    def test_escapes_quotes(self, mock_clip, mock_img, mock_sleep, mock_run):
-        type_text('say "hello"')
-        first_call = mock_run.call_args_list[0]
-        osascript_arg = first_call[0][0][2]  # The -e argument
-        assert '\\"hello\\"' in osascript_arg
+    @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
+    def test_no_clipboard_restore(self, mock_clip, mock_sleep, mock_run):
+        """Clipboard is NOT restored after paste — prevents Electron race condition."""
+        mock_run.return_value = MagicMock(returncode=0)
+        type_text("hello")
+        # Only 2 calls: pbcopy + Cmd-V. No third call to restore.
+        assert mock_run.call_count == 2
 
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.clipboard_is_image", return_value=False)
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="")
-    def test_escapes_backslashes(self, mock_clip, mock_img, mock_sleep, mock_run):
-        type_text("path\\to\\file")
-        first_call = mock_run.call_args_list[0]
-        osascript_arg = first_call[0][0][2]
-        assert "path\\\\to\\\\file" in osascript_arg
+    @patch("heyvox.input.injection.get_clipboard_text", return_value="wrong")
+    def test_aborts_on_verify_mismatch(self, mock_clip, mock_sleep, mock_run):
+        """If clipboard doesn't match after pbcopy, abort without pasting."""
+        mock_run.return_value = MagicMock(returncode=0)
+        type_text("hello")
+        # Only pbcopy call — Cmd-V should NOT be sent
+        assert mock_run.call_count == 1
+
+    @patch("heyvox.input.injection.subprocess.run")
+    @patch("heyvox.input.injection.time.sleep")
+    @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
+    def test_aborts_on_pbcopy_failure(self, mock_clip, mock_sleep, mock_run):
+        """If pbcopy fails (non-zero exit), abort without pasting."""
+        mock_run.return_value = MagicMock(returncode=1)
+        type_text("hello")
+        # pbcopy called once but failed — no Cmd-V
+        assert mock_run.call_count == 1
+
+    @patch("heyvox.input.injection.subprocess.run")
+    @patch("heyvox.input.injection.time.sleep")
+    @patch("heyvox.input.injection.get_clipboard_text", return_value='say "hello"')
+    def test_handles_special_chars(self, mock_clip, mock_sleep, mock_run):
+        """pbcopy handles quotes/unicode via stdin — no escaping needed."""
+        mock_run.return_value = MagicMock(returncode=0)
+        type_text('say "hello"')
+        # pbcopy receives raw bytes via stdin
+        pbcopy_call = mock_run.call_args_list[0]
+        assert pbcopy_call[1].get("input") == b'say "hello"'
 
 
 class TestPressEnter:
@@ -65,11 +68,13 @@ class TestPressEnter:
 
     @patch("heyvox.input.injection.subprocess.run")
     def test_single_enter(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
         press_enter(1)
         mock_run.assert_called_once()
 
     @patch("heyvox.input.injection.subprocess.run")
     def test_multiple_enter(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
         press_enter(3)
         mock_run.assert_called_once()
         osascript_arg = mock_run.call_args[0][0][2]

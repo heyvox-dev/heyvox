@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HeyVox — Voice Coding for AI Agents</title>
-  <meta name="description" content="Talk to your AI coding agent. Hands-free, fully local, zero cloud. Wake word detection, local STT, local TTS, and HUD overlay for macOS." />
-  <meta property="og:title" content="HeyVox — Voice Coding for AI Agents" />
-  <meta property="og:description" content="Talk to your AI coding agent. Hands-free, fully local, zero cloud." />
+  <title>HeyVox — Voice Coding, not Vibe Coding</title>
+  <meta name="description" content="Your AI coding agent talks back. Configurable verbosity, fully local TTS and STT, open source voice layer for Claude Code, Cursor, and Windsurf on macOS." />
+  <meta property="og:title" content="HeyVox — Voice Coding, not Vibe Coding" />
+  <meta property="og:description" content="Your AI coding agent doesn't just listen — it talks back. Open source voice layer, fully local STT and TTS." />
   <meta property="og:url" content="https://heyvox.dev" />
   <style>
     *, *::before, *::after {
@@ -314,6 +314,91 @@
       color: var(--text-muted);
       max-width: 500px;
       margin: 0 auto;
+    }
+
+    /* ─── CONVERSATION ─── */
+
+    #conversation {
+      background: linear-gradient(180deg, var(--bg) 0%, #0d0d18 50%, var(--bg) 100%);
+    }
+
+    .convo-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      align-items: center;
+    }
+
+    @media (max-width: 768px) {
+      .convo-grid {
+        grid-template-columns: 1fr;
+        gap: 32px;
+      }
+    }
+
+    .convo-text h2 {
+      font-size: clamp(26px, 3.5vw, 38px);
+      margin-bottom: 18px;
+    }
+
+    .convo-text p {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.7;
+      margin-bottom: 14px;
+    }
+
+    .convo-text p:last-child {
+      margin-bottom: 0;
+    }
+
+    .convo-flow {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .convo-step {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      transition: border-color 0.3s;
+    }
+
+    .convo-step:hover {
+      border-color: #353545;
+    }
+
+    .convo-step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .convo-step-content h4 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+
+    .convo-step-content p {
+      font-size: 13px;
+      color: var(--text-dim);
+      line-height: 1.55;
+      margin-bottom: 0;
     }
 
     /* ─── HOW IT WORKS ─── */
@@ -685,6 +770,56 @@
       line-height: 1.6;
     }
 
+    /* ─── BETA BADGE ─── */
+
+    .beta-tag {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+      color: #fff;
+      vertical-align: super;
+      margin-left: 5px;
+      -webkit-text-fill-color: #fff;
+    }
+
+    /* ─── EARLY ACCESS CTA ─── */
+
+    #early-access {
+      background: linear-gradient(180deg, var(--bg) 0%, #0d0d18 50%, var(--bg) 100%);
+      text-align: center;
+    }
+
+    .ea-box {
+      max-width: 560px;
+      margin: 0 auto;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 48px 40px;
+    }
+
+    .ea-box h2 {
+      font-size: clamp(24px, 3vw, 32px);
+      margin-bottom: 14px;
+    }
+
+    .ea-box p {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.65;
+      margin-bottom: 28px;
+    }
+
+    .ea-box .btn {
+      font-size: 15px;
+      padding: 13px 28px;
+    }
+
     /* ─── FOOTER ─── */
 
     footer {
@@ -769,11 +904,11 @@
 
   <!-- ── NAVBAR ── -->
   <nav>
-    <a href="#" class="nav-logo">HeyVox</a>
+    <a href="#" class="nav-logo">HeyVox<span class="beta-tag">Beta</span></a>
     <ul class="nav-links">
+      <li><a href="#conversation">The conversation</a></li>
       <li><a href="#how-it-works">How it works</a></li>
       <li><a href="#features">Features</a></li>
-      <li><a href="#install">Install</a></li>
       <li><a href="#privacy">Privacy</a></li>
       <li><a href="https://github.com/heyvox-dev/heyvox" class="nav-cta">GitHub</a></li>
     </ul>
@@ -785,31 +920,81 @@
       <div class="reveal visible">
         <div class="hero-badge">
           <span class="hero-badge-dot"></span>
-          macOS &middot; Fully Local &middot; Open Source
+          macOS &middot; Fully Local &middot; Open Source &middot; Early Access
         </div>
 
         <h1>Voice Coding,<br>not Vibe Coding</h1>
 
         <p class="hero-subline">
-          Talk to your AI coding agent.<br>
-          Hands-free, fully local, zero cloud.
+          Your AI agent doesn't just listen &mdash; it talks back.<br>
+          Voice layer runs fully local. Open source. Zero cloud fees.
         </p>
 
-        <div style="margin-bottom: 36px;">
-          <div class="hero-install">
-            <span class="prompt">$</span>
-            <span id="install-cmd">pip install heyvox &amp;&amp; heyvox setup</span>
-            <button class="copy-btn" onclick="copyInstall(this)" title="Copy to clipboard">&#x2398;</button>
-          </div>
-        </div>
-
         <div class="hero-actions">
-          <a href="https://github.com/heyvox-dev/heyvox" class="btn btn-primary">
+          <a href="#early-access" class="btn btn-primary">
+            Request Early Access
+          </a>
+          <a href="https://github.com/heyvox-dev/heyvox" class="btn btn-secondary">
             View on GitHub
           </a>
-          <a href="#install" class="btn btn-secondary">
-            Get Started
-          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── CONVERSATION — THE DIFFERENTIATOR ── -->
+  <section id="conversation">
+    <div class="container">
+      <div class="convo-grid">
+        <div class="convo-text reveal">
+          <div class="section-label">Pair programming, out loud</div>
+          <h2>It codes. It talks. You decide.</h2>
+          <p>
+            Other voice tools are a monologue &mdash; you dictate, the machine types.
+            HeyVox is a <strong>conversation</strong>.
+            Your agent reads the code, does the work, and tells you what happened &mdash;
+            like a colleague sitting next to you.
+          </p>
+          <p>
+            You choose the detail level: full response, a concise summary, or just the key facts.
+            If something sounds off, pull up the full diff. If it sounds right, keep going &mdash;
+            hands-free.
+          </p>
+          <p>
+            The voice layer is completely free &mdash; no API keys, no per-minute billing.
+            STT and TTS run locally on your Mac. You bring your own AI agent.
+          </p>
+        </div>
+
+        <div class="convo-flow reveal">
+          <div class="convo-step">
+            <div class="convo-step-num">1</div>
+            <div class="convo-step-content">
+              <h4>Agent works, then speaks</h4>
+              <p>Claude writes code, runs tests &mdash; then Herald reads you a summary of what changed.</p>
+            </div>
+          </div>
+          <div class="convo-step">
+            <div class="convo-step-num">2</div>
+            <div class="convo-step-content">
+              <h4>You choose the verbosity</h4>
+              <p>Full response, short summary, or one-liner &mdash; configurable per message or globally.</p>
+            </div>
+          </div>
+          <div class="convo-step">
+            <div class="convo-step-num">3</div>
+            <div class="convo-step-content">
+              <h4>Sounds good? Keep going</h4>
+              <p>Say your next instruction. No context switching, no reading walls of text.</p>
+            </div>
+          </div>
+          <div class="convo-step">
+            <div class="convo-step-num">4</div>
+            <div class="convo-step-content">
+              <h4>Something off? Review the details</h4>
+              <p>Pull up the full response anytime. You stay in control without losing flow.</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -820,38 +1005,39 @@
     <div class="container">
       <div class="section-header reveal">
         <div class="section-label">How it works</div>
-        <h2>You talk. It codes. All local.</h2>
-        <p class="section-sub">Three independent layers that turn your voice into shipped code — without any audio leaving your machine.</p>
+        <h2>Three layers, fully local</h2>
+        <p class="section-sub">Voice in, voice out, and a HUD to see what's happening — all running on your Mac, zero cloud.</p>
       </div>
 
       <div class="how-grid">
         <div class="how-card reveal">
+          <span class="how-icon">&#x1F50A;</span>
+          <h3>Voice OUT &mdash; Herald</h3>
+          <p>
+            Your agent finishes a task and <strong>speaks the result</strong> via Kokoro TTS.
+            Choose verbosity: full response, summary, or one-liner.
+            Emotional voice switching adapts tone to context. <strong>Hush</strong> auto-pauses
+            YouTube &amp; Spotify while it speaks.
+          </p>
+        </div>
+
+        <div class="how-card reveal">
           <span class="how-icon">&#x1F399;</span>
           <h3>Voice IN</h3>
           <p>
-            Say the wake word &rarr; HeyVox transcribes locally via
+            Say the wake word (or hold push-to-talk) &rarr; HeyVox transcribes locally via
             <code>MLX Whisper</code> or <code>sherpa-onnx</code> &rarr; text is pasted
             directly into your agent. Works with any app.
           </p>
         </div>
 
         <div class="how-card reveal">
-          <span class="how-icon">&#x1F50A;</span>
-          <h3>Voice OUT</h3>
-          <p>
-            Your agent calls <code>voice_speak()</code> via MCP &rarr; HeyVox
-            speaks with Kokoro TTS at configurable voice and speed.
-            Media pauses automatically while speaking.
-          </p>
-        </div>
-
-        <div class="how-card reveal">
           <span class="how-icon">&#x1F5A5;</span>
-          <h3>HUD Overlay</h3>
+          <h3>HUD &amp; Menu Bar</h3>
           <p>
-            Frosted-glass overlay lives above all Spaces and Dock.
-            Shows recording state, live waveform bars, and TTS
-            status in real time. No visual clutter.
+            Menu bar icon shows state at a glance (idle, recording, transcribing, speaking).
+            Frosted-glass overlay appears during recording with live waveform bars.
+            Recent transcript history in the dropdown.
           </p>
         </div>
       </div>
@@ -876,8 +1062,8 @@
 
       <p class="agents-note reveal">
         <strong>Voice IN works with any app</strong> &mdash; HeyVox pastes transcribed text
-        into whatever window has focus. <strong>Voice OUT</strong> (agent speaks back to you)
-        requires MCP support in your agent.
+        into whatever window has focus. <strong>Voice OUT via Herald hooks</strong> works automatically with Claude Code.
+        Other agents can use <strong>MCP</strong> (<code>voice_speak</code>) to speak back.
       </p>
     </div>
   </section>
@@ -892,6 +1078,30 @@
 
       <div class="features-grid">
         <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F50A;</span>
+          <h4>Herald TTS Orchestration</h4>
+          <p>Kokoro TTS with multi-part streaming, audio ducking, and workspace-aware queue. Your agent speaks, you listen.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F4CA;</span>
+          <h4>Configurable Verbosity</h4>
+          <p>Full response, summary, or one-liner. Per-message or global. Hear what matters, skip what doesn't.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F3AD;</span>
+          <h4>Emotional Voice Switching</h4>
+          <p>Detects mood in text (alert, cheerful, thoughtful) and picks the right voice. Auto-switches languages too.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x23F8;</span>
+          <h4>Hush Media Control</h4>
+          <p>Chrome extension pauses YouTube &amp; Spotify during TTS. Falls back to MediaRemote for native apps.</p>
+        </div>
+
+        <div class="feature-card reveal">
           <span class="feature-icon">&#x1F441;</span>
           <h4>Wake Word Detection</h4>
           <p>Powered by openwakeword. Always listening locally, never to the cloud.</p>
@@ -900,13 +1110,7 @@
         <div class="feature-card reveal">
           <span class="feature-icon">&#x1F5E3;</span>
           <h4>Local STT</h4>
-          <p>MLX Whisper on Apple Silicon. sherpa-onnx fallback on Intel Macs.</p>
-        </div>
-
-        <div class="feature-card reveal">
-          <span class="feature-icon">&#x1F50A;</span>
-          <h4>Local TTS</h4>
-          <p>Kokoro TTS with configurable voice, speed, and verbosity per message.</p>
+          <p>MLX Whisper on Apple Silicon. sherpa-onnx fallback on Intel Macs. Fast, accurate, offline.</p>
         </div>
 
         <div class="feature-card reveal">
@@ -916,21 +1120,21 @@
         </div>
 
         <div class="feature-card reveal">
-          <span class="feature-icon">&#x23F8;</span>
-          <h4>Media Pause/Resume</h4>
-          <p>Automatically pauses music and podcasts during TTS and recording.</p>
-        </div>
-
-        <div class="feature-card reveal">
           <span class="feature-icon">&#x2728;</span>
-          <h4>HUD Overlay</h4>
-          <p>NSVisualEffectView frosted-glass panel, visible on all Spaces and over fullscreen apps.</p>
+          <h4>HUD &amp; Menu Bar</h4>
+          <p>Menu bar icon with state indicator. Frosted-glass pill overlay during recording. Transcript history in dropdown.</p>
         </div>
 
         <div class="feature-card reveal">
           <span class="feature-icon">&#x1F527;</span>
-          <h4>MCP Integration</h4>
-          <p>4 tools: speak, status, queue, config. Agents control TTS directly.</p>
+          <h4>MCP + Claude Hooks</h4>
+          <p>4 MCP tools for any agent. Herald hooks for automatic Claude Code TTS. One <code>heyvox setup</code> wires everything.</p>
+        </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F4B0;</span>
+          <h4>Free Voice Layer</h4>
+          <p>No API keys for STT or TTS. No per-minute voice billing. Open source, runs on your hardware.</p>
         </div>
 
         <div class="feature-card reveal">
@@ -938,35 +1142,13 @@
           <h4>Auto-Start via launchd</h4>
           <p>Runs as a macOS launch agent. Always ready when you open your Mac.</p>
         </div>
+
+        <div class="feature-card reveal">
+          <span class="feature-icon">&#x1F6E1;</span>
+          <h4>Self-Healing</h4>
+          <p>Dead mic recovery in 30s. Memory watchdog auto-restarts at 1 GB. STT timeout prevents hangs.</p>
+        </div>
       </div>
-    </div>
-  </section>
-
-  <!-- ── INSTALL ── -->
-  <section id="install">
-    <div class="container">
-      <div class="section-header reveal">
-        <div class="section-label">Install</div>
-        <h2>Up and running in minutes</h2>
-        <p class="section-sub">Requires macOS 13+, Python 3.12+, and Apple Silicon (Intel supported via sherpa-onnx).</p>
-      </div>
-
-      <div class="install-box reveal">
-        <pre><span class="line-comment"># 1. Install system dependency</span>
-<span class="line-cmd">brew install portaudio</span>
-
-<span class="line-comment"># 2. Install HeyVox</span>
-<span class="line-cmd">pip install heyvox</span>
-
-<span class="line-comment"># 3. Run setup wizard</span>
-<span class="line-cmd">heyvox setup</span></pre>
-      </div>
-
-      <p class="install-note reveal">
-        The <strong>setup wizard</strong> walks you through permissions (Microphone, Accessibility),
-        model download, mic test, config generation, launchd agent registration, and MCP server
-        configuration &mdash; all in one guided flow.
-      </p>
     </div>
   </section>
 
@@ -979,8 +1161,8 @@
           <p class="privacy-headline">All processing runs <span>on your machine</span>. No audio ever leaves.</p>
           <p class="privacy-sub">
             HeyVox was designed privacy-first from day one.
-            Zero telemetry, zero cloud APIs, zero subscriptions.
-            Your voice data belongs to you.
+            Zero telemetry. Zero cloud APIs for voice. No per-minute TTS or STT billing.
+            Your voice data never leaves your machine.
           </p>
         </div>
 
@@ -1059,11 +1241,29 @@
     </div>
   </section>
 
+  <!-- ── EARLY ACCESS CTA ── -->
+  <section id="early-access">
+    <div class="container">
+      <div class="ea-box reveal">
+        <div class="section-label">Early access</div>
+        <h2>Join the beta</h2>
+        <p>
+          HeyVox is in early access. We&rsquo;re onboarding testers who use
+          AI coding agents daily and want a real voice workflow.
+          Tell us what agent you use and we&rsquo;ll get you set up.
+        </p>
+        <a href="mailto:hello@heyvox.dev?subject=HeyVox%20Early%20Access&body=Agent%20I%20use%3A%20%0AMac%20chip%3A%20Apple%20Silicon%20%2F%20Intel%0AWhy%20I%20want%20voice%20coding%3A%20" class="btn btn-primary">
+          Request Access
+        </a>
+      </div>
+    </div>
+  </section>
+
   <!-- ── FOOTER ── -->
   <footer>
     <div class="container">
       <div class="footer-inner">
-        <div class="footer-logo">HeyVox</div>
+        <div class="footer-logo">HeyVox <span class="beta-tag">Beta</span></div>
 
         <ul class="footer-links">
           <li><a href="https://github.com/heyvox-dev/heyvox">GitHub</a></li>
@@ -1099,19 +1299,6 @@
       observer.observe(el);
     });
 
-    // ── Copy install command ──
-    function copyInstall(btn) {
-      const text = "pip install heyvox && heyvox setup";
-      navigator.clipboard.writeText(text).then(() => {
-        const original = btn.innerHTML;
-        btn.innerHTML = "&#x2713;";
-        btn.style.color = "#34d399";
-        setTimeout(() => {
-          btn.innerHTML = original;
-          btn.style.color = "";
-        }, 1800);
-      });
-    }
   </script>
 
 </body>

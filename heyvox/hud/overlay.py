@@ -28,18 +28,17 @@ import sys
 # Layout constants
 # ---------------------------------------------------------------------------
 
-PILL_W_IDLE = 100
-PILL_H_IDLE = 34
-PILL_W_ACTIVE = 90
-PILL_H_ACTIVE = 28
+PILL_W = 100
+PILL_H = 28
 PILL_MARGIN_TOP = 8
 PILL_MARGIN_RIGHT = 16  # Default distance from right edge of screen
 ANIM_DURATION = 0.2
 POSITION_FILE = "/tmp/heyvox-hud-position.json"  # Persists user-dragged position
+_MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
 
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
 STATE_COLORS = {
-    "idle":       (0.72, 0.53, 0.04, 0.75),  # Starfleet gold
+    "idle":       (0.35, 0.35, 0.40, 0.65),  # Subtle gray
     "listening":  (1.0, 0.2, 0.2, 0.8),
     "processing": (1.0, 0.7, 0.0, 0.8),
     "speaking":   (0.2, 0.8, 0.3, 0.8),
@@ -321,44 +320,56 @@ def _apply_state(
     screen = NSScreen.mainScreen().frame()
     is_active = state_str in ("listening", "processing", "speaking")
 
-    # Floating pill: only visible during active states (recording/processing/speaking)
-    # When idle, the menu bar icon is sufficient — no need for floating window.
-    if not is_active:
+    # In menu-bar-only mode, the pill is never shown.
+    # Otherwise, show pill always — idle uses compact size, active uses active size.
+    if _MENU_BAR_ONLY:
         window.orderOut_(None)
     else:
-        new_pill_w = PILL_W_ACTIVE
-        new_pill_h = PILL_H_ACTIVE
-
         saved = _load_position()
         if saved:
             x, y = saved
         else:
-            x, y = _default_position(screen, new_pill_w, new_pill_h)
+            x, y = _default_position(screen, PILL_W, PILL_H)
 
         if not window.isVisible():
             window.orderFrontRegardless()
 
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(ANIM_DURATION)
-        window.animator().setFrame_display_(((x, y), (new_pill_w, new_pill_h)), True)
+        window.animator().setFrame_display_(((x, y), (PILL_W, PILL_H)), True)
         NSAnimationContext.endGrouping()
 
-        content_view.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
-        color_overlay.setFrame_(((0, 0), (new_pill_w, new_pill_h)))
+        content_view.setFrame_(((0, 0), (PILL_W, PILL_H)))
+        color_overlay.setFrame_(((0, 0), (PILL_W, PILL_H)))
 
         ve = window.contentView()
         if ve and ve.layer():
-            ve.layer().setCornerRadius_(new_pill_h / 2)
+            ve.layer().setCornerRadius_(PILL_H / 2)
         if color_overlay.layer():
-            color_overlay.layer().setCornerRadius_(new_pill_h / 2)
+            color_overlay.layer().setCornerRadius_(PILL_H / 2)
 
-    # Idle: floating window is hidden, menu bar icon handles everything
-    if not is_active:
-        return
-
-    # Hide idle label during active states
+    # Show/hide idle label
     if idle_label is not None:
-        idle_label.setHidden_(True)
+        idle_label.setHidden_(is_active)
+        # Show temporary status text (e.g. "Sent to Conductor") then revert
+        if not is_active and tts_text:
+            idle_label.setStringValue_(tts_text)
+            # Schedule revert to default label after 3 seconds
+            from Foundation import NSTimer
+            def _revert_label(timer):
+                idle_label.setStringValue_("\U0001f399 HeyVox")
+            NSTimer.scheduledTimerWithTimeInterval_repeats_block_(3.0, False, _revert_label)
+        elif not is_active:
+            idle_label.setStringValue_("\U0001f399 HeyVox")
+
+    if not is_active:
+        # Idle: show label, hide active elements
+        waveform_view.setHidden_(True)
+        transcript_label.setHidden_(True)
+        skip_btn, stop_btn = tts_controls
+        skip_btn.setHidden_(True)
+        stop_btn.setHidden_(True)
+        return
 
     # Waveform (visible only when listening)
     wf_visible = state_str == "listening"
@@ -405,10 +416,11 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
 
             if msg_type == "state":
                 state = msg_dict.get("state", "idle")
+                text = msg_dict.get("text")
                 _apply_state(
                     state, window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
-                    idle_label=idle_label,
+                    idle_label=idle_label, tts_text=text,
                     status_item=status_item,
                     update_status_menu=update_status_menu,
                 )
@@ -506,13 +518,36 @@ def _make_menu_action_class():
             import os
             if os.path.exists(_TTS_MUTE_FLAG):
                 os.unlink(_TTS_MUTE_FLAG)
+                sender.setState_(0)  # NSOffState — no checkmark
             else:
                 with open(_TTS_MUTE_FLAG, "w") as f:
                     f.write("")
+                sender.setState_(1)  # NSOnState — checkmark
+
+        def setVerbosity_(self, sender):
+            """Set verbosity to the level stored in the menu item's representedObject."""
+            try:
+                level = sender.representedObject()
+                if level:
+                    from heyvox.audio.tts import set_verbosity
+                    set_verbosity(level)
+            except Exception:
+                pass
+
+        def switchMic_(self, sender):
+            """Write mic switch request file for main.py to pick up."""
+            device_name = sender.representedObject()
+            if device_name:
+                try:
+                    from heyvox.constants import MIC_SWITCH_REQUEST_FILE
+                    with open(MIC_SWITCH_REQUEST_FILE, "w") as f:
+                        f.write(device_name)
+                except Exception:
+                    pass
 
         def openLog_(self, sender):
             import subprocess
-            subprocess.Popen(["open", "-a", "Console", "/tmp/vox.log"])
+            subprocess.Popen(["open", "-a", "Console", "/tmp/heyvox.log"])
 
         def openConfig_(self, sender):
             import subprocess
@@ -523,6 +558,37 @@ def _make_menu_action_class():
         def openHelp_(self, sender):
             import webbrowser
             webbrowser.open("https://heyvox.dev")
+
+        def toggleOverlay_(self, sender):
+            """Toggle the floating pill overlay on/off at runtime."""
+            global _MENU_BAR_ONLY
+            _MENU_BAR_ONLY = not _MENU_BAR_ONLY
+            if _MENU_BAR_ONLY:
+                sender.setState_(0)  # NSOffState — no checkmark
+                # Hide the pill window
+                from AppKit import NSApplication
+                for w in NSApplication.sharedApplication().windows():
+                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
+                        w.orderOut_(None)
+            else:
+                sender.setState_(1)  # NSOnState — checkmark
+                # Immediately show the pill window
+                from AppKit import NSApplication
+                for w in NSApplication.sharedApplication().windows():
+                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
+                        w.orderFrontRegardless()
+
+        def restartHeyVox_(self, sender):
+            """Kill heyvox.main and relaunch it, then restart the overlay."""
+            import subprocess, sys
+            # Kill the main process
+            subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+            import time; time.sleep(0.5)
+            # Relaunch main process
+            subprocess.Popen(
+                [sys.executable, "-c", "from heyvox.main import run; run()"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
         def quitHeyVox_(self, sender):
             """Send SIGTERM to parent heyvox.main process, then quit overlay."""
@@ -545,7 +611,7 @@ def _build_transcript_menu(handler):
     Args:
         handler: An instance of _MenuActionHandler for action targets.
     """
-    from AppKit import NSMenu, NSMenuItem, NSFont, NSAttributedString
+    from AppKit import NSMenu, NSMenuItem, NSFont, NSAttributedString, NSColor
     from Foundation import NSDictionary
 
     menu = NSMenu.alloc().init()
@@ -559,6 +625,27 @@ def _build_transcript_menu(handler):
         attrs = NSDictionary.dictionaryWithObject_forKey_(_menu_font, "NSFont")
         item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(t, attrs))
         return item
+
+    # -- Section 0: Live status --
+    import glob as _glob
+    queue_count = len(_glob.glob("/tmp/herald-queue/*.wav"))
+    hold_count = len(_glob.glob("/tmp/herald-hold/*.wav"))
+    status_parts = []
+    if os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute"):
+        status_parts.append("Muted")
+    if queue_count > 0:
+        status_parts.append(f"{queue_count} queued")
+    if hold_count > 0:
+        status_parts.append(f"{hold_count} held")
+    if status_parts:
+        status_text = "  " + " · ".join(status_parts)
+        status_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            status_text, None, "",
+        )
+        status_item.setEnabled_(False)
+        _styled(status_item)
+        menu.addItem_(status_item)
+        menu.addItem_(NSMenuItem.separatorItem())
 
     # -- Section 1: Recent transcripts --
     header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -601,22 +688,233 @@ def _build_transcript_menu(handler):
 
     menu.addItem_(NSMenuItem.separatorItem())
 
-    # -- Section 2: Quick toggles --
+    # -- Section 2: Quick toggles (fixed titles, checkmark = active) --
+
+    # Verbosity submenu
+    try:
+        from heyvox.audio.tts import get_verbosity
+        current_verbosity = get_verbosity()
+    except Exception:
+        current_verbosity = "full"
+
+    verbosity_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Verbosity", None, "",
+    )
+    _styled(verbosity_parent)
+    verbosity_sub = NSMenu.alloc().init()
+    verbosity_sub.setAutoenablesItems_(False)
+    _VERBOSITY_OPTIONS = [
+        ("full", "Full — speak everything"),
+        ("summary", "Summary — up to 150 chars"),
+        ("short", "Short — first sentence only"),
+        ("skip", "Silent — no TTS"),
+    ]
+    for level, label in _VERBOSITY_OPTIONS:
+        v_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setVerbosity:", "",
+        )
+        v_item.setTarget_(handler)
+        v_item.setRepresentedObject_(level)
+        v_item.setEnabled_(True)
+        if level == current_verbosity:
+            v_item.setState_(1)  # checkmark on active level
+        _styled(v_item)
+        verbosity_sub.addItem_(v_item)
+    verbosity_parent.setSubmenu_(verbosity_sub)
+    menu.addItem_(verbosity_parent)
+
+    # Microphone submenu — show active mic + available devices for switching
+    mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Microphone", None, "",
+    )
+    _styled(mic_parent)
+    mic_sub = NSMenu.alloc().init()
+    mic_sub.setAutoenablesItems_(False)
+
+    # Read active mic from file
+    _active_mic = ""
+    try:
+        from heyvox.constants import ACTIVE_MIC_FILE
+        with open(ACTIVE_MIC_FILE) as _mf:
+            _active_mic = _mf.read().strip()
+    except Exception:
+        pass
+
+    # Enumerate available input devices
+    try:
+        import pyaudio as _pa_mod
+        _scan = _pa_mod.PyAudio()
+        _input_devices = []
+        for _di in range(_scan.get_device_count()):
+            try:
+                _d = _scan.get_device_info_by_index(_di)
+                if _d['maxInputChannels'] > 0:
+                    _input_devices.append(_d['name'])
+            except Exception:
+                pass
+        _scan.terminate()
+    except Exception:
+        _input_devices = []
+
+    if not _input_devices and _active_mic:
+        _input_devices = [_active_mic]
+
+    for _dev_name in _input_devices:
+        _is_active = _dev_name == _active_mic
+        _prefix = "\u2713 " if _is_active else "   "
+        _mic_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"{_prefix}{_dev_name}", "switchMic:", "",
+        )
+        _mic_item.setTarget_(handler)
+        _mic_item.setRepresentedObject_(_dev_name)
+        _mic_item.setEnabled_(not _is_active)  # Disable if already selected
+        _styled(_mic_item)
+        mic_sub.addItem_(_mic_item)
+
+    if not _input_devices:
+        _no_mic = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "  No devices found", None, "",
+        )
+        _no_mic.setEnabled_(False)
+        _styled(_no_mic)
+        mic_sub.addItem_(_no_mic)
+
+    mic_parent.setSubmenu_(mic_sub)
+    menu.addItem_(mic_parent)
+
     is_muted = os.path.exists("/tmp/claude-tts-mute")
-    mute_title = "Unmute TTS" if is_muted else "Mute TTS"
     mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        mute_title, "toggleMute:", "",
+        "Mute TTS", "toggleMute:", "",
     )
     mute_item.setTarget_(handler)
     mute_item.setEnabled_(True)
     if is_muted:
-        mute_item.setState_(1)  # NSOnState — checkmark
+        mute_item.setState_(1)  # checkmark = muted
     _styled(mute_item)
     menu.addItem_(mute_item)
 
+    overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Show Overlay", "toggleOverlay:", "",
+    )
+    overlay_item.setTarget_(handler)
+    overlay_item.setEnabled_(True)
+    if not _MENU_BAR_ONLY:
+        overlay_item.setState_(1)  # checkmark = overlay visible
+    _styled(overlay_item)
+    menu.addItem_(overlay_item)
+
     menu.addItem_(NSMenuItem.separatorItem())
 
-    # -- Section 3: Info & actions --
+    # -- Section 3: Voice Commands reference --
+    # Use NSAttributedString for rich styling (readable, not grayed out)
+    from AppKit import NSFontAttributeName, NSForegroundColorAttributeName
+    _cmd_font = NSFont.systemFontOfSize_(12)
+    _cmd_bold = NSFont.boldSystemFontOfSize_(12)
+    _cmd_phrase_color = NSColor.labelColor()
+    _cmd_desc_color = NSColor.secondaryLabelColor()
+
+    def _cmd_item(phrase, desc):
+        """Create a readable voice command menu item with bold phrase."""
+        title = f"  \U0001f399 {phrase}  \u2014  {desc}"
+        attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+            [_cmd_font, _cmd_phrase_color],
+            [NSFontAttributeName, NSForegroundColorAttributeName],
+        )
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
+        item.setEnabled_(True)  # Full opacity (not grayed out)
+        return item
+
+    def _section_header(title):
+        attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+            [_cmd_bold, _cmd_desc_color],
+            [NSFontAttributeName, NSForegroundColorAttributeName],
+        )
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
+        item.setEnabled_(True)
+        return item
+
+    cmds_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "\U0001f399 Voice Commands", None, "",
+    )
+    _styled(cmds_parent)
+    cmds_sub = NSMenu.alloc().init()
+    cmds_sub.setAutoenablesItems_(False)
+
+    cmds_sub.addItem_(_section_header("Playback"))
+    cmds_sub.addItem_(_cmd_item('"skip"', "Skip current"))
+    cmds_sub.addItem_(_cmd_item('"stop"', "Stop all, clear queue"))
+    cmds_sub.addItem_(_cmd_item('"mute"', "Toggle mute"))
+    cmds_sub.addItem_(_cmd_item('"next"', "Play next message"))
+    cmds_sub.addItem_(_cmd_item('"replay"', "Replay last"))
+    cmds_sub.addItem_(NSMenuItem.separatorItem())
+    cmds_sub.addItem_(_section_header("Verbosity"))
+    cmds_sub.addItem_(_cmd_item('"be quiet"', "Short mode"))
+    cmds_sub.addItem_(_cmd_item('"summary"', "Summary mode"))
+    cmds_sub.addItem_(_cmd_item('"speak normally"', "Full mode"))
+    cmds_sub.addItem_(_cmd_item('"shut up"', "Silent mode"))
+
+    cmds_parent.setSubmenu_(cmds_sub)
+    menu.addItem_(cmds_parent)
+
+    # -- Section 4: Status with colored indicators --
+    def _pid_alive(pidfile):
+        try:
+            pid = int(open(pidfile).read().strip())
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    orch_ok = _pid_alive("/tmp/herald-orchestrator.pid")
+    kokoro_ok = os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")
+    hud_ok = os.path.exists("/tmp/heyvox-hud.sock")
+
+    status_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "\U0001f4ca Status", None, "",
+    )
+    _styled(status_parent)
+    status_sub = NSMenu.alloc().init()
+    status_sub.setAutoenablesItems_(False)
+
+    def _status_item(name, ok):
+        icon = "\U0001f7e2" if ok else "\U0001f534"  # green / red circle
+        label = "running" if ok else "stopped"
+        title = f"  {icon} {name}: {label}"
+        color = NSColor.labelColor()
+        attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+            [_cmd_font, color],
+            [NSFontAttributeName, NSForegroundColorAttributeName],
+        )
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
+        item.setEnabled_(True)
+        return item
+
+    status_sub.addItem_(_status_item("Orchestrator", orch_ok))
+    status_sub.addItem_(_status_item("Kokoro TTS", kokoro_ok))
+    status_sub.addItem_(_status_item("HUD", hud_ok))
+    status_sub.addItem_(NSMenuItem.separatorItem())
+
+    # Queue info
+    q_icon = "\U0001f4e8" if queue_count > 0 else "\U0001f4ed"  # envelope / empty mailbox
+    q_title = f"  {q_icon} Queue: {queue_count} queued, {hold_count} held"
+    q_attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+        [_cmd_font, NSColor.labelColor()],
+        [NSFontAttributeName, NSForegroundColorAttributeName],
+    )
+    q_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(q_title, None, "")
+    q_item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(q_title, q_attrs))
+    q_item.setEnabled_(True)
+    status_sub.addItem_(q_item)
+
+    status_parent.setSubmenu_(status_sub)
+    menu.addItem_(status_parent)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    # -- Section 5: Info & actions --
     try:
         from heyvox import __version__
         ver = __version__
@@ -647,6 +945,14 @@ def _build_transcript_menu(handler):
 
     menu.addItem_(NSMenuItem.separatorItem())
 
+    restart_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Restart", "restartHeyVox:", "",
+    )
+    restart_item.setTarget_(handler)
+    restart_item.setEnabled_(True)
+    _styled(restart_item)
+    menu.addItem_(restart_item)
+
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Quit HeyVox", "quitHeyVox:", "",
     )
@@ -662,11 +968,14 @@ def _build_transcript_menu(handler):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def main(menu_bar_only: bool = False):
     """Launch the HUD overlay NSApplication.
 
     Builds the frosted-glass pill window, starts the HUDServer on a daemon
     thread, installs SIGTERM/SIGINT handlers, and runs the AppKit event loop.
+
+    Args:
+        menu_bar_only: If True, only show the menu bar status icon (no floating pill).
 
     Requirements: HUD-01 through HUD-08
     """
@@ -691,6 +1000,9 @@ def main():
 
     from heyvox.hud.ipc import HUDServer, DEFAULT_SOCKET_PATH
 
+    global _MENU_BAR_ONLY
+    _MENU_BAR_ONLY = menu_bar_only
+
     # ---- Application setup ----
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(2)  # NSApplicationActivationPolicyProhibited — no dock icon
@@ -701,12 +1013,12 @@ def main():
     if saved:
         x, y = saved
     else:
-        x, y = _default_position(screen, PILL_W_ACTIVE, PILL_H_ACTIVE)
+        x, y = _default_position(screen, PILL_W, PILL_H)
 
     # ---- NSWindow (borderless, status level, transparent) ----
     # Starts hidden (idle) — shown on first active state
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((x, y), (PILL_W_ACTIVE, PILL_H_ACTIVE)),
+        ((x, y), (PILL_W, PILL_H)),
         NSWindowStyleMaskBorderless,
         NSBackingStoreBuffered,
         False,
@@ -725,12 +1037,12 @@ def main():
     )
 
     # ---- Frosted glass (NSVisualEffectView as content view) — HUD-06 ----
-    ve = NSVisualEffectView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    ve = NSVisualEffectView.alloc().initWithFrame_(((0, 0), (PILL_W, PILL_H)))
     ve.setMaterial_(HUD_MATERIAL)
     ve.setBlendingMode_(0)   # NSVisualEffectBlendingModeBehindWindow
     ve.setState_(1)          # NSVisualEffectStateActive
     ve.setWantsLayer_(True)
-    ve.layer().setCornerRadius_(PILL_H_ACTIVE / 2)  # pill shape (HUD-06)
+    ve.layer().setCornerRadius_(PILL_H / 2)  # pill shape (HUD-06)
     ve.layer().setMasksToBounds_(True)
     window.setContentView_(ve)
 
@@ -738,35 +1050,35 @@ def main():
     WaveformView = _make_waveform_view_class()
     HUDContentView = _make_content_view_class()
 
-    color_overlay = NSView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    color_overlay = NSView.alloc().initWithFrame_(((0, 0), (PILL_W, PILL_H)))
     r, g, b, a = STATE_COLORS["idle"]
     color_overlay.setWantsLayer_(True)
-    color_overlay.layer().setCornerRadius_(PILL_H_ACTIVE / 2)
+    color_overlay.layer().setCornerRadius_(PILL_H / 2)
     color_overlay.layer().setMasksToBounds_(True)
     idle_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 0.3)
     color_overlay.setBackgroundColor_(idle_color)
     ve.addSubview_(color_overlay)
 
     # ---- HUDContentView (selective hit-testing for mixed click-through) ----
-    content_view = HUDContentView.alloc().initWithFrame_(((0, 0), (PILL_W_ACTIVE, PILL_H_ACTIVE)))
+    content_view = HUDContentView.alloc().initWithFrame_(((0, 0), (PILL_W, PILL_H)))
     ve.addSubview_(content_view)
 
     # ---- Waveform view — HUD-02 ----
     # Sized for active state — hidden when idle
     wf_margin = 4
-    wf_w = PILL_W_ACTIVE - wf_margin * 2 - 40  # leave room for buttons
-    wf_h = PILL_H_ACTIVE - 4
+    wf_w = PILL_W - wf_margin * 2 - 40  # leave room for buttons
+    wf_h = PILL_H - 4
     wf_x = wf_margin
-    wf_y = (PILL_H_ACTIVE - wf_h) / 2
+    wf_y = (PILL_H - wf_h) / 2
     waveform_view = WaveformView.alloc().initWithFrame_(((wf_x, wf_y), (wf_w, wf_h)))
     waveform_view.setHidden_(True)
     content_view.addSubview_(waveform_view)
 
     # ---- Transcript label — HUD-03 ----
     label_margin = 4
-    label_w = PILL_W_ACTIVE - label_margin * 2 - 40
-    label_h = PILL_H_ACTIVE - 2
-    label_y = (PILL_H_ACTIVE - label_h) / 2
+    label_w = PILL_W - label_margin * 2 - 40
+    label_h = PILL_H - 2
+    label_y = (PILL_H - label_h) / 2
     transcript_label = NSTextField.alloc().initWithFrame_(
         ((label_margin, label_y), (label_w, label_h))
     )
@@ -783,12 +1095,12 @@ def main():
     transcript_label.setHidden_(True)
     content_view.addSubview_(transcript_label)
 
-    # ---- Idle label ("🎙 Vox" centered in idle pill) ----
+    # ---- Idle label ("🎙 HeyVox" centered in idle pill) ----
     NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
     idle_label_h = 18
-    idle_label_y = (PILL_H_IDLE - idle_label_h) / 2
+    idle_label_y = (PILL_H - idle_label_h) / 2
     idle_label = NSTextField.alloc().initWithFrame_(
-        ((0, idle_label_y), (PILL_W_IDLE, idle_label_h))
+        ((0, idle_label_y), (PILL_W, idle_label_h))
     )
     idle_label.setEditable_(False)
     idle_label.setSelectable_(False)
@@ -799,8 +1111,8 @@ def main():
     idle_label.setAlignment_(NSTextAlignmentCenter)
     idle_label.cell().setWraps_(False)
     idle_label.cell().setScrollable_(False)
-    idle_label.setStringValue_("\U0001f399 Vox")
-    idle_label.setHidden_(True)
+    idle_label.setStringValue_("\U0001f399 HeyVox")
+    idle_label.setHidden_(False)
     content_view.addSubview_(idle_label)
 
     # ---- TTS control buttons — HUD-04 ----
@@ -809,10 +1121,10 @@ def main():
 
     btn_w = 22
     btn_h = 14
-    btn_y = (PILL_H_ACTIVE - btn_h) / 2
+    btn_y = (PILL_H - btn_h) / 2
     btn_gap = 1
     btn_margin_right = 4
-    stop_x = PILL_W_ACTIVE - btn_margin_right - btn_w
+    stop_x = PILL_W - btn_margin_right - btn_w
     skip_x = stop_x - btn_gap - btn_w
 
     skip_btn = NSButton.alloc().initWithFrame_(((skip_x, btn_y), (btn_w, btn_h)))
@@ -926,4 +1238,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    main(menu_bar_only="--menu-bar-only" in _sys.argv)

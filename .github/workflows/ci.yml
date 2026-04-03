@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint & Test
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          brew install portaudio
+
+      - name: Install package with dev extras
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev,chrome]"
+
+      - name: Lint with ruff
+        run: |
+          ruff check heyvox/ tests/
+
+      - name: Run tests (excluding e2e)
+        run: |
+          pytest tests/ -k "not e2e" -v --tb=short
+
+      - name: Verify CLI entry points
+        run: |
+          heyvox --help
+          # herald depends on runtime TTS deps — allow failure
+          herald status || true
+
+      - name: Verify Python imports
+        run: |
+          python -c "from heyvox.herald import get_herald_home; from heyvox.hush import HUSH_HOME; print('imports ok')"

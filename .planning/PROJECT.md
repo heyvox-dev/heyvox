@@ -1,8 +1,8 @@
-# Vox — Voice Layer for AI Coding Agents
+# HeyVox — Voice Layer for AI Coding Agents
 
 ## What This Is
 
-Vox is a macOS voice layer that turns your voice into a first-class input device for AI coding agents. It combines wake word detection, push-to-talk, local STT (MLX Whisper), TTS orchestration (Kokoro), and a frosted-glass HUD overlay — all fully local, zero cloud dependency. It works with any AI coding agent (Claude Code, Cursor, Claude Desktop) via OS-level text injection for voice input and MCP for voice output.
+HeyVox is a macOS voice layer that turns your voice into a first-class input device for AI coding agents. It's a monorepo combining three components: **HeyVox Core** (wake word, STT, text injection, HUD), **Herald** (TTS orchestration via Kokoro), and **Hush** (browser media control via Chrome extension). All fully local, zero cloud dependency. Works with any AI coding agent (Claude Code, Cursor, Windsurf) via OS-level text injection for voice input and MCP + Claude hooks for voice output.
 
 ## Core Value
 

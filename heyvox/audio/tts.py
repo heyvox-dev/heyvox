@@ -1,43 +1,30 @@
 """
-Kokoro TTS engine for heyvox.
+TTS delegation layer for heyvox.
 
-Provides an interruptible queue-based TTS engine using Kokoro synthesis and
-sounddevice playback. Features verbosity filtering, volume boost, audio
-ducking (TTS-04), echo suppression flag IPC, and cross-process CLI control
-via a command file.
+Delegates all TTS operations to Herald (the dedicated TTS orchestration
+service). HeyVox handles voice input; Herald handles voice output.
+
+Herald provides: Kokoro TTS daemon, queue management, multi-part streaming,
+mood/language detection, workspace-aware playback, audio ducking, and media
+pause/resume.
 
 Also retains check_voice_command() and execute_voice_command() for backward
-compatibility with main.py's voice command dispatch (Phase 1/2 bridge).
+compatibility with main.py's voice command dispatch.
 
-Requirements: TTS-01 through TTS-06, AUDIO-12, AUDIO-09, CLI-05, CLI-06
+Requirements: TTS-01 through TTS-06
 """
 
 import logging
 import os
-import queue
 import re
 import subprocess
-import threading
-import time
 from enum import Enum
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
-from heyvox.constants import (
-    TTS_PLAYING_FLAG,
-    TTS_MAX_HELD,
-    TTS_SAMPLE_RATE,
-    TTS_DEFAULT_VOICE,
-    TTS_DEFAULT_SPEED,
-    TTS_DEFAULT_VOLUME_BOOST,
-    TTS_DEFAULT_DUCKING_PERCENT,
-    TTS_CMD_FILE,
-    RECORDING_FLAG,
-    GRACE_AFTER_RECORDING,
-    GRACE_BETWEEN_TTS,
-    GRACE_BEFORE_MEDIA_RESUME,
-)
+HERALD_CMD = "herald"
+_SUBPROCESS_TIMEOUT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -53,389 +40,83 @@ class Verbosity(str, Enum):
 
 
 def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
-    """Filter text according to the given verbosity level.
-
-    Args:
-        text: The original message text.
-        verbosity: One of Verbosity.FULL/SUMMARY/SHORT/SKIP (or string equivalent).
-
-    Returns:
-        Filtered string, or None if verbosity is SKIP.
-    """
+    """Filter text according to the given verbosity level."""
     if isinstance(verbosity, str):
         verbosity = Verbosity(verbosity)
 
     if verbosity == Verbosity.SKIP:
         return None
-
     if verbosity == Verbosity.FULL:
         return text
-
     if verbosity == Verbosity.SHORT:
-        # Return first sentence (up to first .!? boundary), max 100 chars
         match = re.search(r'[.!?]', text)
         if match:
             sentence = text[:match.end()].strip()
             return sentence[:100]
         return text[:100]
-
     if verbosity == Verbosity.SUMMARY:
-        # Truncate at 150 chars at word boundary, append "..." if truncated
         if len(text) <= 150:
             return text
         truncated = text[:150]
-        # Find last space before the cut point
         last_space = truncated.rfind(' ')
         if last_space > 0:
             truncated = truncated[:last_space]
         return truncated + "..."
-
     return text
-
-
-# ---------------------------------------------------------------------------
-# Volume control helpers
-# ---------------------------------------------------------------------------
-
-def _get_system_volume() -> int:
-    """Read current macOS output volume (0-100). Returns 50 on error."""
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", "output volume of (get volume settings)"],
-            capture_output=True, text=True, timeout=3,
-        )
-        return int(result.stdout.strip())
-    except Exception:
-        return 50
-
-
-def _set_system_volume(level: int) -> None:
-    """Set macOS output volume (0-100)."""
-    try:
-        subprocess.run(
-            ["osascript", "-e", f"set volume output volume {level}"],
-            capture_output=True, timeout=3,
-        )
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Echo suppression flag IPC
-# ---------------------------------------------------------------------------
-
-def _set_tts_flag(active: bool) -> None:
-    """Write or remove the TTS_PLAYING_FLAG file.
-
-    Must be called in try/finally around all playback so the flag is always
-    cleaned up even if the TTS process crashes.
-
-    Requirement: AUDIO-09
-    """
-    if active:
-        try:
-            open(TTS_PLAYING_FLAG, "w").close()
-        except Exception:
-            pass
-    else:
-        try:
-            os.unlink(TTS_PLAYING_FLAG)
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Pipeline (lazy init)
-# ---------------------------------------------------------------------------
-
-_pipeline = None
-_pipeline_lock = threading.Lock()
-
-
-def _get_pipeline(lang_code: str = 'a'):
-    """Lazily initialize and return the Kokoro KPipeline instance.
-
-    Lazy import keeps module load time fast and avoids errors on systems
-    without kokoro installed (e.g., CI environments).
-    """
-    global _pipeline
-    with _pipeline_lock:
-        if _pipeline is None:
-            from kokoro import KPipeline  # noqa: lazy import
-            _pipeline = KPipeline(lang_code=lang_code)
-    return _pipeline
 
 
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
 
-_tts_queue: queue.Queue = queue.Queue()
-_stop_event = threading.Event()
-_recording_active = threading.Event()  # Set when recording is active — TTS must not play
 _muted: bool = False
-_last_tts_end: float = 0  # Timestamp of last TTS playback completion
 _verbosity: Verbosity = Verbosity.FULL
-_worker_thread: Optional[threading.Thread] = None
-
-# Config values stored at start_worker time
-_voice_default: str = TTS_DEFAULT_VOICE
-_speed_default: float = TTS_DEFAULT_SPEED
-_volume_boost: int = TTS_DEFAULT_VOLUME_BOOST
-_ducking_percent: int = TTS_DEFAULT_DUCKING_PERCENT
-_pause_media_enabled: bool = False
-
-# HUD client — optional, never crashes TTS worker (Phase 5)
-_hud_client = None
-
-
-def _hud_send(msg: dict) -> None:
-    """Send a message to the HUD overlay. No-op if not connected.
-
-    All HUD sends go through here so the TTS worker never has to guard
-    against HUD failures — the HUD is strictly optional.
-    """
-    global _hud_client
-    if _hud_client is None:
-        return
-    try:
-        _hud_client.send(msg)
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
-# Command file IPC (cross-process CLI control)
+# Herald CLI helpers
 # ---------------------------------------------------------------------------
 
-def _check_cmd_file() -> None:
-    """Read and process TTS_CMD_FILE if it exists.
+_herald_warned = False
 
-    Commands: skip | stop | mute-toggle | quiet
-
-    Read atomically (read + unlink before processing) to avoid race
-    conditions between concurrent CLI invocations.
-    """
-    global _muted, _verbosity
-
+def _herald(cmd: str, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess:
+    """Call herald CLI command. Returns CompletedProcess, never raises."""
+    global _herald_warned
     try:
-        with open(TTS_CMD_FILE, 'r') as f:
-            cmd = f.read().strip()
-        os.unlink(TTS_CMD_FILE)
+        return subprocess.run(
+            [HERALD_CMD, cmd, *args],
+            input=input_text,
+            capture_output=True, text=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
     except FileNotFoundError:
-        return
-    except Exception:
-        return
-
-    if cmd == "skip":
-        _stop_event.set()
-    elif cmd == "stop":
-        _stop_event.set()
-        # Drain the queue
-        while not _tts_queue.empty():
-            try:
-                _tts_queue.get_nowait()
-                _tts_queue.task_done()
-            except queue.Empty:
-                break
-    elif cmd == "mute-toggle":
-        _muted = not _muted
-        if _muted:
-            _stop_event.set()
-            while not _tts_queue.empty():
-                try:
-                    _tts_queue.get_nowait()
-                    _tts_queue.task_done()
-                except queue.Empty:
-                    break
-    elif cmd == "quiet":
-        _verbosity = Verbosity.SHORT
+        if not _herald_warned:
+            log.warning(f"Herald not found at {HERALD_CMD}. TTS disabled.")
+            _herald_warned = True
+        return subprocess.CompletedProcess([HERALD_CMD, cmd], 1, "", "herald not found")
+    except subprocess.TimeoutExpired:
+        log.warning(f"Herald command '{cmd}' timed out")
+        return subprocess.CompletedProcess([HERALD_CMD, cmd], 1, "", "timeout")
+    except Exception as e:
+        log.warning(f"Herald command '{cmd}' failed: {e}")
+        return subprocess.CompletedProcess([HERALD_CMD, cmd], 1, "", str(e))
 
 
 # ---------------------------------------------------------------------------
-# Worker thread
-# ---------------------------------------------------------------------------
-
-def _tts_worker(voice_default: str, speed_default: float, volume_boost: int, ducking_percent: int, pause_media: bool = False) -> None:
-    """Background worker: dequeue items and synthesize/play via Kokoro + sounddevice.
-
-    Each item is a tuple of (text, voice, speed).
-    Sentinel value None signals shutdown.
-    """
-    import sounddevice as sd  # noqa: lazy import — avoids conflict with pyaudio mic stream
-    global _last_tts_end
-
-    while True:
-        # Check for cross-process commands before blocking on queue
-        _check_cmd_file()
-
-        try:
-            item = _tts_queue.get(timeout=1.0)
-        except queue.Empty:
-            continue
-        if item is None:
-            _tts_queue.task_done()
-            break
-
-        text, voice, speed = item
-        voice = voice or voice_default
-        speed = speed or speed_default
-
-        # Wait if recording is active — TTS must not play over dictation.
-        # Uses both in-process Event (authoritative) and file flag (cross-process).
-        # Re-check every 0.3s until recording finishes. (TTS-03)
-        was_waiting_for_recording = _recording_active.is_set() or os.path.exists(RECORDING_FLAG)
-        while _recording_active.is_set() or os.path.exists(RECORDING_FLAG):
-            if _stop_event.is_set():
-                break
-            time.sleep(0.3)
-
-        if _stop_event.is_set():
-            _tts_queue.task_done()
-            continue
-
-        # Grace period after recording ends — don't shock the user (TTS-03)
-        if was_waiting_for_recording:
-            time.sleep(GRACE_AFTER_RECORDING)
-        elif _last_tts_end > 0:
-            # Grace period between consecutive TTS messages
-            since_last = time.time() - _last_tts_end
-            if since_last < GRACE_BETWEEN_TTS:
-                time.sleep(GRACE_BETWEEN_TTS - since_last)
-
-        # ECHO-03: Register text in echo buffer before speaking
-        try:
-            from heyvox.audio.echo import register_tts_text
-            register_tts_text(text)
-        except Exception:
-            pass
-
-        _hud_send({"type": "tts_start", "text": text})
-        _hud_send({"type": "state", "state": "speaking"})
-
-        # Clear stop flag for this new item
-        _stop_event.clear()
-
-        media_was_paused = False
-
-        try:
-            _set_tts_flag(True)
-
-            # Pause system media if configured (YouTube, Spotify, etc.)
-            if pause_media:
-                from heyvox.audio.media import pause_media as _pause_media
-                media_was_paused = _pause_media()
-
-            # Synthesize and play in chunks
-            pipeline = _get_pipeline()
-            for gs, ps, audio in pipeline(text, voice=voice, speed=speed):
-                # Check for stop signal, recording state, and cross-process commands
-                _check_cmd_file()
-                if _stop_event.is_set() or _recording_active.is_set() or os.path.exists(RECORDING_FLAG):
-                    sd.stop()
-                    break
-
-                # ECHO-05: Feed speaker audio to AEC reverse stream
-                try:
-                    from heyvox.audio.echo import process_speaker_frame, is_aec_available
-                    if is_aec_available():
-                        process_speaker_frame(audio, sample_rate=TTS_SAMPLE_RATE)
-                except Exception:
-                    pass
-
-                sd.play(audio, samplerate=TTS_SAMPLE_RATE)
-                sd.wait()  # Non-blocking play + wait allows sd.stop() from another thread
-
-                # Check again after finishing a chunk
-                _check_cmd_file()
-                if _stop_event.is_set() or _recording_active.is_set() or os.path.exists(RECORDING_FLAG):
-                    sd.stop()
-                    break
-
-        except Exception:
-            log.exception("TTS playback error")
-        finally:
-            _last_tts_end = time.time()
-            _set_tts_flag(False)
-            # Resume system media after grace period (don't jolt the user)
-            if media_was_paused:
-                if _tts_queue.empty():
-                    time.sleep(GRACE_BEFORE_MEDIA_RESUME)
-                # Only resume if no more TTS queued and not recording
-                if _tts_queue.empty() and not os.path.exists(RECORDING_FLAG):
-                    from heyvox.audio.media import resume_media as _resume_media
-                    _resume_media()
-            _tts_queue.task_done()
-            _hud_send({"type": "tts_end"})
-            if _tts_queue.empty():
-                _hud_send({"type": "state", "state": "idle"})
-            _hud_send({"type": "queue_update", "count": _tts_queue.qsize()})
-
-
-# ---------------------------------------------------------------------------
-# Public API
+# Public API (delegates to Herald)
 # ---------------------------------------------------------------------------
 
 def start_worker(config=None) -> None:
-    """Start the background TTS worker thread.
-
-    Reads initial verbosity, voice, speed, volume_boost, and ducking_percent
-    from config. Safe to call multiple times — only starts one worker.
-
-    Args:
-        config: HeyvoxConfig instance. If None, uses built-in defaults.
-    """
-    global _worker_thread, _verbosity, _voice_default, _speed_default
-    global _volume_boost, _ducking_percent, _pause_media_enabled
-
-    if _worker_thread is not None and _worker_thread.is_alive():
-        return
+    """Initialize TTS settings from config. No worker thread needed — Herald runs independently."""
+    global _verbosity, _muted
 
     if config is not None:
-        tts_cfg = config.tts
-        _verbosity = Verbosity(tts_cfg.verbosity)
-        _voice_default = tts_cfg.voice
-        _speed_default = tts_cfg.speed
-        _volume_boost = tts_cfg.volume_boost
-        _ducking_percent = tts_cfg.ducking_percent
-        _pause_media_enabled = tts_cfg.pause_media
-
-    _worker_thread = threading.Thread(
-        target=_tts_worker,
-        args=(_voice_default, _speed_default, _volume_boost, _ducking_percent, _pause_media_enabled),
-        daemon=True,
-    )
-    _worker_thread.start()
-
-    # Connect HUD client (optional — silent fail if HUD not running)
-    # Requirement: HUD-08
-    global _hud_client
-    try:
-        from heyvox.hud.ipc import HUDClient
-        from heyvox.constants import HUD_SOCKET_PATH
-        _hud_client = HUDClient(HUD_SOCKET_PATH)
-        _hud_client.connect()
-    except ImportError:
-        pass
-    except Exception:
-        pass
+        _verbosity = Verbosity(config.tts.verbosity)
 
 
 def shutdown() -> None:
-    """Gracefully shut down the TTS worker thread.
-
-    Sends None sentinel to the queue and joins the worker thread.
-    """
-    global _worker_thread, _hud_client
-    _tts_queue.put(None)
-    if _worker_thread is not None:
-        _worker_thread.join(timeout=10)
-        _worker_thread = None
-    if _hud_client:
-        _hud_client.close()
-        _hud_client = None
+    """No-op — Herald manages its own lifecycle."""
+    pass
 
 
 def speak(
@@ -444,99 +125,60 @@ def speak(
     speed: float | None = None,
     verbosity: str | None = None,
 ) -> None:
-    """Enqueue text for TTS playback.
+    """Send text to Herald for TTS playback.
 
-    Applies verbosity filtering (per-call override > session level).
-    Drops oldest message if queue is at MAX_HELD capacity.
+    Applies verbosity filtering before sending.
     No-ops if muted.
-
-    Args:
-        text: Text to speak.
-        voice: Kokoro voice name override (None = use config default).
-        speed: Speed multiplier override (None = use config default).
-        verbosity: Verbosity mode override ("full"/"summary"/"short"/"skip").
     """
-    global _muted
-
-    if _muted:
+    if is_muted():
         return
 
-    # Resolve verbosity: per-call > session-level
-    v = Verbosity(verbosity) if verbosity else _verbosity
+    # Resolve verbosity: per-call > file-level > session-level
+    if verbosity:
+        v = Verbosity(verbosity)
+    else:
+        v = Verbosity(get_verbosity())
     filtered = apply_verbosity(text, v)
     if filtered is None:
         return
 
-    # Enforce queue cap: drop oldest if at limit
-    while _tts_queue.qsize() >= TTS_MAX_HELD:
-        try:
-            _tts_queue.get_nowait()
-            _tts_queue.task_done()
-        except queue.Empty:
-            break
-
-    _tts_queue.put((filtered, voice, speed))
-    _hud_send({"type": "queue_update", "count": _tts_queue.qsize()})
+    _herald("speak", input_text=filtered)
 
 
 def set_recording(active: bool) -> None:
-    """Signal TTS that recording is active/inactive.
+    """Signal Herald that recording is active/inactive.
 
-    When active, TTS worker will not start new playback and will stop
-    current playback immediately. This is the authoritative in-process
-    guard — more reliable than the file-based RECORDING_FLAG.
+    Uses Herald's pause/resume API for clean coordination.
     """
     if active:
-        _recording_active.set()
-        interrupt()  # Stop any in-flight TTS immediately
+        _herald("pause")
     else:
-        _recording_active.clear()
+        _herald("resume")
 
 
 def interrupt() -> None:
-    """Stop current TTS playback immediately.
-
-    Called by main.py when wake word or PTT triggers. Stops sounddevice
-    and sets the stop event so the worker drops the current item.
-
-    Requirement: TTS-02
-    """
-    try:
-        import sounddevice as sd  # noqa: lazy import
-        sd.stop()
-    except Exception:
-        pass
-    _stop_event.set()
+    """Stop current TTS playback immediately."""
+    _herald("skip")
 
 
 def skip_current() -> None:
-    """Stop current TTS item; worker picks up the next item in queue."""
-    interrupt()
+    """Stop current TTS item; Herald picks up the next item in queue."""
+    _herald("skip")
 
 
 def stop_all() -> None:
     """Stop current playback and clear the entire queue."""
-    interrupt()
-    while not _tts_queue.empty():
-        try:
-            _tts_queue.get_nowait()
-            _tts_queue.task_done()
-        except queue.Empty:
-            break
+    _herald("stop")
 
 
 def clear_queue() -> None:
-    """Drain the queue without stopping current playback."""
-    while not _tts_queue.empty():
-        try:
-            _tts_queue.get_nowait()
-            _tts_queue.task_done()
-        except queue.Empty:
-            break
+    """Clear queued messages without stopping current playback."""
+    # Herald doesn't have a separate clear-queue command; stop clears everything
+    _herald("stop")
 
 
 def set_muted(muted: bool) -> None:
-    """Mute or unmute TTS output. Muting also stops all current/queued playback."""
+    """Mute or unmute TTS output."""
     global _muted
     _muted = muted
     if muted:
@@ -544,49 +186,68 @@ def set_muted(muted: bool) -> None:
 
 
 def is_muted() -> bool:
-    """Return current mute state."""
-    return _muted
+    """Return current mute state (in-memory flag OR file flag from HUD toggle)."""
+    return _muted or os.path.exists("/tmp/claude-tts-mute")
 
 
 def set_verbosity(level: str) -> None:
-    """Set session-level verbosity mode."""
+    """Set verbosity mode (persisted to file for cross-process access)."""
     global _verbosity
     _verbosity = Verbosity(level)
+    # Write to shared file so Herald hooks/watcher can read it
+    from heyvox.constants import VERBOSITY_FILE
+    try:
+        if level == "full":
+            # Remove file = default (full)
+            os.remove(VERBOSITY_FILE)
+        else:
+            with open(VERBOSITY_FILE, "w") as f:
+                f.write(level)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning(f"Failed to write verbosity file: {e}")
 
 
 def get_verbosity() -> str:
-    """Return current session-level verbosity as string."""
+    """Return current verbosity (reads from shared file for cross-process consistency)."""
+    from heyvox.constants import VERBOSITY_FILE
+    try:
+        with open(VERBOSITY_FILE) as f:
+            level = f.read().strip()
+        if level in ("full", "summary", "short", "skip"):
+            return level
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
     return _verbosity.value
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility: voice command interception (Phase 1/2 bridge)
-#
-# These functions are called from main.py to intercept spoken control
-# commands (skip, mute, etc.) in the transcription pipeline.
-# They dispatch to an optional external TTS script (deprecated, Phase 1)
-# or can be wired to the native engine in Phase 3.
+# Voice command interception
 # ---------------------------------------------------------------------------
 
-# Voice commands: pattern -> (action_key, user-visible feedback string)
 VOICE_COMMANDS = {
     r"^(play\s+)?next(\s+message)?$": ("tts-next", "Playing next message"),
     r"^skip(\s+(this|current|audio))?$": ("tts-skip", "Skipping"),
     r"^stop(\s+(all|audio|everything))?$": ("tts-stop", "Stopping all audio"),
     r"^(toggle\s+)?mute$": ("tts-mute", "Toggling mute"),
     r"^replay(\s+last)?$": ("tts-replay", "Replaying last message"),
+    # Verbosity voice commands
+    r"^be\s+quiet$": ("verbosity-short", "Short mode"),
+    r"^be\s+brief$": ("verbosity-short", "Short mode"),
+    r"^(be\s+)?verbose$": ("verbosity-full", "Full mode"),
+    r"^full\s+verbosity$": ("verbosity-full", "Full mode"),
+    r"^shut\s+up$": ("verbosity-skip", "Silent mode"),
+    r"^(be\s+)?silent$": ("verbosity-skip", "Silent mode"),
+    r"^summary(\s+mode)?$": ("verbosity-summary", "Summary mode"),
+    r"^speak\s+normally$": ("verbosity-full", "Full mode"),
 }
 
 
 def check_voice_command(text: str):
-    """Check if a transcription string is a voice command.
-
-    Args:
-        text: Raw transcription text.
-
-    Returns:
-        Tuple of (action_key, feedback_str) if matched, else None.
-    """
+    """Check if a transcription string is a voice command."""
     clean = text.strip().lower().rstrip(".,!?")
     for pattern, (action, feedback) in VOICE_COMMANDS.items():
         if re.match(pattern, clean):
@@ -594,36 +255,8 @@ def check_voice_command(text: str):
     return None
 
 
-def _make_actions(tts_script_path: str) -> dict:
-    """Build the action dispatch table for a given TTS script path."""
-    def _run(cmd):
-        return subprocess.run(["bash", tts_script_path, cmd], timeout=5)
-
-    return {
-        "tts-next": lambda: _run("next"),
-        "tts-skip": lambda: _run("skip"),
-        "tts-stop": lambda: _run("stop"),
-        "tts-mute": lambda: _run("mute"),
-        "tts-replay": lambda: _run("replay"),
-    }
-
-
 def execute_voice_command(action_key: str, feedback: str, tts_script_path: str = None, log_fn=None) -> None:
-    """Execute a voice command action.
-
-    When tts_script_path is None or empty, the command is logged as a warning
-    and skipped — no crash, no exception. This allows the package to run without
-    any TTS configuration.
-
-    Args:
-        action_key: Action identifier from VOICE_COMMANDS (e.g. "tts-skip").
-        feedback: Human-readable description for logging.
-        tts_script_path: Absolute path to the TTS control script.
-            If None or empty, the command is logged but not executed.
-        log_fn: Optional callable(str) for log output.
-
-    Requirement: DECP-05
-    """
+    """Execute a voice command by delegating to Herald CLI."""
     def _log(msg):
         if log_fn:
             log_fn(msg)
@@ -632,15 +265,32 @@ def execute_voice_command(action_key: str, feedback: str, tts_script_path: str =
 
     _log(f"Voice command: {action_key} ({feedback})")
 
-    if not tts_script_path:
-        _log(
-            f"Voice command '{action_key}' ignored: TTS not configured "
-            f"(set tts.script_path in ~/.config/heyvox/config.yaml)"
-        )
+    # Verbosity voice commands
+    verbosity_map = {
+        "verbosity-full": "full",
+        "verbosity-summary": "summary",
+        "verbosity-short": "short",
+        "verbosity-skip": "skip",
+    }
+    if action_key in verbosity_map:
+        level = verbosity_map[action_key]
+        set_verbosity(level)
+        _log(f"Verbosity set to {level}")
         return
 
-    try:
-        actions = _make_actions(tts_script_path)
-        actions[action_key]()
-    except Exception as e:
-        _log(f"Voice command error: {e}")
+    # Map action keys to Herald commands
+    herald_cmds = {
+        "tts-next": "skip",    # Herald skips to next queued item
+        "tts-skip": "skip",
+        "tts-stop": "stop",
+        "tts-mute": "mute",
+        "tts-replay": "replay",
+    }
+
+    cmd = herald_cmds.get(action_key)
+    if cmd:
+        result = _herald(cmd)
+        if result.returncode != 0:
+            _log(f"Herald '{cmd}' failed: {result.stderr.strip()}")
+    else:
+        _log(f"Unknown voice command: {action_key}")

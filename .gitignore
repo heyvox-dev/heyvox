@@ -25,9 +25,14 @@ env/
 
 # Internal planning docs (not for public release)
 .planning/
+.context/
 product-concept.md
 CLAUDE.md
 conductor/
+
+# Environment files
+.env
+.env.*
 
 # Logs
 *.log
