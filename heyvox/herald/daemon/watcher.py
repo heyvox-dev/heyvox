@@ -124,24 +124,15 @@ def _get_verbosity():
 
 
 def _apply_verbosity(text, verbosity):
-    """Apply verbosity filtering to speech text. Returns None to skip."""
+    """Apply TTS playback filtering. Returns None to skip."""
     if verbosity == "skip":
         return None
-    if verbosity == "full":
-        return text
     if verbosity == "short":
         match = re.search(r'[.!?]', text)
         if match:
-            return text[:match.end()].strip()[:100]
+            return text[:match.end()].strip()
         return text[:100]
-    if verbosity == "summary":
-        if len(text) <= 150:
-            return text
-        trunc = text[:150]
-        last_sp = trunc.rfind(' ')
-        if last_sp > 0:
-            trunc = trunc[:last_sp]
-        return trunc + "..."
+    # "full" and "summary" (legacy) both play everything
     return text
 
 
