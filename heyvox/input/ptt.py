@@ -107,11 +107,12 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             is_busy = callbacks.get("is_busy", lambda: False)()
             is_rec = callbacks.get("is_recording", lambda: False)()
             if is_busy or is_rec:
-                return event
+                return None  # suppress to prevent Globe key system action
             _log("PTT key pressed, starting recording")
             on_start = callbacks.get("on_start")
             if on_start:
                 on_start()
+            return None  # suppress Globe key (emoji picker / input source switch)
 
         elif not fn_down and ptt_held:
             # Ignore false releases caused by other key events (within 50ms)
@@ -120,7 +121,7 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             ptt_held = False
             with _stop_lock:
                 if _stop_in_progress:
-                    return event
+                    return None  # suppress
                 if callbacks.get("is_recording", lambda: False)():
                     _stop_in_progress = True
             if _stop_in_progress:
@@ -132,6 +133,7 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
                 finally:
                     with _stop_lock:
                         _stop_in_progress = False
+            return None  # suppress Globe key release action
 
         return event
 
@@ -142,7 +144,7 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     tap = Quartz.CGEventTapCreate(
         Quartz.kCGSessionEventTap,
         Quartz.kCGHeadInsertEventTap,
-        Quartz.kCGEventTapOptionListenOnly,
+        Quartz.kCGEventTapOptionDefault,
         mask,
         callback,
         None,

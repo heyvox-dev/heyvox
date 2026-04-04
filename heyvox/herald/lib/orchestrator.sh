@@ -256,7 +256,7 @@ while true; do
   NEXT=$(find "$HERALD_QUEUE_DIR" -maxdepth 1 -name '*.wav' 2>/dev/null | sort | head -1)
 
   if [ -n "$NEXT" ] && [ -f "$NEXT" ]; then
-    if herald_is_muted; then
+    if herald_is_muted || herald_is_skip; then
       rm -f "$NEXT" "${NEXT%.wav}.workspace"
       continue
     fi
