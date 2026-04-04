@@ -532,12 +532,27 @@ def _make_menu_action_class():
                 sender.setState_(1)
 
         def setVerbosity_(self, sender):
-            """Set verbosity to the level stored in the menu item's representedObject."""
+            """Set verbosity to the level stored in the menu item's representedObject.
+
+            Also syncs the legacy file-flag mute mechanism so Herald's
+            bash scripts see a consistent state.
+            """
             try:
                 level = sender.representedObject()
                 if level:
                     from heyvox.audio.tts import set_verbosity
                     set_verbosity(level)
+                    # Sync legacy mute flags with verbosity
+                    if level == "skip":
+                        for f in _TTS_MUTE_FLAGS:
+                            with open(f, "w") as fh:
+                                fh.write("")
+                    else:
+                        for f in _TTS_MUTE_FLAGS:
+                            try:
+                                os.unlink(f)
+                            except FileNotFoundError:
+                                pass
             except Exception:
                 pass
 
@@ -669,8 +684,23 @@ def _build_transcript_menu(handler):
     except Exception:
         pass
 
-    # Shorten mic name for display (e.g. "G435 Wireless Gaming Headset" → "G435 Wireless")
-    _mic_short = _active_mic.split(" Gaming")[0].split(" Microphone")[0] if _active_mic else "No mic"
+    # Friendly mic name for display
+    def _friendly_mic(name):
+        if not name:
+            return "None"
+        n = name
+        # "MacBook Pro Microphone" → "Built-in"
+        if "macbook" in n.lower() and "microphone" in n.lower():
+            return "Built-in"
+        # Strip generic suffixes
+        for suffix in [" Gaming Headset", " Wireless Gaming Headset", " Microphone",
+                       " USB Audio", " Audio Device"]:
+            if n.endswith(suffix):
+                n = n[:-len(suffix)]
+                break
+        return n.strip()
+
+    _mic_short = _friendly_mic(_active_mic)
 
     # ── Section 1: Microphone (top-level with switch submenu) ──
     try:
@@ -692,7 +722,7 @@ def _build_transcript_menu(handler):
         _input_devices = [_active_mic]
 
     mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f399 {_mic_short}", None, "",
+        f"\U0001f399 Mic: {_mic_short}", None, "",
     )
     _styled(mic_parent)
     mic_sub = NSMenu.alloc().init()
@@ -701,7 +731,7 @@ def _build_transcript_menu(handler):
     for _dev_name in _input_devices:
         _is_active = _dev_name == _active_mic
         _mic_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            _dev_name, "switchMic:", "",
+            _friendly_mic(_dev_name), "switchMic:", "",
         )
         _mic_item.setTarget_(handler)
         _mic_item.setRepresentedObject_(_dev_name)
@@ -722,21 +752,20 @@ def _build_transcript_menu(handler):
     mic_parent.setSubmenu_(mic_sub)
     menu.addItem_(mic_parent)
 
-    # ── Section 2: Verbosity (top-level with submenu) ──
-    _VERBOSITY_LABELS = {
-        "full": "Full", "summary": "Summary", "short": "Short", "skip": "Silent",
+    # ── Section 2: TTS Playback (top-level with submenu) ──
+    _TTS_LABELS = {
+        "full": "Speak All", "short": "First Sentence", "skip": "Mute",
     }
-    verbosity_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f50a {_VERBOSITY_LABELS.get(current_verbosity, 'Full')}", None, "",
+    tts_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f50a TTS: {_TTS_LABELS.get(current_verbosity, 'Speak All')}", None, "",
     )
-    _styled(verbosity_parent)
+    _styled(tts_parent)
     verbosity_sub = NSMenu.alloc().init()
     verbosity_sub.setAutoenablesItems_(False)
     for level, label in [
-        ("full", "Full — speak everything"),
-        ("summary", "Summary — up to 150 chars"),
-        ("short", "Short — first sentence only"),
-        ("skip", "Silent — no TTS"),
+        ("full", "Speak All — play full TTS output"),
+        ("short", "First Sentence — just the opening line"),
+        ("skip", "Mute — silence TTS playback"),
     ]:
         v_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             label, "setVerbosity:", "",
@@ -748,8 +777,8 @@ def _build_transcript_menu(handler):
             v_item.setState_(1)
         _styled(v_item)
         verbosity_sub.addItem_(v_item)
-    verbosity_parent.setSubmenu_(verbosity_sub)
-    menu.addItem_(verbosity_parent)
+    tts_parent.setSubmenu_(verbosity_sub)
+    menu.addItem_(tts_parent)
 
     menu.addItem_(NSMenuItem.separatorItem())
 
@@ -834,11 +863,10 @@ def _build_transcript_menu(handler):
     cmds_sub.addItem_(_cmd_item('"mute"', "Toggle mute"))
     cmds_sub.addItem_(_cmd_item('"replay"', "Replay last"))
     cmds_sub.addItem_(NSMenuItem.separatorItem())
-    cmds_sub.addItem_(_section_header("Verbosity"))
-    cmds_sub.addItem_(_cmd_item('"be quiet"', "Short"))
-    cmds_sub.addItem_(_cmd_item('"summary"', "Summary"))
-    cmds_sub.addItem_(_cmd_item('"speak normally"', "Full"))
-    cmds_sub.addItem_(_cmd_item('"shut up"', "Silent"))
+    cmds_sub.addItem_(_section_header("TTS Playback"))
+    cmds_sub.addItem_(_cmd_item('"be quiet"', "First sentence only"))
+    cmds_sub.addItem_(_cmd_item('"speak normally"', "Speak all"))
+    cmds_sub.addItem_(_cmd_item('"shut up"', "Mute"))
     cmds_parent.setSubmenu_(cmds_sub)
     settings_sub.addItem_(cmds_parent)
 

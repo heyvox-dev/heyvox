@@ -32,36 +32,32 @@ _SUBPROCESS_TIMEOUT = 5
 # ---------------------------------------------------------------------------
 
 class Verbosity(str, Enum):
-    """Controls how much of a TTS message is spoken."""
+    """Controls TTS playback mode."""
     FULL = "full"
-    SUMMARY = "summary"
+    SUMMARY = "summary"  # Kept for backward compat — treated as FULL
     SHORT = "short"
     SKIP = "skip"
 
 
 def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
-    """Filter text according to the given verbosity level."""
+    """Filter text according to the given TTS playback mode.
+
+    Modes:
+    - full/summary: Speak the entire text as-is
+    - short: Speak only the first sentence
+    - skip: Drop silently (return None)
+    """
     if isinstance(verbosity, str):
         verbosity = Verbosity(verbosity)
 
     if verbosity == Verbosity.SKIP:
         return None
-    if verbosity == Verbosity.FULL:
-        return text
     if verbosity == Verbosity.SHORT:
         match = re.search(r'[.!?]', text)
         if match:
-            sentence = text[:match.end()].strip()
-            return sentence[:100]
+            return text[:match.end()].strip()
         return text[:100]
-    if verbosity == Verbosity.SUMMARY:
-        if len(text) <= 150:
-            return text
-        truncated = text[:150]
-        last_space = truncated.rfind(' ')
-        if last_space > 0:
-            truncated = truncated[:last_space]
-        return truncated + "..."
+    # FULL and SUMMARY both play everything
     return text
 
 
@@ -191,8 +187,13 @@ def is_muted() -> bool:
 
 
 def set_verbosity(level: str) -> None:
-    """Set verbosity mode (persisted to file for cross-process access)."""
-    global _verbosity
+    """Set verbosity mode (persisted to file for cross-process access).
+
+    Also syncs the legacy file-flag mute mechanism: "skip" creates mute
+    flags, anything else removes them. This keeps Herald's bash scripts
+    and the Python is_muted() check consistent.
+    """
+    global _verbosity, _muted
     _verbosity = Verbosity(level)
     # Write to shared file so Herald hooks/watcher can read it
     from heyvox.constants import VERBOSITY_FILE
@@ -207,6 +208,22 @@ def set_verbosity(level: str) -> None:
         pass
     except OSError as e:
         log.warning(f"Failed to write verbosity file: {e}")
+    # Sync legacy mute flags and in-memory state
+    _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+    if level == "skip":
+        _muted = True
+        for flag in _MUTE_FLAGS:
+            try:
+                open(flag, "w").close()
+            except OSError:
+                pass
+    else:
+        _muted = False
+        for flag in _MUTE_FLAGS:
+            try:
+                os.remove(flag)
+            except FileNotFoundError:
+                pass
 
 
 def get_verbosity() -> str:
@@ -235,14 +252,13 @@ VOICE_COMMANDS = {
     r"^(toggle\s+)?mute$": ("tts-mute", "Toggling mute"),
     r"^replay(\s+last)?$": ("tts-replay", "Replaying last message"),
     # Verbosity voice commands
-    r"^be\s+quiet$": ("verbosity-short", "Short mode"),
-    r"^be\s+brief$": ("verbosity-short", "Short mode"),
-    r"^(be\s+)?verbose$": ("verbosity-full", "Full mode"),
-    r"^full\s+verbosity$": ("verbosity-full", "Full mode"),
-    r"^shut\s+up$": ("verbosity-skip", "Silent mode"),
-    r"^(be\s+)?silent$": ("verbosity-skip", "Silent mode"),
-    r"^summary(\s+mode)?$": ("verbosity-summary", "Summary mode"),
-    r"^speak\s+normally$": ("verbosity-full", "Full mode"),
+    r"^be\s+quiet$": ("verbosity-short", "First sentence mode"),
+    r"^be\s+brief$": ("verbosity-short", "First sentence mode"),
+    r"^(be\s+)?verbose$": ("verbosity-full", "Speak all"),
+    r"^full\s+verbosity$": ("verbosity-full", "Speak all"),
+    r"^shut\s+up$": ("verbosity-skip", "Muted"),
+    r"^(be\s+)?silent$": ("verbosity-skip", "Muted"),
+    r"^speak\s+normally$": ("verbosity-full", "Speak all"),
 }
 
 
@@ -268,7 +284,6 @@ def execute_voice_command(action_key: str, feedback: str, tts_script_path: str =
     # Verbosity voice commands
     verbosity_map = {
         "verbosity-full": "full",
-        "verbosity-summary": "summary",
         "verbosity-short": "short",
         "verbosity-skip": "skip",
     }

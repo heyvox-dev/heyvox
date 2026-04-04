@@ -60,16 +60,10 @@ if verbosity == 'skip':
 elif verbosity == 'short':
     m = re.search(r'[.!?]', speech)
     if m:
-        speech = speech[:m.end()].strip()[:100]
+        speech = speech[:m.end()].strip()
     else:
         speech = speech[:100]
-elif verbosity == 'summary':
-    if len(speech) > 150:
-        trunc = speech[:150]
-        last_sp = trunc.rfind(' ')
-        if last_sp > 0:
-            trunc = trunc[:last_sp]
-        speech = trunc + '...'
+# 'full' and 'summary' (legacy) both play everything
 
 if mode == 'notify':
     first = re.split(r'[.!?]', speech)[0].strip()
