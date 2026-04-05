@@ -1237,7 +1237,20 @@ def main(menu_bar_only: bool = False):
         status_item=status_item, update_status_menu=_update_status_menu,
     )
 
-    # ---- SIGTERM / SIGINT handler (NSTimer pattern — proven in codebase) ----
+    # ---- Clean shutdown: remove status item so menu bar icon disappears ----
+    import atexit
+
+    def _cleanup_status_item():
+        try:
+            NSStatusBar.systemStatusBar().removeStatusItem_(status_item)
+        except Exception:
+            pass
+
+    atexit.register(_cleanup_status_item)
+
+    # ---- SIGTERM / SIGINT handler ----
+    # Two-pronged: (1) immediately remove menu bar icon from signal context,
+    # (2) schedule clean shutdown via NSTimer for run loop cleanup.
     class Terminator(NSObject):
         def terminate_(self, timer):
             hud_server.shutdown()
@@ -1246,6 +1259,7 @@ def main(menu_bar_only: bool = False):
     terminator = Terminator.alloc().init()
 
     def handle_signal(signum, frame):
+        _cleanup_status_item()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.0, terminator, "terminate:", None, False
         )

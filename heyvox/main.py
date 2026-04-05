@@ -342,6 +342,18 @@ _indicator_proc = None
 _hud_log_fh = None  # stderr log file handle for HUD subprocess
 
 
+def _kill_overlay_pids(pids: list[int]) -> None:
+    """Kill overlay processes by PID. Uses SIGKILL — SIGTERM is unreliable on orphaned AppKit processes."""
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+    # Wait for macOS to reclaim window server resources (ghost icon cleanup)
+    if pids:
+        time.sleep(0.5)
+
+
 def _kill_orphan_indicators() -> None:
     """Kill any leftover overlay processes from previous sessions."""
     my_pid = os.getpid()
@@ -350,12 +362,13 @@ def _kill_orphan_indicators() -> None:
             ["pgrep", "-f", "heyvox.hud.overlay"],
             capture_output=True, text=True, timeout=3,
         )
+        pids = []
         for pid_str in result.stdout.strip().split('\n'):
             if pid_str.strip():
                 pid = int(pid_str.strip())
                 if pid != my_pid:
-                    os.kill(pid, 9)
-        time.sleep(0.5)
+                    pids.append(pid)
+        _kill_overlay_pids(pids)
     except Exception:
         pass
 
@@ -370,14 +383,10 @@ def _kill_duplicate_overlays(keep_pid: int | None = None) -> None:
         pids = [int(p.strip()) for p in result.stdout.strip().split('\n') if p.strip()]
         if len(pids) <= 1:
             return
-        # Keep the one we own, kill the rest
-        for pid in pids:
-            if pid != keep_pid:
-                try:
-                    os.kill(pid, 9)
-                    log(f"Killed duplicate overlay (pid={pid})")
-                except ProcessLookupError:
-                    pass
+        to_kill = [pid for pid in pids if pid != keep_pid]
+        _kill_overlay_pids(to_kill)
+        for pid in to_kill:
+            log(f"Killed duplicate overlay (pid={pid})")
     except Exception:
         pass
 
@@ -961,7 +970,8 @@ def _acquire_singleton():
 
     # Clean up stale flag files and sockets from previous instance
     import glob as _glob
-    for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*", "/tmp/heyvox-hud.sock"):
+    for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*", "/tmp/heyvox-hud.sock",
+                     "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity"):
         for stale in _glob.glob(pattern):
             try:
                 os.unlink(stale)
