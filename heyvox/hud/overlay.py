@@ -753,23 +753,35 @@ def _build_transcript_menu(handler):
     mic_parent.setSubmenu_(mic_sub)
     menu.addItem_(mic_parent)
 
-    # ── Section 2: TTS Playback (top-level with submenu) ──
+    # ── Section 2: Voice Output (verbosity + style in one submenu) ──
+    from heyvox.audio.tts import get_tts_style
+    current_style = get_tts_style()
     _TTS_LABELS = {
         "full": "Speak All", "short": "First Sentence", "skip": "Mute",
     }
-    tts_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f50a TTS: {_TTS_LABELS.get(current_verbosity, 'Speak All')}", None, "",
+    _STYLE_LABELS = {
+        "detailed": "Detailed", "concise": "Concise",
+        "technical": "Technical", "casual": "Casual",
+    }
+    voice_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f50a Voice: {_TTS_LABELS.get(current_verbosity, 'Speak All')} \u00b7 {_STYLE_LABELS.get(current_style, 'Detailed')}", None, "",
     )
-    _styled(tts_parent)
-    verbosity_sub = NSMenu.alloc().init()
-    verbosity_sub.setAutoenablesItems_(False)
+    _styled(voice_parent)
+    voice_sub = NSMenu.alloc().init()
+    voice_sub.setAutoenablesItems_(False)
+
+    # -- Output mode --
+    header_output = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Output", None, "")
+    header_output.setEnabled_(False)
+    _styled(header_output)
+    voice_sub.addItem_(header_output)
     for level, label in [
-        ("full", "Speak All — play full TTS output"),
-        ("short", "First Sentence — just the opening line"),
-        ("skip", "Mute — silence TTS playback"),
+        ("full", "Speak All"),
+        ("short", "First Sentence"),
+        ("skip", "Mute"),
     ]:
         v_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            label, "setVerbosity:", "",
+            f"  {label}", "setVerbosity:", "",
         )
         v_item.setTarget_(handler)
         v_item.setRepresentedObject_(level)
@@ -777,31 +789,23 @@ def _build_transcript_menu(handler):
         if level == current_verbosity:
             v_item.setState_(1)
         _styled(v_item)
-        verbosity_sub.addItem_(v_item)
-    tts_parent.setSubmenu_(verbosity_sub)
-    menu.addItem_(tts_parent)
+        voice_sub.addItem_(v_item)
 
-    # ── Section 2b: TTS Style (how Claude formulates spoken output) ──
-    from heyvox.audio.tts import get_tts_style
-    current_style = get_tts_style()
-    _STYLE_LABELS = {
-        "detailed": "Detailed", "concise": "Concise",
-        "technical": "Technical", "casual": "Casual",
-    }
-    style_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f3a4 Style: {_STYLE_LABELS.get(current_style, 'Detailed')}", None, "",
-    )
-    _styled(style_parent)
-    style_sub = NSMenu.alloc().init()
-    style_sub.setAutoenablesItems_(False)
+    voice_sub.addItem_(NSMenuItem.separatorItem())
+
+    # -- Style --
+    header_style = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Style", None, "")
+    header_style.setEnabled_(False)
+    _styled(header_style)
+    voice_sub.addItem_(header_style)
     for style_key, style_desc in [
-        ("detailed", "Detailed — what happened, what changed, why"),
-        ("concise", "Concise — key takeaway, 1-2 sentences"),
-        ("technical", "Technical — function names, errors, diffs"),
-        ("casual", "Casual — like a coworker chatting"),
+        ("detailed", "Detailed"),
+        ("concise", "Concise"),
+        ("technical", "Technical"),
+        ("casual", "Casual"),
     ]:
         s_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            style_desc, "setTTSStyle:", "",
+            f"  {style_desc}", "setTTSStyle:", "",
         )
         s_item.setTarget_(handler)
         s_item.setRepresentedObject_(style_key)
@@ -809,9 +813,10 @@ def _build_transcript_menu(handler):
         if style_key == current_style:
             s_item.setState_(1)
         _styled(s_item)
-        style_sub.addItem_(s_item)
-    style_parent.setSubmenu_(style_sub)
-    menu.addItem_(style_parent)
+        voice_sub.addItem_(s_item)
+
+    voice_parent.setSubmenu_(voice_sub)
+    menu.addItem_(voice_parent)
 
     menu.addItem_(NSMenuItem.separatorItem())
 
