@@ -1204,7 +1204,22 @@ def main(menu_bar_only: bool = False):
     def _update_status_menu():
         """Rebuild and assign menu to status item (called on state change)."""
         menu = _build_transcript_menu(menu_handler)
+        menu.setDelegate_(_menu_delegate)
         status_item.setMenu_(menu)
+
+    def _rebuild_menu_contents(menu):
+        """Rebuild menu items in-place (called by delegate on every open)."""
+        menu.removeAllItems()
+        fresh = _build_transcript_menu(menu_handler)
+        for i in range(fresh.numberOfItems()):
+            item = fresh.itemAtIndex_(0)
+            fresh.removeItemAtIndex_(0)
+            menu.addItem_(item)
+
+    MenuDelegateClass = type("MenuDelegate", (NSObject,), {
+        "menuNeedsUpdate_": lambda self, m: _rebuild_menu_contents(m),
+    })
+    _menu_delegate = MenuDelegateClass.alloc().init()
 
     _update_status_menu()
 
