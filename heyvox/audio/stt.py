@@ -91,7 +91,7 @@ def _unload_mlx_model() -> None:
 
 
 def _schedule_unload() -> None:
-    """Schedule model unload after idle timeout."""
+    """Schedule model unload after idle timeout. Must hold _mlx_lock or be called from within it."""
     global _mlx_unloader
     if _mlx_unloader is not None:
         _mlx_unloader.cancel()
@@ -224,7 +224,8 @@ def transcribe_audio(
             return ""
 
         _mlx_last_use = time.time()
-        _schedule_unload()  # Reset the idle timer
+        with _mlx_lock:
+            _schedule_unload()  # Reset the idle timer
         return result["text"].strip()
     else:
         # sherpa-onnx: split into <=30s segments (Whisper's input limit)

@@ -5,7 +5,7 @@ Every successful transcription is saved to a JSONL file before paste is
 attempted. If paste fails (focus lost, app crash, etc.), the text is still
 recoverable via ``vox history`` CLI.
 
-Storage: ~/.local/share/vox/transcripts.jsonl (XDG-compliant via platformdirs)
+Storage: ~/.local/share/heyvox/transcripts.jsonl (XDG-compliant via platformdirs)
 Format: one JSON object per line, newest last.
 """
 
@@ -15,11 +15,27 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-_DATA_DIR = Path(user_data_dir("vox"))
+# Use "heyvox" as app name; also check old "vox" dir for migration
+_DATA_DIR = Path(user_data_dir("heyvox"))
+_OLD_DATA_DIR = Path(user_data_dir("vox"))
 _HISTORY_FILE = _DATA_DIR / "transcripts.jsonl"
 
 # Maximum file size before rotation (5 MB)
 _MAX_BYTES = 5_000_000
+
+# Migrate old "vox" history to "heyvox" on first access
+_OLD_HISTORY = _OLD_DATA_DIR / "transcripts.jsonl"
+if _OLD_HISTORY.exists() and not _HISTORY_FILE.exists():
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.move(str(_OLD_HISTORY), str(_HISTORY_FILE))
+        # Also move rotated file if present
+        _old_rotated = _OLD_HISTORY.with_suffix(".jsonl.1")
+        if _old_rotated.exists():
+            shutil.move(str(_old_rotated), str(_HISTORY_FILE.with_suffix(".jsonl.1")))
+    except OSError:
+        pass
 
 
 def save(text: str, duration: float = 0.0, ptt: bool = False) -> None:

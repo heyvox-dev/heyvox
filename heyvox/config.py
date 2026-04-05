@@ -81,6 +81,13 @@ class TTSConfig(BaseModel):
     # Controls how much of each message is spoken.
     verbosity: str = "full"
 
+    # TTS style: controls how Claude formulates spoken output.
+    # detailed  — explain what happened and why, 3-5 sentences
+    # concise   — key takeaway only, 1-2 sentences
+    # technical — include function names, error details, diffs
+    # casual    — conversational, like a coworker chatting
+    style: str = "detailed"
+
     # Added to system volume before TTS playback (0-100 points, capped at 100)
     # Requirement: AUDIO-12
     volume_boost: int = 10
@@ -104,6 +111,14 @@ class TTSConfig(BaseModel):
         valid = {"full", "summary", "short", "skip"}
         if v not in valid:
             raise ValueError(f"verbosity must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        valid = {"detailed", "concise", "technical", "casual"}
+        if v not in valid:
+            raise ValueError(f"style must be one of {valid}, got '{v}'")
         return v
 
     @field_validator("ducking_percent")
@@ -264,6 +279,65 @@ def load_config(config_path: Path | None = None) -> HeyvoxConfig:
             sys.exit(1)
     else:
         return HeyvoxConfig()
+
+
+def update_config(**kwargs) -> None:
+    """Update specific keys in the config file, preserving comments and structure.
+
+    Uses simple line-based replacement for top-level keys. For nested keys,
+    use dot notation (e.g., ``tts.verbosity="short"``).
+
+    Only writes keys that are already present in the file. Appends new
+    top-level keys at the end if not found.
+    """
+    if not CONFIG_FILE.exists():
+        return
+
+    lines = CONFIG_FILE.read_text().splitlines(keepends=True)
+
+    for key, value in kwargs.items():
+        # Convert Python values to YAML scalars
+        if isinstance(value, bool):
+            yaml_val = "true" if value else "false"
+        elif isinstance(value, str):
+            yaml_val = value
+        else:
+            yaml_val = str(value)
+
+        parts = key.split(".", 1)
+        found = False
+
+        if len(parts) == 1:
+            # Top-level key
+            for i, line in enumerate(lines):
+                stripped = line.lstrip()
+                if stripped.startswith(f"{key}:") and not stripped.startswith("#"):
+                    indent = line[:len(line) - len(stripped)]
+                    lines[i] = f"{indent}{key}: {yaml_val}\n"
+                    found = True
+                    break
+            if not found:
+                lines.append(f"{key}: {yaml_val}\n")
+        else:
+            # Nested key (e.g., tts.verbosity)
+            section, subkey = parts
+            in_section = False
+            for i, line in enumerate(lines):
+                stripped = line.lstrip()
+                if stripped.startswith(f"{section}:"):
+                    in_section = True
+                    continue
+                if in_section:
+                    if stripped and not stripped.startswith("#") and not line[0].isspace():
+                        in_section = False  # Left the section
+                        continue
+                    if stripped.startswith(f"{subkey}:"):
+                        indent = line[:len(line) - len(stripped)]
+                        lines[i] = f"{indent}{subkey}: {yaml_val}\n"
+                        found = True
+                        break
+
+    CONFIG_FILE.write_text("".join(lines))
 
 
 # ---------------------------------------------------------------------------

@@ -85,9 +85,13 @@ def voice_speak(text: str, verbosity: str = "full") -> str:
 
 @mcp.tool()
 def voice_status() -> str:
-    """Return current vox state and TTS settings"""
+    """Return current vox state, TTS settings, and style instructions.
+
+    The 'style_instruction' field tells you how to formulate <tts> blocks.
+    Always follow the style instruction when writing TTS output.
+    """
     from heyvox.constants import RECORDING_FLAG, TTS_PLAYING_FLAG
-    from heyvox.audio.tts import is_muted, get_verbosity
+    from heyvox.audio.tts import is_muted, get_verbosity, get_tts_style, get_tts_style_prompt
 
     recording = os.path.exists(RECORDING_FLAG)
     speaking = os.path.exists(TTS_PLAYING_FLAG) or os.path.exists("/tmp/herald-playing.pid")
@@ -105,7 +109,8 @@ def voice_status() -> str:
 
     return (
         f"state={state} muted={is_muted()} verbosity={get_verbosity()} "
-        f"queue={queue_count} held={hold_count}"
+        f"style={get_tts_style()} queue={queue_count} held={hold_count}\n"
+        f"style_instruction: {get_tts_style_prompt()}"
     )
 
 
@@ -139,8 +144,11 @@ def voice_queue(action: str = "list") -> str:
 
 @mcp.tool()
 def voice_config(action: str = "get", key: str = "", value: str = "") -> str:
-    """Get or set voice config. action: get|set, key: verbosity|muted"""
-    from heyvox.audio.tts import set_verbosity, get_verbosity, set_muted, is_muted
+    """Get or set voice config. action: get|set, key: verbosity|muted|style"""
+    from heyvox.audio.tts import (
+        set_verbosity, get_verbosity, set_muted, is_muted,
+        get_tts_style, set_tts_style, TTS_STYLE_PROMPTS,
+    )
     from heyvox.config import load_config
 
     if action == "get":
@@ -148,8 +156,10 @@ def voice_config(action: str = "get", key: str = "", value: str = "") -> str:
         return (
             f"verbosity={get_verbosity()} "
             f"muted={is_muted()} "
+            f"style={get_tts_style()} "
             f"voice={cfg.tts.voice} "
-            f"speed={cfg.tts.speed}"
+            f"speed={cfg.tts.speed}\n"
+            f"available_styles: {', '.join(TTS_STYLE_PROMPTS.keys())}"
         )
     elif action == "set":
         if key == "verbosity":
@@ -158,8 +168,11 @@ def voice_config(action: str = "get", key: str = "", value: str = "") -> str:
         elif key == "muted":
             set_muted(value.lower() in ("true", "1", "yes"))
             return f"muted set to {value}"
+        elif key == "style":
+            set_tts_style(value)
+            return f"style set to {value}"
         else:
-            return f"unsupported key: {key}. Use: verbosity|muted"
+            return f"unsupported key: {key}. Use: verbosity|muted|style"
     else:
         return f"unknown action: {action}. Use: get|set"
 

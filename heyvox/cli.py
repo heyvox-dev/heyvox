@@ -178,21 +178,7 @@ def _cmd_mute(args):
     from heyvox.audio.tts import is_muted, set_muted
     new_state = not is_muted()
     set_muted(new_state)
-    # Also toggle Herald's mute flag for the bash pipeline
-    mute_flag = "/tmp/herald-mute"
-    tts_mute_flag = "/tmp/claude-tts-mute"
-    import os
-    if new_state:
-        open(mute_flag, "w").close()
-        open(tts_mute_flag, "w").close()
-        print("TTS muted.")
-    else:
-        for f in (mute_flag, tts_mute_flag):
-            try:
-                os.remove(f)
-            except FileNotFoundError:
-                pass
-        print("TTS unmuted.")
+    print("TTS muted." if new_state else "TTS unmuted.")
 
 
 def _cmd_quiet(args):

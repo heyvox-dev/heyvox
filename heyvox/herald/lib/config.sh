@@ -64,6 +64,13 @@ NP_CLI="${NP_CLI:-$(command -v nowplaying-cli-dev 2>/dev/null || echo "/usr/loca
 
 herald_log() {
   echo "[$(date)] $1" >> "$HERALD_DEBUG_LOG"
+  # Rotate at ~2MB to prevent unbounded growth
+  if [ -f "$HERALD_DEBUG_LOG" ]; then
+    local size=$(stat -f%z "$HERALD_DEBUG_LOG" 2>/dev/null || echo 0)
+    if [ "$size" -gt 2097152 ]; then
+      mv -f "$HERALD_DEBUG_LOG" "${HERALD_DEBUG_LOG}.1" 2>/dev/null
+    fi
+  fi
 }
 
 herald_is_muted() {
@@ -85,7 +92,16 @@ herald_is_skip() {
 herald_is_paused() {
   local pause_flag=false heyvox_flag=false
   [ -f "$HERALD_PAUSE_FLAG" ] && pause_flag=true
-  [ -f "$HEYVOX_RECORDING_FLAG" ] && heyvox_flag=true
+  if [ -f "$HEYVOX_RECORDING_FLAG" ]; then
+    # Age-based staleness: recording flags older than 120s are stale (crash leftover)
+    local flag_age=$(( $(date +%s) - $(stat -f%m "$HEYVOX_RECORDING_FLAG" 2>/dev/null || echo 0) ))
+    if [ "$flag_age" -gt 120 ]; then
+      rm -f "$HEYVOX_RECORDING_FLAG"
+      herald_log "PAUSED: removed stale recording flag (age=${flag_age}s)"
+    else
+      heyvox_flag=true
+    fi
+  fi
   if $pause_flag || $heyvox_flag; then
     return 0
   fi

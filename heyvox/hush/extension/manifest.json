@@ -3,6 +3,7 @@
   "name": "Hush",
   "version": "1.0.0",
   "description": "Reliable media pause/resume for Herald and Vox",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxLPsqCgfobFMjkFTOeffwLmR8MS9qYSyLC4GZTe6O4NohDSy98xJiZbhdvBZeU2SlE3uUMiXi3538j15p7HyJtkfPlbmmgZU5uB4iTwfk1AzRnFrTXObvnebi9m2i4EdYe1w+qFiAB3dhdgQIcmON9lGxBpF6LqTJKwLS+8boYp/lWZ1EBN1CcjjB0jwtFvtuUN0b01ajb3+4MRuaDi94s09QzpIw4C+55kIrFpzWMSKa3OzjByGYh29BUbD0QMwKERxWuTg7B2cmNwSJG5AHLCJ+taz3/xt6PpvqYqoe0HdHWFc6nZDDcoflgZP47fX5CZLWUQnzArSoI5qSe4oYwIDAQAB",
 
   "permissions": [
     "tabs",

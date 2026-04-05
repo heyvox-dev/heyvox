@@ -54,6 +54,7 @@ _triggered_by_ptt = False
 _recording_target = None  # TargetSnapshot: app + text field at recording start
 _cancel_transcription = threading.Event()
 _shutdown = threading.Event()
+_cancel_requested = threading.Event()  # Set by SIGUSR1 signal, checked in main loop
 _adapter = None  # Initialized in main() via _build_adapter(config)
 _last_inject_time = 0.0
 _inject_lock = threading.Lock()
@@ -338,6 +339,7 @@ def log(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 _indicator_proc = None
+_hud_log_fh = None  # stderr log file handle for HUD subprocess
 
 
 def _kill_orphan_indicators() -> None:
@@ -385,7 +387,7 @@ def _launch_hud_overlay(menu_bar_only: bool = False) -> None:
 
     Kills any orphan/duplicate overlays first to guarantee exactly one instance.
     """
-    global _indicator_proc
+    global _indicator_proc, _hud_log_fh
     if _indicator_proc is not None and _indicator_proc.poll() is None:
         # Already running — just ensure no duplicates
         _kill_duplicate_overlays(keep_pid=_indicator_proc.pid)
@@ -396,11 +398,17 @@ def _launch_hud_overlay(menu_bar_only: bool = False) -> None:
         cmd = [sys.executable, "-m", "heyvox.hud.overlay"]
         if menu_bar_only:
             cmd.append("--menu-bar-only")
-        hud_log = open("/tmp/heyvox-hud-stderr.log", "a")
+        # Close previous log handle if restarting overlay
+        if _hud_log_fh is not None:
+            try:
+                _hud_log_fh.close()
+            except OSError:
+                pass
+        _hud_log_fh = open("/tmp/heyvox-hud-stderr.log", "a")
         _indicator_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=hud_log,
+            stderr=_hud_log_fh,
         )
         log(f"HUD overlay launched (pid={_indicator_proc.pid})")
     except Exception as e:
@@ -409,7 +417,7 @@ def _launch_hud_overlay(menu_bar_only: bool = False) -> None:
 
 def _stop_hud_overlay() -> None:
     """Terminate the HUD overlay process on shutdown."""
-    global _indicator_proc
+    global _indicator_proc, _hud_log_fh
     if _indicator_proc:
         try:
             _indicator_proc.terminate()
@@ -420,6 +428,12 @@ def _stop_hud_overlay() -> None:
             except Exception:
                 pass
         _indicator_proc = None
+    if _hud_log_fh is not None:
+        try:
+            _hud_log_fh.close()
+        except OSError:
+            pass
+        _hud_log_fh = None
 
 
 def _show_recording_indicator(active: bool) -> None:
@@ -513,6 +527,9 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
         busy = True
         duration = time.time() - recording_start_time
         recorded_chunks = list(_audio_buffer)
+        # Capture PTT flag under lock — _send_local runs on a daemon thread
+        # and must not read the global (which could be overwritten by a new recording).
+        ptt_snapshot = _triggered_by_ptt
 
     log("Stopping recording...")
     _show_recording_indicator(False)
@@ -534,7 +551,8 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
         _hud_send({"type": "state", "state": "idle"})
         return
 
-    audio_cue("ok", cues_dir)
+    if not ptt_snapshot:
+        audio_cue("ok", cues_dir)
 
     try:
         if config.stt.backend == "local":
@@ -544,11 +562,11 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
 
             # Save raw audio BEFORE any trimming (for debug analysis)
             _save_debug_audio("raw", recorded_chunks, config.audio.sample_rate, {
-                "ptt": _triggered_by_ptt,
+                "ptt": ptt_snapshot,
                 "raw_rms_dbfs": round(raw_rms_db, 1),
             })
 
-            if not _triggered_by_ptt:
+            if not ptt_snapshot:
                 # Wake word audio trim — remove wake word from both ends so
                 # Whisper never sees it. This is the primary defense; the text-level
                 # _strip_wake_words() is a fallback for imperfect trims.
@@ -580,6 +598,7 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
             threading.Thread(
                 target=_send_local,
                 args=(duration, recorded_chunks, config, _adapter, raw_rms_db),
+                kwargs={"ptt": ptt_snapshot},
                 daemon=True,
             ).start()
     except Exception as e:
@@ -702,7 +721,7 @@ def _audio_rms(chunks: list, sample_rate: int) -> float:
 _MIN_AUDIO_DBFS = -60.0
 
 
-def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapter, raw_rms_db: float = 0.0) -> None:
+def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapter, raw_rms_db: float = 0.0, *, ptt: bool = False) -> None:
     """Transcribe locally and inject text into target app."""
     global busy
 
@@ -761,7 +780,7 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
         if text and text.strip():
             try:
                 from heyvox.history import save as _save_transcript
-                _save_transcript(text, duration=duration, ptt=_triggered_by_ptt)
+                _save_transcript(text, duration=duration, ptt=ptt)
             except Exception as e:
                 log(f"WARNING: Failed to save transcript to history: {e}")
 
@@ -843,39 +862,22 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
                 return
             _last_inject_time = now
 
-        # Restore the app + text field that was focused when recording started.
-        # This ensures text goes to the right place even if the user clicked
-        # away during transcription.
-        target_restored = False
-        if _recording_target:
-            log(f"Restoring target: {_recording_target.app_name} "
-                f"(field={_recording_target.element_role or 'none'})")
-            target_restored = restore_target(_recording_target)
-            if target_restored:
-                time.sleep(0.3)  # Let app/field activation settle
-
-        # PTT mode: always paste into currently focused app (bypass adapter)
+        # PTT mode: paste into currently focused app — no restore_target needed.
+        # The Globe key is suppressed during PTT (ptt.py returns None), so focus
+        # stays on whatever app the user was in when they pressed FN.
         # Requirement: INPT-05 (PTT = always-focused regardless of target_mode)
-        if _triggered_by_ptt:
-            log("Typing into active app (PTT mode)...")
+        if ptt:
+            log(f"Typing into active app (PTT mode, snapshot was "
+                f"{_recording_target.app_name if _recording_target else 'none'})...")
             type_text(paste_text)
             log("Pasted (PTT mode, no auto-Enter)")
-        elif target_restored:
-            # Target snapshot restored the exact app + field — just paste directly
-            log("Typing into restored target field...")
-            type_text(paste_text)
-            if adapter.should_auto_send():
-                time.sleep(1.0)
-                from heyvox.input.injection import press_enter as _press_enter
-                target_app = _recording_target.app_name
-                log(f"Pressing Enter x{adapter.enter_count} → {target_app}...")
-                _press_enter(adapter.enter_count, app_name=target_app)
-                log("Sent!")
-            else:
-                log("Pasted (no auto-send)")
         else:
-            # Fallback: use adapter's own focusing logic
-            log(f"Injecting via {type(adapter).__name__} (no target snapshot)...")
+            # Wake word mode: use the adapter's own focusing logic.
+            # The adapter knows the correct target (e.g. LastAgentAdapter tracks
+            # the last-focused agent). This is more reliable than restore_target
+            # which can capture the wrong app if focus shifted before recording.
+            log(f"Injecting via {type(adapter).__name__} "
+                f"(snapshot was {_recording_target.app_name if _recording_target else 'none'})...")
             adapter.inject_text(paste_text)
             if adapter.should_auto_send():
                 time.sleep(1.0)
@@ -891,15 +893,21 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
                 log("Pasted (no auto-send)")
         # Show "Sent to [agent]" confirmation in HUD
         target_name = None
-        if not _triggered_by_ptt:
+        if not ptt:
             target_name = (
                 getattr(adapter, '_last_agent_name', None)
                 or getattr(adapter, '_target_app', None)
             )
-        sent_msg = "Sent to AI"
-        _hud_send({"type": "state", "state": "idle", "text": sent_msg})
-        audio_cue("sending", cues_dir)
-        log(sent_msg)
+        if ptt:
+            # PTT mode: no auto-Enter, just pasted — don't say "Sending"
+            _hud_send({"type": "state", "state": "idle", "text": "Pasted"})
+            audio_cue("ok", cues_dir)
+            log("Pasted (PTT)")
+        else:
+            sent_msg = "Sent to AI"
+            _hud_send({"type": "state", "state": "idle", "text": sent_msg})
+            audio_cue("sending", cues_dir)
+            log(sent_msg)
     except subprocess.TimeoutExpired:
         log("WARNING: Subprocess timed out during send phase")
     except Exception as e:
@@ -990,7 +998,7 @@ def main() -> None:
     atexit.register(_release_singleton)
 
     # Startup cleanup: remove stale flags from previous crash/kill
-    for stale_flag in (RECORDING_FLAG, "/tmp/heyvox-tts-playing"):
+    for stale_flag in (RECORDING_FLAG, "/tmp/heyvox-tts-playing", "/tmp/claude-tts-playing.pid"):
         try:
             age = time.time() - os.path.getmtime(stale_flag)
             if age > 60:
@@ -1017,20 +1025,12 @@ def main() -> None:
         _shutdown.set()
 
     def handle_cancel(signum, frame):
-        """SIGUSR1 = cancel active recording."""
-        global is_recording
-        if is_recording:
-            log("Received cancel signal (USR1)")
-            _show_recording_indicator(False)
-            _release_recording_guard()
-            with _state_lock:
-                is_recording = False
-                busy = False
-                _audio_buffer.clear()
-            cues_dir = get_cues_dir(config.cues_dir)
-            audio_cue("paused", cues_dir)
-            _hud_send({"type": "state", "state": "idle"})
-            log("Recording cancelled.")
+        """SIGUSR1 = request recording cancellation (deferred to main loop).
+
+        Signal handlers must avoid I/O and locks — just set an event.
+        The main loop checks _cancel_requested and does the actual cleanup.
+        """
+        _cancel_requested.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -1172,7 +1172,7 @@ def main() -> None:
 
     # Device hotplug detection — periodically check if a higher-priority mic appeared
     # Also tracks output device changes for audio feedback. Requirement: AUDIO-11
-    _DEVICE_SCAN_INTERVAL = 10.0  # seconds
+    _DEVICE_SCAN_INTERVAL = 3.0  # seconds — fast detection for USB/BT hotplug
     _last_device_scan = time.time()
     _last_output_device = ""
     try:
@@ -1188,6 +1188,22 @@ def main() -> None:
 
     try:
         while not _shutdown.is_set():
+            # Handle deferred cancel from SIGUSR1 (signal-safe: no I/O in handler)
+            if _cancel_requested.is_set():
+                _cancel_requested.clear()
+                if is_recording:
+                    log("Received cancel signal (USR1)")
+                    _show_recording_indicator(False)
+                    _release_recording_guard()
+                    with _state_lock:
+                        is_recording = False
+                        busy = False
+                        _audio_buffer.clear()
+                    cues_dir = get_cues_dir(config.cues_dir)
+                    audio_cue("paused", cues_dir)
+                    _hud_send({"type": "state", "state": "idle"})
+                    log("Recording cancelled via signal.")
+
             try:
                 audio = np.frombuffer(
                     stream.read(chunk_size, exception_on_overflow=False),
@@ -1196,9 +1212,9 @@ def main() -> None:
                 consecutive_errors = 0
             except IOError as e:
                 consecutive_errors += 1
-                if consecutive_errors <= 3:
-                    log(f"Audio read error ({consecutive_errors}/3): {e}")
-                    time.sleep(0.5)
+                if consecutive_errors <= 2:
+                    log(f"Audio read error ({consecutive_errors}/2): {e}")
+                    time.sleep(0.1)
                     continue
                 log("Mic appears disconnected, searching for new mic...")
                 try:
@@ -1207,13 +1223,13 @@ def main() -> None:
                 except Exception:
                     pass
                 pa.terminate()
-                time.sleep(2)
+                time.sleep(0.5)
                 pa = pyaudio.PyAudio()
                 dev_index = find_best_mic(pa, mic_priority=mic_priority,
                                           sample_rate=sample_rate, chunk_size=chunk_size)
                 if dev_index is None:
-                    log("No mic found, retrying in 5s...")
-                    time.sleep(5)
+                    log("No mic found, retrying in 2s...")
+                    time.sleep(2)
                     continue
                 dev_name = pa.get_device_info_by_index(dev_index)['name']
                 log(f"Switched to: [{dev_index}] {dev_name}")
@@ -1335,19 +1351,16 @@ def main() -> None:
                             pass
                     _scan_pa.terminate()
 
-                    # Check if a higher-priority device is available but not currently selected
-                    current_dev_name = pa.get_device_info_by_index(dev_index)['name']
+                    # Check if a higher-priority device is available but not currently selected.
+                    # Use tracked dev_name (not pa.get_device_info which may have stale indices).
                     better_available = False
                     for prio_name in mic_priority:
-                        # Is this priority name in the available devices?
                         matching = [n for n in current_names if prio_name.lower() in n.lower()]
                         if matching:
-                            # Is the current device already this priority or higher?
-                            if prio_name.lower() in current_dev_name.lower():
+                            if prio_name.lower() in dev_name.lower():
                                 break  # Already using this priority level or higher
-                            # A higher priority device is available but we're not using it
                             better_available = True
-                            log(f"Higher-priority mic detected: {matching[0]} (current: {current_dev_name})")
+                            log(f"Higher-priority mic detected: {matching[0]} (current: {dev_name})")
                             break
 
                     if better_available:
@@ -1595,11 +1608,12 @@ def _stop_tts_from_escape() -> None:
 
 def _cancel_recording_from_ptt(config: HeyvoxConfig) -> None:
     """Cancel an active recording (used by PTT Escape handler)."""
-    global is_recording
+    global is_recording, busy
     _show_recording_indicator(False)
     _release_recording_guard()
     with _state_lock:
         is_recording = False
+        busy = False
         _audio_buffer.clear()
     cues_dir = get_cues_dir(config.cues_dir)
     audio_cue("paused", cues_dir)

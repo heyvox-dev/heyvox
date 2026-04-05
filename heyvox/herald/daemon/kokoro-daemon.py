@@ -44,8 +44,14 @@ def log(msg):
 def load_model():
     log("Loading Kokoro model...")
     t0 = time.time()
-    sys.path.insert(0, os.path.expanduser(
-        "~/.local/share/uv/tools/kokoro-tts/lib/python3.10/site-packages"))
+    # Find kokoro-tts site-packages dynamically (supports any Python version)
+    _kokoro_lib = os.path.expanduser("~/.local/share/uv/tools/kokoro-tts/lib")
+    if os.path.isdir(_kokoro_lib):
+        for _d in sorted(os.listdir(_kokoro_lib), reverse=True):
+            _sp = os.path.join(_kokoro_lib, _d, "site-packages")
+            if os.path.isdir(_sp):
+                sys.path.insert(0, _sp)
+                break
     from kokoro_onnx import Kokoro
     kokoro = Kokoro(MODEL_PATH, VOICES_PATH)
     # Pre-warm all mood voices: neutral=af_sarah, cheerful=af_heart, alert=af_nova, thoughtful=af_sky

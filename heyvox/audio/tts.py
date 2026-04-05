@@ -67,6 +67,15 @@ def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
 
 _muted: bool = False
 _verbosity: Verbosity = Verbosity.FULL
+_style: str = "detailed"
+
+# Style descriptions — returned to Claude via MCP so it knows how to write TTS
+TTS_STYLE_PROMPTS = {
+    "detailed": "Explain what you found and what you did — not just 'fixed it' but the key insight (what was wrong, what changed, why). 3-5 sentences, ~400-800 chars.",
+    "concise": "Key takeaway only. One or two short sentences, ~100-200 chars. Front-load the most important information.",
+    "technical": "Include function names, file paths, error messages, and what changed in the code. Be precise and specific. 2-4 sentences, ~300-600 chars.",
+    "casual": "Talk like a coworker who just finished the task. Conversational, friendly, maybe a light observation. 2-3 sentences, ~200-400 chars.",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +113,13 @@ def _herald(cmd: str, *args: str, input_text: str | None = None) -> subprocess.C
 
 def start_worker(config=None) -> None:
     """Initialize TTS settings from config. No worker thread needed — Herald runs independently."""
-    global _verbosity, _muted
+    global _verbosity, _muted, _style
 
     if config is not None:
-        _verbosity = Verbosity(config.tts.verbosity)
+        # Use set_verbosity to persist to file — ensures Herald's bash scripts
+        # see the same value (otherwise Herald defaults to "full")
+        set_verbosity(config.tts.verbosity)
+        _style = config.tts.style
 
 
 def shutdown() -> None:
@@ -174,11 +186,23 @@ def clear_queue() -> None:
 
 
 def set_muted(muted: bool) -> None:
-    """Mute or unmute TTS output."""
+    """Mute or unmute TTS output. Syncs file flags for cross-process consistency."""
     global _muted
     _muted = muted
+    _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
     if muted:
+        for flag in _MUTE_FLAGS:
+            try:
+                open(flag, "w").close()
+            except OSError:
+                pass
         stop_all()
+    else:
+        for flag in _MUTE_FLAGS:
+            try:
+                os.remove(flag)
+            except FileNotFoundError:
+                pass
 
 
 def is_muted() -> bool:
@@ -239,6 +263,31 @@ def get_verbosity() -> str:
     except OSError:
         pass
     return _verbosity.value
+
+
+def get_tts_style() -> str:
+    """Return the current TTS style name."""
+    return _style
+
+
+def get_tts_style_prompt() -> str:
+    """Return the style instruction for Claude to follow when writing <tts> blocks."""
+    return TTS_STYLE_PROMPTS.get(_style, TTS_STYLE_PROMPTS["detailed"])
+
+
+def set_tts_style(style: str) -> None:
+    """Set the TTS style and persist to config."""
+    global _style
+    valid = set(TTS_STYLE_PROMPTS.keys())
+    if style not in valid:
+        log.warning(f"Invalid TTS style '{style}', ignoring (valid: {valid})")
+        return
+    _style = style
+    try:
+        from heyvox.config import update_config
+        update_config(**{"tts.style": style})
+    except Exception as e:
+        log.warning(f"Failed to persist TTS style: {e}")
 
 
 # ---------------------------------------------------------------------------
