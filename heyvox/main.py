@@ -1600,11 +1600,8 @@ def main() -> None:
         except Exception:
             pass
         pa.terminate()
-        # Clean up active mic file
-        try:
-            os.unlink(ACTIVE_MIC_FILE)
-        except FileNotFoundError:
-            pass
+        # Keep ACTIVE_MIC_FILE across restarts so HUD shows last-known mic
+        # instead of "None" during the brief startup window before mic detection.
         log("Shutdown complete.")
 
 
