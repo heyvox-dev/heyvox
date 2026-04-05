@@ -598,16 +598,20 @@ def _make_menu_action_class():
                 pass
 
         def restartHeyVox_(self, sender):
-            """Kill heyvox.main and relaunch it, then restart the overlay."""
+            """Kill heyvox.main, relaunch it (which spawns a new overlay), then quit this overlay."""
             import subprocess, sys
             # Kill the main process
             subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
             import time; time.sleep(0.5)
-            # Relaunch main process
+            # Relaunch main process — it will spawn its own overlay
             subprocess.Popen(
                 [sys.executable, "-c", "from heyvox.main import run; run()"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,  # Detach so our exit doesn't kill it
             )
+            # Quit this overlay — the new main process launches a fresh one
+            from AppKit import NSApplication
+            NSApplication.sharedApplication().terminate_(None)
 
         def quitHeyVox_(self, sender):
             """Send SIGTERM to parent heyvox.main process, then quit overlay."""
