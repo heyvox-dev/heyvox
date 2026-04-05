@@ -3,5 +3,5 @@
   "description": "Hush - Media pause/resume bridge",
   "path": "/PLACEHOLDER/hush_host.py",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://EXTENSION_ID/"]
+  "allowed_origins": ["chrome-extension://khaokodhclonjnbdnbcgdggffnnmpnim/"]
 }

@@ -47,6 +47,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             other_devices.append((i, d['name']))
 
     def test_mic(index, name, frames=15):
+        test_stream = None
         try:
             test_stream = pa.open(
                 format=pyaudio.paInt16, channels=1,
@@ -60,12 +61,17 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                     dtype=np.int16,
                 )
                 max_level = max(max_level, np.abs(data).max())
-            test_stream.close()
             _log(f"  [{index}] {name}: max_level={max_level}")
             return max_level > 0
         except Exception as e:
             _log(f"  [{index}] {name}: error - {e}")
             return False
+        finally:
+            if test_stream is not None:
+                try:
+                    test_stream.close()
+                except Exception:
+                    pass
 
     for rank, prio_name in enumerate(mic_priority):
         for index, dev_name in devices_by_priority[prio_name]:

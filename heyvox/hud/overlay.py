@@ -515,44 +515,35 @@ def _make_menu_action_class():
                 pb.setString_forType_(text, NSPasteboardTypeString)
 
         def toggleMute_(self, sender):
-            import os
-            # Check if currently muted (any flag exists)
-            currently_muted = any(os.path.exists(f) for f in _TTS_MUTE_FLAGS)
-            if currently_muted:
-                for f in _TTS_MUTE_FLAGS:
-                    try:
-                        os.unlink(f)
-                    except FileNotFoundError:
-                        pass
-                sender.setState_(0)
-            else:
-                for f in _TTS_MUTE_FLAGS:
-                    with open(f, "w") as fh:
-                        fh.write("")
-                sender.setState_(1)
+            from heyvox.audio.tts import is_muted, set_muted
+            currently_muted = is_muted()
+            set_muted(not currently_muted)
+            sender.setState_(0 if currently_muted else 1)
 
         def setVerbosity_(self, sender):
             """Set verbosity to the level stored in the menu item's representedObject.
 
-            Also syncs the legacy file-flag mute mechanism so Herald's
-            bash scripts see a consistent state.
+            Delegates entirely to set_verbosity() which handles file flags,
+            in-memory state, and cross-process sync.
             """
             try:
                 level = sender.representedObject()
                 if level:
                     from heyvox.audio.tts import set_verbosity
                     set_verbosity(level)
-                    # Sync legacy mute flags with verbosity
-                    if level == "skip":
-                        for f in _TTS_MUTE_FLAGS:
-                            with open(f, "w") as fh:
-                                fh.write("")
-                    else:
-                        for f in _TTS_MUTE_FLAGS:
-                            try:
-                                os.unlink(f)
-                            except FileNotFoundError:
-                                pass
+                    # Persist to config so it survives restarts
+                    from heyvox.config import update_config
+                    update_config(**{"tts.verbosity": level})
+            except Exception:
+                pass
+
+        def setTTSStyle_(self, sender):
+            """Set TTS style. Persists to config for cross-session consistency."""
+            try:
+                style = sender.representedObject()
+                if style:
+                    from heyvox.audio.tts import set_tts_style
+                    set_tts_style(style)
             except Exception:
                 pass
 
@@ -582,7 +573,7 @@ def _make_menu_action_class():
             webbrowser.open("https://heyvox.dev")
 
         def toggleOverlay_(self, sender):
-            """Toggle the floating pill overlay on/off at runtime."""
+            """Toggle the floating pill overlay on/off at runtime. Persists to config."""
             global _MENU_BAR_ONLY
             _MENU_BAR_ONLY = not _MENU_BAR_ONLY
             if _MENU_BAR_ONLY:
@@ -599,6 +590,12 @@ def _make_menu_action_class():
                 for w in NSApplication.sharedApplication().windows():
                     if hasattr(w, 'isMainWindow') and not w.isMainWindow():
                         w.orderFrontRegardless()
+            # Persist to config so it survives restarts
+            try:
+                from heyvox.config import update_config
+                update_config(hud_menu_bar_only=_MENU_BAR_ONLY)
+            except Exception:
+                pass
 
         def restartHeyVox_(self, sender):
             """Kill heyvox.main and relaunch it, then restart the overlay."""
@@ -779,6 +776,38 @@ def _build_transcript_menu(handler):
         verbosity_sub.addItem_(v_item)
     tts_parent.setSubmenu_(verbosity_sub)
     menu.addItem_(tts_parent)
+
+    # ── Section 2b: TTS Style (how Claude formulates spoken output) ──
+    from heyvox.audio.tts import get_tts_style
+    current_style = get_tts_style()
+    _STYLE_LABELS = {
+        "detailed": "Detailed", "concise": "Concise",
+        "technical": "Technical", "casual": "Casual",
+    }
+    style_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f3a4 Style: {_STYLE_LABELS.get(current_style, 'Detailed')}", None, "",
+    )
+    _styled(style_parent)
+    style_sub = NSMenu.alloc().init()
+    style_sub.setAutoenablesItems_(False)
+    for style_key, style_desc in [
+        ("detailed", "Detailed — what happened, what changed, why"),
+        ("concise", "Concise — key takeaway, 1-2 sentences"),
+        ("technical", "Technical — function names, errors, diffs"),
+        ("casual", "Casual — like a coworker chatting"),
+    ]:
+        s_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            style_desc, "setTTSStyle:", "",
+        )
+        s_item.setTarget_(handler)
+        s_item.setRepresentedObject_(style_key)
+        s_item.setEnabled_(True)
+        if style_key == current_style:
+            s_item.setState_(1)
+        _styled(s_item)
+        style_sub.addItem_(s_item)
+    style_parent.setSubmenu_(style_sub)
+    menu.addItem_(style_parent)
 
     menu.addItem_(NSMenuItem.separatorItem())
 

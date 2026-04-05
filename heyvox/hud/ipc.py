@@ -111,33 +111,37 @@ class HUDClient:
     def __init__(self, path: str = DEFAULT_SOCKET_PATH):
         self._path = path
         self._sock = None
+        self._lock = threading.Lock()
 
     def connect(self) -> None:
         """Attempt to connect to the HUD server. Silent on failure."""
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.connect(self._path)
-            self._sock = s
-        except (FileNotFoundError, ConnectionRefusedError):
-            self._sock = None
+        with self._lock:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(self._path)
+                self._sock = s
+            except (FileNotFoundError, ConnectionRefusedError):
+                self._sock = None
 
     def send(self, msg: dict) -> None:
         """Send a JSON message. No-op if not connected."""
-        if self._sock is None:
-            return
-        try:
-            self._sock.sendall((json.dumps(msg) + "\n").encode())
-        except (BrokenPipeError, OSError):
-            self._sock = None
+        with self._lock:
+            if self._sock is None:
+                return
+            try:
+                self._sock.sendall((json.dumps(msg) + "\n").encode())
+            except (BrokenPipeError, OSError):
+                self._sock = None
 
     def close(self) -> None:
         """Close the connection."""
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
 
     def reconnect(self) -> None:
         """Close and reconnect (for periodic retry)."""

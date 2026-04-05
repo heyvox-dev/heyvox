@@ -51,9 +51,11 @@ def get_tts_label(workspace_name):
     try:
         db_path = os.path.expanduser(
             "~/Library/Application Support/com.conductor.app/conductor.db")
+        # Escape single quotes to prevent SQL injection from workspace names
+        safe_name = workspace_name.replace("'", "''")
         r = subprocess.run(
             ["sqlite3", db_path,
-             f"SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='{workspace_name}'"],
+             f"SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='{safe_name}'"],
             capture_output=True, text=True, timeout=0.5)
         if r.stdout.strip():
             return r.stdout.strip()

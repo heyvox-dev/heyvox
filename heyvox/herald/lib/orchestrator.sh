@@ -20,9 +20,15 @@ CURRENT_WORKSPACE=""
 
 # Atomic lock using mkdir (race-safe across processes)
 if ! mkdir "$HERALD_ORCH_LOCK" 2>/dev/null; then
-  if [ -f "$HERALD_ORCH_PID" ] && kill -0 "$(cat "$HERALD_ORCH_PID" 2>/dev/null)" 2>/dev/null; then
-    exit 0
+  OLD_PID=$(cat "$HERALD_ORCH_PID" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    # Verify it's actually an orchestrator (not a recycled PID)
+    if ps -p "$OLD_PID" -o command= 2>/dev/null | grep -q "orchestrator"; then
+      exit 0
+    fi
   fi
+  # Stale lock — previous process died without cleanup
+  herald_log "ORCH: removing stale lock (old_pid=${OLD_PID:-unknown})"
   rm -rf "$HERALD_ORCH_LOCK"
   mkdir "$HERALD_ORCH_LOCK" 2>/dev/null || exit 0
 fi
@@ -68,10 +74,10 @@ if not samples:
 rms = math.sqrt(sum(s*s for s in samples) / len(samples))
 if rms < 50:
     sys.exit(0)
-target_rms = 3500
+target_rms = 8000
 scale = target_rms / rms if rms > 0 else 1.0
-scale = min(scale, 6.0)
-peak_limit = 31129
+scale = min(scale, 8.0)
+peak_limit = 30000
 scaled = [s * scale for s in samples]
 out = []
 for s in scaled:
@@ -299,6 +305,10 @@ while true; do
       fi
     else
       sleep 0.3
+      # Periodic cleanup: purge stale claim files (older than 1 hour)
+      if [ -d "$HERALD_CLAIM_DIR" ]; then
+        find "$HERALD_CLAIM_DIR" -maxdepth 1 -type f -mmin +60 -delete 2>/dev/null
+      fi
     fi
   fi
 done
