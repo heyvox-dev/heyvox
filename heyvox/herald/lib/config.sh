@@ -74,7 +74,12 @@ herald_log() {
 }
 
 herald_is_muted() {
-  [ -f "$HERALD_MUTE_FLAG" ]
+  [ -f "$HERALD_MUTE_FLAG" ] && return 0
+  # Respect macOS system mute (volume 0 or output muted)
+  local sys_muted
+  sys_muted=$(osascript -e 'output muted of (get volume settings)' 2>/dev/null)
+  [ "$sys_muted" = "true" ] && return 0
+  return 1
 }
 
 herald_get_verbosity() {

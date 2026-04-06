@@ -205,9 +205,21 @@ def set_muted(muted: bool) -> None:
                 pass
 
 
+def _is_system_muted() -> bool:
+    """Check if macOS system audio is muted."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", "output muted of (get volume settings)"],
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
 def is_muted() -> bool:
-    """Return current mute state (in-memory flag OR file flag from HUD toggle)."""
-    return _muted or os.path.exists("/tmp/claude-tts-mute")
+    """Return current mute state (in-memory flag, file flag, or macOS system mute)."""
+    return _muted or os.path.exists("/tmp/claude-tts-mute") or _is_system_muted()
 
 
 def set_verbosity(level: str) -> None:
