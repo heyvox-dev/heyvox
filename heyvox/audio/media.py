@@ -32,7 +32,7 @@ def _log(msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [media] {msg}\n"
     try:
-        with open(os.environ.get("VOX_LOG_FILE", "/tmp/heyvox.log"), "a") as f:
+        with open(os.environ.get("HEYVOX_LOG_FILE", "/tmp/heyvox.log"), "a") as f:
             f.write(line)
     except OSError:
         pass
@@ -81,19 +81,18 @@ def _hush_command(action: str, **kwargs) -> dict | None:
         return None
     try:
         payload = {"action": action, **kwargs}
-        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        sock.settimeout(3.0)
-        sock.connect(_HUSH_SOCK)
-        sock.sendall(json.dumps(payload).encode() + b"\n")
-        data = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-            if b"\n" in data:
-                break
-        sock.close()
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(3.0)
+            sock.connect(_HUSH_SOCK)
+            sock.sendall(json.dumps(payload).encode() + b"\n")
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b"\n" in data:
+                    break
         resp = json.loads(data)
         return resp if "error" not in resp else None
     except (OSError, json.JSONDecodeError, ValueError):

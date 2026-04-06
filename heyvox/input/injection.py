@@ -86,9 +86,10 @@ def press_enter(count: int = 1, app_name: str | None = None) -> None:
     )
     if app_name:
         # Target the specific app's process — robust against focus changes
+        safe_name = app_name.replace('\\', '\\\\').replace('"', '\\"')
         script = (
             f'tell application "System Events"\n'
-            f'    tell process "{app_name}"\n'
+            f'    tell process "{safe_name}"\n'
             f'        {enter_script}\n'
             f'    end tell\n'
             f'end tell'
@@ -111,8 +112,9 @@ def focus_app(app_name: str) -> None:
     Args:
         app_name: Application name as it appears in the Dock/Activity Monitor.
     """
+    safe_name = app_name.replace('\\', '\\\\').replace('"', '\\"')
     subprocess.run(
-        ["osascript", "-e", f'tell application "{app_name}" to activate'],
+        ["osascript", "-e", f'tell application "{safe_name}" to activate'],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT,
     )
 

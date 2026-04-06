@@ -187,8 +187,9 @@ def _cmd_quiet(args):
     Requirement: CLI-06
     """
     from heyvox.audio.tts import set_verbosity, get_verbosity
+    old = get_verbosity()
     set_verbosity("short")
-    print(f"TTS verbosity set to short (was {get_verbosity()}).")
+    print(f"TTS verbosity set to short (was {old}).")
 
 
 def _cmd_verbose(args):

@@ -669,7 +669,11 @@ def _build_transcript_menu(handler):
     # -- Gather state --
     queue_count = len(_glob.glob("/tmp/herald-queue/*.wav"))
     hold_count = len(_glob.glob("/tmp/herald-hold/*.wav"))
-    is_muted = os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute")
+    try:
+        from heyvox.audio.tts import is_muted as _tts_is_muted
+        is_muted = _tts_is_muted()
+    except Exception:
+        is_muted = os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute")
 
     try:
         from heyvox.audio.tts import get_verbosity

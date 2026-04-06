@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolve paths relative to the monorepo (heyvox/hush/integration/ → heyvox/)
 HEYVOX_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 HERALD_MEDIA="${HERALD_HOME:-${HEYVOX_ROOT}/heyvox/herald}/lib/media.sh"
-VOX_MEDIA="${VOX_HOME:-${HEYVOX_ROOT}}/heyvox/audio/media.py"
+VOX_MEDIA="${HEYVOX_HOME:-${HEYVOX_ROOT}}/heyvox/audio/media.py"
 
 echo "Hush Integration Installer"
 echo "=========================="

@@ -68,6 +68,7 @@ def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
 _muted: bool = False
 _verbosity: Verbosity = Verbosity.FULL
 _style: str = "detailed"
+_STYLE_FILE = "/tmp/heyvox-tts-style"
 
 # Style descriptions — returned to Claude via MCP so it knows how to write TTS
 TTS_STYLE_PROMPTS = {
@@ -119,7 +120,7 @@ def start_worker(config=None) -> None:
         # Use set_verbosity to persist to file — ensures Herald's bash scripts
         # see the same value (otherwise Herald defaults to "full")
         set_verbosity(config.tts.verbosity)
-        _style = config.tts.style
+        set_tts_style(config.tts.style)
 
 
 def shutdown() -> None:
@@ -278,23 +279,44 @@ def get_verbosity() -> str:
 
 
 def get_tts_style() -> str:
-    """Return the current TTS style name."""
+    """Return the current TTS style name (reads from shared file for cross-process consistency)."""
+    try:
+        with open(_STYLE_FILE) as f:
+            style = f.read().strip()
+        if style in TTS_STYLE_PROMPTS:
+            return style
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
     return _style
 
 
 def get_tts_style_prompt() -> str:
     """Return the style instruction for Claude to follow when writing <tts> blocks."""
-    return TTS_STYLE_PROMPTS.get(_style, TTS_STYLE_PROMPTS["detailed"])
+    return TTS_STYLE_PROMPTS.get(get_tts_style(), TTS_STYLE_PROMPTS["detailed"])
 
 
 def set_tts_style(style: str) -> None:
-    """Set the TTS style and persist to config."""
+    """Set the TTS style and persist to config + shared file for cross-process access."""
     global _style
     valid = set(TTS_STYLE_PROMPTS.keys())
     if style not in valid:
         log.warning(f"Invalid TTS style '{style}', ignoring (valid: {valid})")
         return
     _style = style
+    # Write to shared file so MCP server (separate process) can read it
+    try:
+        if style == "detailed":
+            # Remove file = default (detailed)
+            os.remove(_STYLE_FILE)
+        else:
+            with open(_STYLE_FILE, "w") as f:
+                f.write(style)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning(f"Failed to write style file: {e}")
     try:
         from heyvox.config import update_config
         update_config(**{"tts.style": style})

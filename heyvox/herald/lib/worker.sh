@@ -29,10 +29,10 @@ MODE="narrate"
 [ -f "$HERALD_MODE_FILE" ] && MODE=$(cat "$HERALD_MODE_FILE" 2>/dev/null)
 
 # Extract <tts> content + detect voice/language metadata
-python3 -c "
+_HERALD_RAW_FILE="$RAW_FILE" _HERALD_SPEECH_FILE="$SPEECH_FILE" _HERALD_META_FILE="$META_FILE" _HERALD_MODE="$MODE" python3 -c "
 import sys, re, json, os, hashlib
 
-with open('$RAW_FILE') as f:
+with open(os.environ['_HERALD_RAW_FILE']) as f:
     message = f.read()
 
 matches = re.findall(r'^<tts>(.*?)</tts>', message, re.DOTALL | re.MULTILINE)
@@ -45,7 +45,7 @@ speech = matches[-1].strip()
 if not speech or speech == 'SKIP' or len(speech) < 5:
     sys.exit(1)
 
-mode = '$MODE'
+mode = os.environ.get('_HERALD_MODE', 'narrate')
 
 # Apply verbosity filtering (reads shared state file)
 verbosity = 'full'
@@ -125,11 +125,11 @@ if label:
     spoken_label = label.replace(' \u00b7 ', ', ')
     speech = f'{spoken_label}: {speech}'
 
-with open('$SPEECH_FILE', 'w') as f:
+with open(os.environ['_HERALD_SPEECH_FILE'], 'w') as f:
     f.write(speech)
 
 meta = {'voice': voice, 'lang': lang, 'mood': mood, 'agent': agent_name}
-with open('$META_FILE', 'w') as f:
+with open(os.environ['_HERALD_META_FILE'], 'w') as f:
     json.dump(meta, f)
 " 2>/dev/null
 
@@ -143,8 +143,8 @@ fi
 VOICE="${KOKORO_VOICE:-af_sarah}"
 LANG="en-us"
 if [ -f "$META_FILE" ]; then
-  VOICE=$(python3 -c "import json; print(json.load(open('$META_FILE'))['voice'])" 2>/dev/null || echo "$VOICE")
-  LANG=$(python3 -c "import json; print(json.load(open('$META_FILE'))['lang'])" 2>/dev/null || echo "$LANG")
+  VOICE=$(_HERALD_META_FILE="$META_FILE" python3 -c "import json, os; print(json.load(open(os.environ['_HERALD_META_FILE']))['voice'])" 2>/dev/null || echo "$VOICE")
+  LANG=$(_HERALD_META_FILE="$META_FILE" python3 -c "import json, os; print(json.load(open(os.environ['_HERALD_META_FILE']))['lang'])" 2>/dev/null || echo "$LANG")
   rm -f "$META_FILE"
 fi
 
@@ -170,11 +170,11 @@ GENERATED=false
 
 if ensure_daemon; then
   REQ_FILE="/tmp/kokoro-req-$$.json"
-  python3 -c "
-import json
-text = open('$SPEECH_FILE').read().strip()
-with open('$REQ_FILE', 'w') as f:
-    json.dump({'text': text, 'voice': '$VOICE', 'lang': '$LANG', 'speed': 1.2, 'output': '$TEMP_WAV'}, f)
+  _HERALD_SPEECH_FILE="$SPEECH_FILE" _HERALD_REQ_FILE="$REQ_FILE" _HERALD_VOICE="$VOICE" _HERALD_LANG="$LANG" _HERALD_TEMP_WAV="$TEMP_WAV" python3 -c "
+import json, os
+text = open(os.environ['_HERALD_SPEECH_FILE']).read().strip()
+with open(os.environ['_HERALD_REQ_FILE'], 'w') as f:
+    json.dump({'text': text, 'voice': os.environ['_HERALD_VOICE'], 'lang': os.environ['_HERALD_LANG'], 'speed': 1.2, 'output': os.environ['_HERALD_TEMP_WAV']}, f)
 " 2>/dev/null
 
   if [ -s "$REQ_FILE" ]; then

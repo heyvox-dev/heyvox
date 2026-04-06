@@ -18,19 +18,21 @@ herald_ensure_dirs
 ORIGINAL_VOL=""
 CURRENT_WORKSPACE=""
 
-# Atomic lock using mkdir (race-safe across processes)
-if ! mkdir "$HERALD_ORCH_LOCK" 2>/dev/null; then
-  OLD_PID=$(cat "$HERALD_ORCH_PID" 2>/dev/null)
-  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    # Verify it's actually an orchestrator (not a recycled PID)
-    if ps -p "$OLD_PID" -o command= 2>/dev/null | grep -q "orchestrator"; then
-      exit 0
-    fi
+# Singleton enforcement: only one orchestrator allowed
+# Belt: check all running orchestrator processes via pgrep
+for pid in $(pgrep -f "orchestrator.sh" 2>/dev/null); do
+  [ "$pid" = "$$" ] && continue
+  if ps -p "$pid" -o command= 2>/dev/null | grep -q "orchestrator"; then
+    exit 0
   fi
-  # Stale lock — previous process died without cleanup
-  herald_log "ORCH: removing stale lock (old_pid=${OLD_PID:-unknown})"
-  rm -rf "$HERALD_ORCH_LOCK"
-  mkdir "$HERALD_ORCH_LOCK" 2>/dev/null || exit 0
+done
+
+# Suspenders: check PID file (covers cases where pgrep command string differs)
+if [ -f "$HERALD_ORCH_PID" ]; then
+  OLD_PID=$(cat "$HERALD_ORCH_PID" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    exit 0
+  fi
 fi
 
 echo $$ > "$HERALD_ORCH_PID"
@@ -100,7 +102,11 @@ cleanup() {
     herald_log "ORCH: media RESUMED (cleanup)"
   fi
   restore_audio
-  rm -f "$HERALD_ORCH_PID" "$HERALD_PLAYING_PID" "$HERALD_PLAY_NEXT"
+  # Only remove PID file if it still contains our PID (another orchestrator may have taken over)
+  if [ "$(cat "$HERALD_ORCH_PID" 2>/dev/null)" = "$$" ]; then
+    rm -f "$HERALD_ORCH_PID"
+  fi
+  rm -f "$HERALD_PLAYING_PID" "$HERALD_PLAY_NEXT"
   rm -rf "$HERALD_ORCH_LOCK"
   exit 0
 }
@@ -119,14 +125,15 @@ user_is_active() {
 
 notify_held() {
   local workspace="$1"
+  local ws_lua="${workspace//\'/\\\'}"
   local count=$(find "$HERALD_HOLD_DIR" -maxdepth 1 -name '*.wav' 2>/dev/null | wc -l | tr -d ' ')
   /opt/homebrew/bin/hs -c "
     hs.notify.new({
       title='Workspace message held',
-      informativeText='${workspace} has a message (${count} pending). Press Cmd+Shift+N to play.',
+      informativeText='${ws_lua} has a message (${count} pending). Press Cmd+Shift+N to play.',
       withdrawAfter=10
     }):send()
-    hs.alert.show('${workspace}: message held (${count})', 2)
+    hs.alert.show('${ws_lua}: message held (${count})', 2)
   " 2>/dev/null &
 }
 

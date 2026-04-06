@@ -65,9 +65,10 @@ ws = os.environ.get('CONDUCTOR_WORKSPACE_NAME', '')
 label = ws
 if ws:
     try:
+        ws_safe = ws.replace(\"'\", \"''\")
         r = subprocess.run(
             ['sqlite3', os.path.expanduser('~/Library/Application Support/com.conductor.app/conductor.db'),
-             f\"SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='{ws}'\"],
+             f\"SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='{ws_safe}'\"],
             capture_output=True, text=True, timeout=0.5)
         if r.stdout.strip():
             label = r.stdout.strip()
