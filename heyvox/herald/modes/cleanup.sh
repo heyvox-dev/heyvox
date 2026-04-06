@@ -43,5 +43,9 @@ pkill -f "afplay.*/tmp/herald" 2>/dev/null
 
 rm -rf "$HERALD_QUEUE_DIR"
 rm -f /tmp/herald-raw*.txt /tmp/herald-speech-*.txt /tmp/herald-meta-*.json /tmp/herald-recap-*.txt
+# Clean up state files that can go stale and cause wrong behavior on next session
+rm -f /tmp/herald-pause /tmp/herald-ambient /tmp/herald-mode /tmp/herald-last-play /tmp/herald-workspace
+# Clean up temp WAVs from crashed TTS workers
+rm -f /tmp/herald-generating-*.wav
 
 exit 0
