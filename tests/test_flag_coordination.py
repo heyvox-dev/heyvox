@@ -83,66 +83,60 @@ class TestRecordingFlagLifecycle:
 
 
 class TestTTSRecordingEvent:
-    """Verify the in-process threading.Event guard for TTS."""
+    """Verify the TTS recording coordination API (delegates to Herald)."""
 
-    def test_set_recording_sets_event(self):
-        """set_recording(True) must set the _recording_active event."""
+    def test_set_recording_true_calls_herald_pause(self, monkeypatch):
+        """set_recording(True) must call herald pause to stop in-flight TTS."""
         from heyvox.audio import tts
 
-        tts._recording_active.clear()
+        herald_calls = []
+        monkeypatch.setattr(tts, "_herald", lambda cmd, *a, **kw: herald_calls.append(cmd) or
+                            __import__("subprocess").CompletedProcess([], 0, "", ""))
+
         tts.set_recording(True)
-        assert tts._recording_active.is_set()
+        assert "pause" in herald_calls, "herald pause must be called when recording starts"
+
+    def test_set_recording_false_calls_herald_resume(self, monkeypatch):
+        """set_recording(False) must call herald resume to re-enable TTS."""
+        from heyvox.audio import tts
+
+        herald_calls = []
+        monkeypatch.setattr(tts, "_herald", lambda cmd, *a, **kw: herald_calls.append(cmd) or
+                            __import__("subprocess").CompletedProcess([], 0, "", ""))
 
         tts.set_recording(False)
-        assert not tts._recording_active.is_set()
+        assert "resume" in herald_calls, "herald resume must be called when recording stops"
 
-    def test_set_recording_true_calls_interrupt(self, monkeypatch):
-        """set_recording(True) must call interrupt() to stop in-flight TTS."""
+    def test_set_recording_true_blocks_tts(self, isolate_flags, monkeypatch):
+        """set_recording(True) must call herald pause so TTS is blocked."""
         from heyvox.audio import tts
 
-        interrupted = []
-        monkeypatch.setattr(tts, "interrupt", lambda: interrupted.append(True))
+        herald_calls = []
+        monkeypatch.setattr(tts, "_herald", lambda cmd, *a, **kw: herald_calls.append(cmd) or
+                            __import__("subprocess").CompletedProcess([], 0, "", ""))
 
         tts.set_recording(True)
-        assert len(interrupted) == 1, "interrupt() must be called when recording starts"
-
-        tts.set_recording(False)
-
-    def test_tts_speak_blocked_when_recording(self, isolate_flags, monkeypatch):
-        """TTS worker must not play while _recording_active is set."""
-        from heyvox.audio import tts
-
-        # Track if sd.play was called
-        played = []
-        monkeypatch.setattr("heyvox.audio.tts._get_pipeline", lambda *a, **kw: None)
-
-        tts.set_recording(True)
-
-        # Enqueue a message
-        tts._tts_queue.put(("test message", None, None))
-
-        # The worker should NOT play while recording is active
-        # We can check by verifying the recording event blocks
-        assert tts._recording_active.is_set()
+        # Herald pause is what blocks TTS in the new delegation model
+        assert "pause" in herald_calls
 
         tts.set_recording(False)
 
-    def test_recording_event_is_thread_safe(self):
-        """The recording event must work across threads."""
+    def test_recording_coordination_is_thread_safe(self, monkeypatch):
+        """set_recording() must work correctly when called from another thread."""
         from heyvox.audio import tts
 
-        tts._recording_active.clear()
-        results = []
+        herald_calls = []
+        monkeypatch.setattr(tts, "_herald", lambda cmd, *a, **kw: herald_calls.append(cmd) or
+                            __import__("subprocess").CompletedProcess([], 0, "", ""))
 
-        def check_in_thread():
-            results.append(tts._recording_active.is_set())
+        def set_from_thread():
+            tts.set_recording(True)
 
-        tts.set_recording(True)
-        t = threading.Thread(target=check_in_thread)
+        t = threading.Thread(target=set_from_thread)
         t.start()
         t.join()
 
-        assert results[0] is True, "Event must be visible from other threads"
+        assert "pause" in herald_calls, "herald pause must be visible from spawning thread"
         tts.set_recording(False)
 
 

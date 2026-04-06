@@ -40,6 +40,7 @@ jobs:
       - name: Verify CLI entry points
         run: |
           heyvox --help
+          heyvox status || true
           # herald depends on runtime TTS deps — allow failure
           herald status || true
 

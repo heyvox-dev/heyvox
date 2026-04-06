@@ -125,11 +125,13 @@ class TestRecordingFlagPaths:
         # Note: isolate_flags patches this, so read the original
         assert "heyvox-recording" in constants.__dict__.get("RECORDING_FLAG", "")
 
-    def test_tts_imports_recording_flag(self):
-        """TTS module must import RECORDING_FLAG from constants."""
-        from heyvox.audio import tts
-        # The import at module level: from heyvox.constants import RECORDING_FLAG
-        assert hasattr(tts, "RECORDING_FLAG")
+    def test_recording_flag_defined_in_constants(self):
+        """RECORDING_FLAG must be defined in constants (used by main.py for echo suppression)."""
+        from heyvox.constants import RECORDING_FLAG
+        # Use endswith instead of startswith("/tmp/") because pytest's isolate_flags
+        # fixture redirects the path to a tmp_path that resolves via /private/var/...
+        # on macOS (symlink: /tmp -> /private/var/folders/...).
+        assert RECORDING_FLAG and RECORDING_FLAG.endswith("heyvox-recording")
 
     def test_conductor_hook_checks_heyvox_flag(self):
         """Conductor's tts-speak.sh must check /tmp/heyvox-recording.
