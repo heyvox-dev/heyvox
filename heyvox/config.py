@@ -1,14 +1,17 @@
 """
 Pydantic-based configuration system for heyvox.
 
-Loads from ~/.config/heyvox/config.yaml (XDG-compliant via platformdirs).
+Loads from ~/Library/Application Support/heyvox/config.yaml on macOS (via platformdirs).
 All fields have sensible defaults so a config file is optional.
 Invalid configs produce actionable pydantic v2 error messages.
 
 Requirement: CONF-01, CONF-02, CONF-03, CONF-04
 """
 
+import os
 import sys
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -263,8 +266,14 @@ def load_config(config_path: Path | None = None) -> HeyvoxConfig:
     path = config_path if config_path is not None else CONFIG_FILE
 
     if path.exists():
-        with open(path) as f:
-            raw: Any = yaml.safe_load(f)
+        try:
+            with open(path) as f:
+                raw: Any = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            print(f"ERROR: Config file has invalid YAML syntax: {e}", file=sys.stderr)
+            print(f"  File: {path}", file=sys.stderr)
+            print("  Using defaults. Fix the file or delete it to regenerate.", file=sys.stderr)
+            return HeyvoxConfig()
         if raw is None:
             raw = {}
         try:
@@ -281,63 +290,102 @@ def load_config(config_path: Path | None = None) -> HeyvoxConfig:
         return HeyvoxConfig()
 
 
+_config_lock = threading.Lock()
+
+
+def _yaml_escape(value: str) -> str:
+    """Escape a string value for safe YAML embedding."""
+    # Quote if it contains YAML-special characters
+    if any(c in value for c in (':', '#', '{', '}', '[', ']', ',', '&', '*',
+                                  '?', '|', '-', '<', '>', '=', '!', '%', '@',
+                                  '`', '"', "'")):
+        # Use double quotes with backslash escaping
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    if not value or value != value.strip():
+        return f'"{value}"'
+    return value
+
+
 def update_config(**kwargs) -> None:
     """Update specific keys in the config file, preserving comments and structure.
 
+    Thread-safe (uses _config_lock). Writes atomically via temp file + rename.
     Uses simple line-based replacement for top-level keys. For nested keys,
     use dot notation (e.g., ``tts.verbosity="short"``).
 
     Only writes keys that are already present in the file. Appends new
     top-level keys at the end if not found.
     """
-    if not CONFIG_FILE.exists():
-        return
+    with _config_lock:
+        if not CONFIG_FILE.exists():
+            return
 
-    lines = CONFIG_FILE.read_text().splitlines(keepends=True)
+        content = CONFIG_FILE.read_text()
+        if not content.strip():
+            return  # Don't clobber an empty/blank config with partial updates
 
-    for key, value in kwargs.items():
-        # Convert Python values to YAML scalars
-        if isinstance(value, bool):
-            yaml_val = "true" if value else "false"
-        elif isinstance(value, str):
-            yaml_val = value
-        else:
-            yaml_val = str(value)
+        lines = content.splitlines(keepends=True)
 
-        parts = key.split(".", 1)
-        found = False
+        for key, value in kwargs.items():
+            # Convert Python values to YAML scalars
+            if isinstance(value, bool):
+                yaml_val = "true" if value else "false"
+            elif isinstance(value, str):
+                yaml_val = _yaml_escape(value)
+            else:
+                yaml_val = str(value)
 
-        if len(parts) == 1:
-            # Top-level key
-            for i, line in enumerate(lines):
-                stripped = line.lstrip()
-                if stripped.startswith(f"{key}:") and not stripped.startswith("#"):
-                    indent = line[:len(line) - len(stripped)]
-                    lines[i] = f"{indent}{key}: {yaml_val}\n"
-                    found = True
-                    break
-            if not found:
-                lines.append(f"{key}: {yaml_val}\n")
-        else:
-            # Nested key (e.g., tts.verbosity)
-            section, subkey = parts
-            in_section = False
-            for i, line in enumerate(lines):
-                stripped = line.lstrip()
-                if stripped.startswith(f"{section}:"):
-                    in_section = True
-                    continue
-                if in_section:
-                    if stripped and not stripped.startswith("#") and not line[0].isspace():
-                        in_section = False  # Left the section
-                        continue
-                    if stripped.startswith(f"{subkey}:"):
+            parts = key.split(".", 1)
+            found = False
+
+            if len(parts) == 1:
+                # Top-level key
+                for i, line in enumerate(lines):
+                    stripped = line.lstrip()
+                    if stripped.startswith(f"{key}:") and not stripped.startswith("#"):
                         indent = line[:len(line) - len(stripped)]
-                        lines[i] = f"{indent}{subkey}: {yaml_val}\n"
+                        lines[i] = f"{indent}{key}: {yaml_val}\n"
                         found = True
                         break
+                if not found:
+                    lines.append(f"{key}: {yaml_val}\n")
+            else:
+                # Nested key (e.g., tts.verbosity)
+                section, subkey = parts
+                in_section = False
+                for i, line in enumerate(lines):
+                    stripped = line.lstrip()
+                    if stripped.startswith(f"{section}:"):
+                        in_section = True
+                        continue
+                    if in_section:
+                        if stripped and not stripped.startswith("#") and not line[0].isspace():
+                            in_section = False  # Left the section
+                            continue
+                        if stripped.startswith(f"{subkey}:"):
+                            indent = line[:len(line) - len(stripped)]
+                            lines[i] = f"{indent}{subkey}: {yaml_val}\n"
+                            found = True
+                            break
 
-    CONFIG_FILE.write_text("".join(lines))
+        # Atomic write: temp file + rename prevents partial writes on crash
+        new_content = "".join(lines)
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=CONFIG_FILE.parent, suffix=".tmp", prefix=".config-"
+            )
+            try:
+                os.write(fd, new_content.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp_path, CONFIG_FILE)
+        except OSError:
+            # Fallback: direct write if atomic fails (e.g., cross-device)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            CONFIG_FILE.write_text(new_content)
 
 
 # ---------------------------------------------------------------------------
