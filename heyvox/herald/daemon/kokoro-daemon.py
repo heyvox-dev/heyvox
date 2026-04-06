@@ -188,10 +188,11 @@ def cleanup():
 
 def main():
     cleanup()
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
 
     kokoro = load_model()
+
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(SOCKET_PATH)

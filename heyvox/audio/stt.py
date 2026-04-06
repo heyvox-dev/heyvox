@@ -223,8 +223,8 @@ def transcribe_audio(
             _log(f"ERROR: MLX transcription failed: {e}")
             return ""
 
-        _mlx_last_use = time.time()
         with _mlx_lock:
+            _mlx_last_use = time.time()
             _schedule_unload()  # Reset the idle timer
         return result["text"].strip()
     else:

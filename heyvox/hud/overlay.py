@@ -489,8 +489,10 @@ def _write_tts_cmd(cmd: str) -> None:
     except ImportError:
         cmd_path = "/tmp/heyvox-tts-cmd"
     try:
-        with open(cmd_path, "w") as f:
+        tmp_path = cmd_path + ".tmp"
+        with open(tmp_path, "w") as f:
             f.write(cmd)
+        os.rename(tmp_path, cmd_path)
     except OSError as e:
         print(f"[HUD] Failed to write TTS command '{cmd}': {e}", file=sys.stderr)
 
@@ -548,25 +550,33 @@ def _make_menu_action_class():
                 pass
 
         def switchMic_(self, sender):
-            """Write mic switch request file for main.py to pick up."""
+            """Write mic switch request file for main.py to pick up (atomic)."""
             device_name = sender.representedObject()
             if device_name:
                 try:
                     from heyvox.constants import MIC_SWITCH_REQUEST_FILE
-                    with open(MIC_SWITCH_REQUEST_FILE, "w") as f:
+                    tmp_path = MIC_SWITCH_REQUEST_FILE + ".tmp"
+                    with open(tmp_path, "w") as f:
                         f.write(device_name)
+                    os.rename(tmp_path, MIC_SWITCH_REQUEST_FILE)
                 except Exception:
                     pass
 
         def openLog_(self, sender):
             import subprocess
-            subprocess.Popen(["open", "-a", "Console", "/tmp/heyvox.log"])
+            try:
+                subprocess.run(["open", "-a", "Console", "/tmp/heyvox.log"])
+            except Exception:
+                pass
 
         def openConfig_(self, sender):
             import subprocess
             cfg = os.path.expanduser("~/.config/heyvox/config.yaml")
             if os.path.exists(cfg):
-                subprocess.Popen(["open", cfg])
+                try:
+                    subprocess.run(["open", cfg])
+                except Exception:
+                    pass
 
         def openHelp_(self, sender):
             import webbrowser
@@ -917,7 +927,8 @@ def _build_transcript_menu(handler):
     # 4e: Status (daemons + queue)
     def _pid_alive(pidfile):
         try:
-            pid = int(open(pidfile).read().strip())
+            with open(pidfile) as _f:
+                pid = int(_f.read().strip())
             os.kill(pid, 0)
             return True
         except Exception:

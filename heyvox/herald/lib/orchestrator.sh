@@ -16,6 +16,7 @@ source "${SCRIPT_DIR}/config.sh"
 herald_ensure_dirs
 
 ORIGINAL_VOL=""
+ORIGINAL_VOL_FILE="/tmp/herald-original-vol"
 CURRENT_WORKSPACE=""
 
 # Singleton enforcement: only one orchestrator allowed
@@ -40,7 +41,15 @@ echo $$ > "$HERALD_ORCH_PID"
 # Audio ducking
 duck_audio() {
   [ "$HERALD_DUCK_ENABLED" != "true" ] && return
-  ORIGINAL_VOL=$(osascript -e 'output volume of (get volume settings)' 2>/dev/null)
+  # Only capture original volume if not already ducked (avoid saving ducked level on restart)
+  if [ -f "$ORIGINAL_VOL_FILE" ]; then
+    ORIGINAL_VOL=$(cat "$ORIGINAL_VOL_FILE" 2>/dev/null)
+  else
+    ORIGINAL_VOL=$(osascript -e 'output volume of (get volume settings)' 2>/dev/null)
+    if [ -n "$ORIGINAL_VOL" ]; then
+      echo "$ORIGINAL_VOL" > "$ORIGINAL_VOL_FILE"
+    fi
+  fi
   if [ -n "$ORIGINAL_VOL" ]; then
     osascript -e "set volume output volume $HERALD_DUCK_LEVEL" 2>/dev/null
     sleep 0.15
@@ -56,9 +65,14 @@ set_tts_volume() {
 
 restore_audio() {
   [ "$HERALD_DUCK_ENABLED" != "true" ] && return
+  # Read from file if in-memory value is empty (e.g. after restart)
+  if [ -z "$ORIGINAL_VOL" ] && [ -f "$ORIGINAL_VOL_FILE" ]; then
+    ORIGINAL_VOL=$(cat "$ORIGINAL_VOL_FILE" 2>/dev/null)
+  fi
   if [ -n "$ORIGINAL_VOL" ]; then
     osascript -e "set volume output volume $ORIGINAL_VOL" 2>/dev/null
     ORIGINAL_VOL=""
+    rm -f "$ORIGINAL_VOL_FILE"
   fi
 }
 

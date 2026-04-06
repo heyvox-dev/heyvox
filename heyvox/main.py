@@ -483,10 +483,9 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         # Pre-roll: prepend recent audio so first words aren't clipped
         _audio_buffer = list(preroll) if preroll else []
         _triggered_by_ptt = ptt
-
-    # Snapshot which app/text field is focused right now, so we can
-    # restore it at injection time even if the user clicks away.
-    _recording_target = snapshot_target()
+        # Snapshot which app/text field is focused right now, so we can
+        # restore it at injection time even if the user clicks away.
+        _recording_target = snapshot_target()
 
     # Preload STT model in background while user speaks — hides the ~1s
     # model load latency behind recording time. No-op if already loaded.
@@ -504,7 +503,8 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
 
     # Write recording flag for cross-process coordination
     try:
-        open(RECORDING_FLAG, "w").close()
+        with open(RECORDING_FLAG, "w"):
+            pass
     except Exception:
         pass
 
@@ -536,9 +536,10 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
         busy = True
         duration = time.time() - recording_start_time
         recorded_chunks = list(_audio_buffer)
-        # Capture PTT flag under lock — _send_local runs on a daemon thread
-        # and must not read the global (which could be overwritten by a new recording).
+        # Capture PTT flag and recording target under lock — _send_local runs on
+        # a daemon thread and must not read globals (could be overwritten by a new recording).
         ptt_snapshot = _triggered_by_ptt
+        target_snapshot = _recording_target
 
     log("Stopping recording...")
     _show_recording_indicator(False)
@@ -607,7 +608,7 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
             threading.Thread(
                 target=_send_local,
                 args=(duration, recorded_chunks, config, _adapter, raw_rms_db),
-                kwargs={"ptt": ptt_snapshot},
+                kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot},
                 daemon=True,
             ).start()
     except Exception as e:
@@ -730,7 +731,7 @@ def _audio_rms(chunks: list, sample_rate: int) -> float:
 _MIN_AUDIO_DBFS = -60.0
 
 
-def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapter, raw_rms_db: float = 0.0, *, ptt: bool = False) -> None:
+def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapter, raw_rms_db: float = 0.0, *, ptt: bool = False, recording_target=None) -> None:
     """Transcribe locally and inject text into target app."""
     global busy
 
@@ -877,7 +878,7 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
         # Requirement: INPT-05 (PTT = always-focused regardless of target_mode)
         if ptt:
             log(f"Typing into active app (PTT mode, snapshot was "
-                f"{_recording_target.app_name if _recording_target else 'none'})...")
+                f"{recording_target.app_name if recording_target else 'none'})...")
             type_text(paste_text)
             log("Pasted (PTT mode, no auto-Enter)")
         else:
@@ -886,7 +887,7 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
             # the last-focused agent). This is more reliable than restore_target
             # which can capture the wrong app if focus shifted before recording.
             log(f"Injecting via {type(adapter).__name__} "
-                f"(snapshot was {_recording_target.app_name if _recording_target else 'none'})...")
+                f"(snapshot was {recording_target.app_name if recording_target else 'none'})...")
             adapter.inject_text(paste_text)
             if adapter.should_auto_send():
                 time.sleep(1.0)
@@ -943,7 +944,8 @@ def _acquire_singleton():
     """
     if os.path.exists(_PID_FILE):
         try:
-            old_pid = int(open(_PID_FILE).read().strip())
+            with open(_PID_FILE) as _f:
+                old_pid = int(_f.read().strip())
             os.kill(old_pid, 0)  # Check if alive
             # Verify the process is actually vox (not a recycled PID)
             try:
@@ -986,7 +988,8 @@ def _release_singleton():
     """Remove PID file on exit."""
     try:
         if os.path.exists(_PID_FILE):
-            pid = int(open(_PID_FILE).read().strip())
+            with open(_PID_FILE) as _f:
+                pid = int(_f.read().strip())
             if pid == os.getpid():
                 os.unlink(_PID_FILE)
     except (OSError, ValueError):
@@ -1555,15 +1558,17 @@ def main() -> None:
                     if now - last_trigger > active_cooldown:
                         last_trigger = now
                         # PTT owns the recording lifecycle — ignore wake words
-                        if _triggered_by_ptt and is_recording:
+                        # Use _is_ptt/_is_rec snapshots (taken under _state_lock above)
+                        # to avoid reading bare globals from the main thread.
+                        if _is_ptt and _is_rec:
                             pass
                         elif use_separate_words:
-                            if start_word in ww_name and not is_recording:
+                            if start_word in ww_name and not _is_rec:
                                 start_recording(config=config, preroll=_preroll_buffer)
-                            elif stop_word in ww_name and is_recording:
+                            elif stop_word in ww_name and _is_rec:
                                 stop_recording(config=config)
                         else:
-                            if not is_recording:
+                            if not _is_rec:
                                 start_recording(config=config, preroll=_preroll_buffer)
                             else:
                                 stop_recording(config=config)
