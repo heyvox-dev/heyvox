@@ -24,6 +24,7 @@ import json
 import os
 import socket as _socket
 import subprocess
+import threading
 import time
 
 
@@ -47,11 +48,13 @@ _MR_PAUSE = 1
 #           "media-key" (media key toggle)
 _PAUSE_FLAG = "/tmp/heyvox-media-paused-rec"
 
-# Lazy-loaded framework handle
+# Lazy-loaded framework handle (guarded by _mr_lock for thread-safe init)
 _mr_lib = None
+_mr_lock = threading.Lock()
 
-# Whether Chrome JS access has been tested and works
+# Whether Chrome JS access has been tested and works (guarded by _chrome_lock)
 _chrome_js_available = None  # None = untested, True/False = tested
+_chrome_lock = threading.Lock()
 
 # Browsers to check for video playback (in priority order)
 _BROWSERS = [
@@ -109,15 +112,20 @@ def _hush_command(action: str, **kwargs) -> dict | None:
 
 
 def _get_mr():
-    """Load the MediaRemote framework (lazy, cached)."""
+    """Load the MediaRemote framework (lazy, cached, thread-safe)."""
     global _mr_lib
-    if _mr_lib is None:
+    if _mr_lib is not None:
+        return _mr_lib
+    with _mr_lock:
+        if _mr_lib is not None:
+            return _mr_lib  # Another thread loaded it while we waited
         try:
-            _mr_lib = ctypes.cdll.LoadLibrary(
+            lib = ctypes.cdll.LoadLibrary(
                 "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
             )
-            _mr_lib.MRMediaRemoteSendCommand.argtypes = [ctypes.c_int, ctypes.c_void_p]
-            _mr_lib.MRMediaRemoteSendCommand.restype = ctypes.c_bool
+            lib.MRMediaRemoteSendCommand.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            lib.MRMediaRemoteSendCommand.restype = ctypes.c_bool
+            _mr_lib = lib
         except OSError:
             _log("MediaRemote framework not available — media pause disabled")
             return None
@@ -150,11 +158,20 @@ def _test_chrome_js_access() -> bool:
 
     Only caches definitive results (explicitly enabled or disabled).
     Transient failures (timeout, Chrome not running) are retried next call.
+    Thread-safe: uses _chrome_lock for the test-and-cache operation.
     """
     global _chrome_js_available
     if _chrome_js_available is not None:
         return _chrome_js_available
 
+    with _chrome_lock:
+        # Re-check after acquiring lock (another thread may have tested)
+        if _chrome_js_available is not None:
+            return _chrome_js_available
+
+    # Run the actual test outside the lock (subprocess can be slow).
+    # We accept that two threads might both test concurrently on first call —
+    # that's benign, and better than holding a lock during a 2s subprocess.
     try:
         r = subprocess.run(
             ["osascript", "-e", '''

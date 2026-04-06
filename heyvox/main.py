@@ -997,7 +997,12 @@ def _acquire_singleton():
     for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*",
                      "/tmp/herald-media-paused-*", "/tmp/herald-pause",
                      "/tmp/heyvox-hud.sock",
-                     "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity"):
+                     "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity",
+                     # Herald state files that can go stale after crash
+                     "/tmp/herald-ambient", "/tmp/herald-mode",
+                     "/tmp/herald-last-play", "/tmp/herald-workspace",
+                     # Temp WAVs from crashed TTS worker
+                     "/tmp/herald-generating-*.wav"):
         for stale in _glob.glob(pattern):
             try:
                 os.unlink(stale)
