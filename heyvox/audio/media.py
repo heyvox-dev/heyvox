@@ -95,6 +95,15 @@ def _hush_command(action: str, **kwargs) -> dict | None:
                     break
         resp = json.loads(data)
         return resp if "error" not in resp else None
+    except ConnectionRefusedError:
+        # Stale socket file from a dead hush_host — clean it up so we don't
+        # waste time on every subsequent call.
+        _log("Hush socket connection refused (stale socket), removing")
+        try:
+            os.unlink(_HUSH_SOCK)
+        except OSError:
+            pass
+        return None
     except (OSError, json.JSONDecodeError, ValueError):
         return None
 
@@ -479,8 +488,13 @@ def resume_media() -> bool:
     except OSError:
         pass
 
-    # Don't actually resume if another caller (orchestrator) still has it paused
-    other_flags = [f for f in glob.glob("/tmp/heyvox-media-paused-*") if f != _PAUSE_FLAG]
+    # Don't actually resume if another caller (orchestrator) still has it paused.
+    # Check both heyvox and herald namespaces — Herald's TTS orchestrator uses
+    # /tmp/herald-media-paused-* for the same purpose.
+    other_flags = [
+        f for f in glob.glob("/tmp/heyvox-media-paused-*") + glob.glob("/tmp/herald-media-paused-*")
+        if f != _PAUSE_FLAG
+    ]
     if other_flags:
         _log(f"resume_media: other pause flags exist {other_flags}, not resuming")
         return False

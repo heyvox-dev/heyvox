@@ -994,7 +994,8 @@ def _acquire_singleton():
 
     # Clean up stale flag files and sockets from previous instance
     import glob as _glob
-    for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*", "/tmp/heyvox-hud.sock",
+    for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*",
+                     "/tmp/herald-media-paused-*", "/tmp/heyvox-hud.sock",
                      "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity"):
         for stale in _glob.glob(pattern):
             try:
@@ -1002,13 +1003,35 @@ def _acquire_singleton():
             except (FileNotFoundError, IsADirectoryError):
                 pass
 
-    with open(_PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
+    # Write PID file and hold an advisory lock for the lifetime of the process.
+    # This eliminates the race window between reading the old PID and writing
+    # the new one — a concurrent starter will block on flock().
+    import fcntl
+    global _pid_fd
+    _pid_fd = open(_PID_FILE, "w")
+    try:
+        fcntl.flock(_pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("Another vox instance holds the PID lock — exiting")
+        _pid_fd.close()
+        sys.exit(1)
+    _pid_fd.write(str(os.getpid()))
+    _pid_fd.flush()
+
+
+# File descriptor kept open to hold the flock for the process lifetime.
+_pid_fd = None
 
 
 def _release_singleton():
-    """Remove PID file on exit."""
+    """Release PID lock and remove PID file on exit."""
+    global _pid_fd
     try:
+        if _pid_fd is not None:
+            import fcntl
+            fcntl.flock(_pid_fd, fcntl.LOCK_UN)
+            _pid_fd.close()
+            _pid_fd = None
         if os.path.exists(_PID_FILE):
             with open(_PID_FILE) as _f:
                 pid = int(_f.read().strip())
@@ -1625,9 +1648,9 @@ def main() -> None:
                 os.unlink(flag)
             except FileNotFoundError:
                 pass
-        # Clean up media pause flags
+        # Clean up media pause flags (both heyvox and herald namespaces)
         import glob as _glob
-        for f in _glob.glob("/tmp/heyvox-media-paused-*"):
+        for f in _glob.glob("/tmp/heyvox-media-paused-*") + _glob.glob("/tmp/herald-media-paused-*"):
             try:
                 os.unlink(f)
             except FileNotFoundError:
