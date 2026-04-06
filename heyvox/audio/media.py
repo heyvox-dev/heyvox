@@ -137,7 +137,11 @@ def _is_media_playing_native() -> bool | None:
 
 
 def _test_chrome_js_access() -> bool:
-    """Test if Chrome allows JavaScript from Apple Events. Cached after first call."""
+    """Test if Chrome allows JavaScript from Apple Events.
+
+    Only caches definitive results (explicitly enabled or disabled).
+    Transient failures (timeout, Chrome not running) are retried next call.
+    """
     global _chrome_js_available
     if _chrome_js_available is not None:
         return _chrome_js_available
@@ -154,19 +158,29 @@ end tell'''],
             capture_output=True, text=True, timeout=2.0,
         )
         if "Executing JavaScript through AppleScript is turned off" in r.stderr:
-            _chrome_js_available = False
+            _chrome_js_available = False  # Definitive: user disabled it
             _log("WARNING: Chrome JS from Apple Events is DISABLED. "
                  "Enable via: View → Developer → Allow JavaScript from Apple Events. "
                  "Using media key fallback instead.")
         elif r.stdout.strip() == "js-ok" or r.returncode == 0:
-            _chrome_js_available = True
+            _chrome_js_available = True  # Definitive: it works
             _log("Chrome JS from Apple Events: enabled")
+        elif r.stdout.strip() == "no-app":
+            # Chrome not running — don't cache, retry next time
+            _log("Chrome not running, skipping JS test (will retry)")
+            return False
         else:
-            _chrome_js_available = False
+            # Inconclusive — don't cache, retry next time
             _log(f"Chrome JS test inconclusive: rc={r.returncode} stderr={r.stderr.strip()[:100]}")
+            return False
+    except subprocess.TimeoutExpired:
+        # Transient — don't cache, retry next time
+        _log("Chrome JS test timed out (will retry)")
+        return False
     except Exception as e:
-        _chrome_js_available = False
-        _log(f"Chrome JS test failed: {e}")
+        # Transient — don't cache, retry next time
+        _log(f"Chrome JS test failed: {e} (will retry)")
+        return False
 
     return _chrome_js_available
 

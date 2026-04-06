@@ -471,6 +471,8 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
     global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt, _recording_target
     if config is None:
         return
+    if _shutdown.is_set():
+        return  # Don't start recording during shutdown
 
     with _state_lock:
         if is_recording:
@@ -497,6 +499,17 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         _tts_set_rec(True)
     except ImportError:
         pass
+
+    # Pause browser/native media during recording (YouTube, Spotify, etc.)
+    # Run in background thread — pause_media() can block for seconds on
+    # osascript calls (Chrome JS access test), which would delay recording start.
+    def _bg_pause():
+        try:
+            from heyvox.audio.media import pause_media
+            pause_media()
+        except Exception as e:
+            log(f"WARNING: media pause failed: {e}")
+    threading.Thread(target=_bg_pause, daemon=True, name="vox-media-pause").start()
 
     # Write recording flag for cross-process coordination
     try:
@@ -554,6 +567,11 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
         _release_recording_guard()
         with _state_lock:
             busy = False
+        try:
+            from heyvox.audio.media import resume_media
+            resume_media()
+        except Exception:
+            pass
         audio_cue("paused", cues_dir)
         _hud_send({"type": "state", "state": "idle"})
         return
@@ -923,6 +941,13 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
         _release_recording_guard()
         with _state_lock:
             busy = False
+        # Resume media that we paused at recording start
+        try:
+            from heyvox.audio.media import resume_media
+            resume_media()
+        except Exception as e:
+            log(f"WARNING: media resume failed: {e}")
+        _hud_send({"type": "state", "state": "idle"})
         log("Ready for next wake word.")
 
 
@@ -1008,7 +1033,8 @@ def main() -> None:
     atexit.register(_release_singleton)
 
     # Startup cleanup: remove stale flags from previous crash/kill
-    for stale_flag in (RECORDING_FLAG, "/tmp/heyvox-tts-playing", "/tmp/claude-tts-playing.pid"):
+    for stale_flag in (RECORDING_FLAG, "/tmp/heyvox-tts-playing", "/tmp/claude-tts-playing.pid",
+                       "/tmp/heyvox-media-paused-rec"):
         try:
             age = time.time() - os.path.getmtime(stale_flag)
             if age > 60:
@@ -1185,6 +1211,7 @@ def main() -> None:
     _DEVICE_SCAN_INTERVAL = 3.0  # seconds — fast detection for USB/BT hotplug
     _last_device_scan = time.time()
     _last_output_device = ""
+    _mic_pinned = False  # True after manual mic switch — suppresses auto-switch back
     try:
         _default_out = pa.get_default_output_device_info()
         _last_output_device = _default_out['name']
@@ -1209,6 +1236,11 @@ def main() -> None:
                         is_recording = False
                         busy = False
                         _audio_buffer.clear()
+                    try:
+                        from heyvox.audio.media import resume_media
+                        resume_media()
+                    except Exception:
+                        pass
                     cues_dir = get_cues_dir(config.cues_dir)
                     audio_cue("paused", cues_dir)
                     _hud_send({"type": "state", "state": "idle"})
@@ -1227,6 +1259,7 @@ def main() -> None:
                     time.sleep(0.1)
                     continue
                 log("Mic appears disconnected, searching for new mic...")
+                _mic_pinned = False  # Pinned device gone — allow priority-based selection
                 try:
                     stream.stop_stream()
                     stream.close()
@@ -1363,10 +1396,16 @@ def main() -> None:
                     finally:
                         _scan_pa.terminate()
 
+                    # If mic is pinned but the pinned device disappeared, unpin
+                    if _mic_pinned and not any(dev_name.lower() in n.lower() or n.lower() in dev_name.lower() for n in current_names):
+                        log(f"Pinned mic '{dev_name}' disappeared — unpinning, reverting to priority list")
+                        _mic_pinned = False
+
                     # Check if a higher-priority device is available but not currently selected.
+                    # Skip auto-switch if user manually pinned a mic via menu.
                     # Use tracked dev_name (not pa.get_device_info which may have stale indices).
                     better_available = False
-                    for prio_name in mic_priority:
+                    for prio_name in mic_priority if not _mic_pinned else []:
                         matching = [n for n in current_names if prio_name.lower() in n.lower()]
                         if matching:
                             if prio_name.lower() in dev_name.lower():
@@ -1430,9 +1469,10 @@ def main() -> None:
                                     pa = pyaudio.PyAudio()
                                     dev_index = target_index
                                     dev_name = pa.get_device_info_by_index(dev_index)['name']
-                                    log(f"Switched to: [{dev_index}] {dev_name}")
+                                    log(f"Switched to: [{dev_index}] {dev_name} (pinned)")
                                     stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
                                     headset_mode = detect_headset(pa, dev_index)
+                                    _mic_pinned = True  # Suppress auto-switch back to priority mic
                                     _write_active_mic(dev_name)
                                     device_change_cue(dev_name, "input")
                                     _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
@@ -1587,7 +1627,7 @@ def main() -> None:
                 pass
         # Clean up media pause flags
         import glob as _glob
-        for f in _glob.glob("/tmp/heyvox-media-paused-rec"):
+        for f in _glob.glob("/tmp/heyvox-media-paused-*"):
             try:
                 os.unlink(f)
             except FileNotFoundError:
@@ -1628,6 +1668,11 @@ def _cancel_recording_from_ptt(config: HeyvoxConfig) -> None:
         is_recording = False
         busy = False
         _audio_buffer.clear()
+    try:
+        from heyvox.audio.media import resume_media
+        resume_media()
+    except Exception:
+        pass
     cues_dir = get_cues_dir(config.cues_dir)
     audio_cue("paused", cues_dir)
     _hud_send({"type": "state", "state": "idle"})
