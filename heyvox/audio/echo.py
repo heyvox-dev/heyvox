@@ -133,7 +133,7 @@ def init_aec(delay_ms: int = AEC_DEFAULT_DELAY_MS) -> bool:
         _aec_delay_ms = delay_ms
 
         try:
-            from livekit.rtc import AudioFrame
+            from livekit.rtc import AudioFrame  # noqa: F401
             from livekit.rtc.apm import AudioProcessingModule
 
             _apm = AudioProcessingModule(

@@ -5,8 +5,7 @@ The Enter keystroke must target the specific app process via
 `tell process "AppName"` in System Events, not rely on frontmost app.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 
 class TestPressEnterTargeting:
@@ -168,7 +167,7 @@ class TestTypeText:
         text_to_paste = 'He said "hello"'
         pbcopy_inputs = []
 
-        original_run = __import__("subprocess").run
+        _original_run = __import__("subprocess").run
 
         def mock_run(cmd, **kwargs):
             if cmd[0] == "pbcopy":

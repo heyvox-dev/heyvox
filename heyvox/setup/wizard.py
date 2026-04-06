@@ -132,7 +132,6 @@ def run_setup(config) -> None:
         check_microphone,
         check_screen_recording,
         open_permission_settings,
-        PERMISSION_URLS,
     )
     from heyvox.setup.launchd import write_plist, bootstrap, get_status
 
@@ -236,7 +235,7 @@ def run_setup(config) -> None:
         download = console.input("  Download now? [y/N] ").strip().lower()
         if download == "y":
             try:
-                from huggingface_hub import snapshot_download  # noqa: lazy import
+                from huggingface_hub import snapshot_download
 
                 with Progress(
                     SpinnerColumn(),
@@ -263,8 +262,8 @@ def run_setup(config) -> None:
     console.print("  Recording for 2 seconds — say something...")
 
     try:
-        import pyaudio  # noqa: lazy import
-        import numpy as np  # noqa: lazy import
+        import pyaudio
+        import numpy as np
 
         pa = pyaudio.PyAudio()
         try:
@@ -282,7 +281,7 @@ def run_setup(config) -> None:
             max_level = 0
 
             import time
-            start_t = time.time()
+            _start_t = time.time()
 
             with Live(console=console, refresh_per_second=10) as live:
                 for _ in range(chunks_to_read):

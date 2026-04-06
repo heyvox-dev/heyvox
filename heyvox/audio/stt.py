@@ -22,7 +22,7 @@ import numpy as np
 _LOAD_TIMEOUT = 60  # seconds — cold load can be slow
 _TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
 
-from heyvox.constants import DEFAULT_SAMPLE_RATE
+from heyvox.constants import DEFAULT_SAMPLE_RATE  # noqa: E402
 
 
 # Global sherpa recognizer (initialized once, reused across calls)

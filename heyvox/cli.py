@@ -5,6 +5,7 @@ Entry point: heyvox [command] [options]
 """
 
 import argparse
+import os
 import sys
 
 
@@ -320,8 +321,8 @@ def _cmd_debug(args):
         return
 
     if not os.path.isdir(STT_DEBUG_DIR):
-        print(f"Debug capturing is OFF. Enable with: heyvox debug --enable")
-        print(f"Then restart heyvox to start saving raw audio.")
+        print("Debug capturing is OFF. Enable with: heyvox debug --enable")
+        print("Then restart heyvox to start saving raw audio.")
         return
 
     # Read and display recent debug log entries
@@ -585,6 +586,21 @@ def main():
         help="Remove the debug directory to stop capturing",
     )
     sub_debug.set_defaults(func=_cmd_debug)
+
+    # doctor — system diagnostics
+    sub_doctor = subparsers.add_parser("doctor", help="Run system diagnostics")
+    sub_doctor.set_defaults(func=_cmd_doctor)
+
+    # bugreport — generate structured bug report
+    sub_bugreport = subparsers.add_parser("bugreport", help="Generate bug report for GitHub Issues")
+    sub_bugreport.add_argument(
+        "--no-clipboard",
+        dest="clipboard",
+        action="store_false",
+        default=True,
+        help="Print to stdout instead of copying to clipboard",
+    )
+    sub_bugreport.set_defaults(func=_cmd_bugreport)
 
     # register — register MCP server with AI agents
     sub_register = subparsers.add_parser("register", help="Register HeyVox MCP server with AI coding agents")

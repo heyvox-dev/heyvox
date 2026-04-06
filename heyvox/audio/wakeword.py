@@ -8,7 +8,6 @@ Requirement: Phase 8 custom wake word support
 """
 
 import os
-from pathlib import Path
 from typing import Any
 
 

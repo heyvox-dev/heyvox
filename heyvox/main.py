@@ -23,13 +23,10 @@ import pyaudio
 from heyvox.config import load_config, HeyvoxConfig
 from heyvox.constants import (
     RECORDING_FLAG,
-    DEFAULT_SAMPLE_RATE,
-    DEFAULT_CHUNK_SIZE,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
     STT_DEBUG_DIR,
-    GRACE_AFTER_TTS,
     ACTIVE_MIC_FILE,
     MIC_SWITCH_REQUEST_FILE,
 )
@@ -38,7 +35,7 @@ from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir, device_cha
 from heyvox.audio.stt import init_local_stt, transcribe_audio
 from heyvox.audio.tts import check_voice_command, execute_voice_command
 from heyvox.input.injection import type_text
-from heyvox.input.target import snapshot_target, restore_target
+from heyvox.input.target import snapshot_target
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +92,9 @@ def _hud_send(msg: dict) -> None:
             log(f"[HUD-DBG] Reconnect failed: {e}")
             return
         if _hud_client._sock is None:
-            log(f"[HUD-DBG] Reconnect succeeded but sock still None")
+            log("[HUD-DBG] Reconnect succeeded but sock still None")
             return
-        log(f"[HUD-DBG] Reconnected!")
+        log("[HUD-DBG] Reconnected!")
     try:
         _hud_client.send(msg)
         log(f"[HUD-DBG] Sent {msg.get('type')}: {msg.get('state', '')}")
@@ -902,9 +899,9 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
             else:
                 log("Pasted (no auto-send)")
         # Show "Sent to [agent]" confirmation in HUD
-        target_name = None
+        _target_name = None
         if not ptt:
-            target_name = (
+            _target_name = (
                 getattr(adapter, '_last_agent_name', None)
                 or getattr(adapter, '_target_app', None)
             )
@@ -1456,7 +1453,7 @@ def main() -> None:
                     except Exception:
                         pass
 
-                except Exception as e:
+                except Exception:
                     pass  # Don't crash the main loop on scan errors
 
             # Silence watchdog — end recording after silence_timeout seconds of quiet
@@ -1577,7 +1574,7 @@ def main() -> None:
     except KeyboardInterrupt:
         log("Stopped by user")
     except Exception:
-        log(f"FATAL: Unhandled exception in main loop")
+        log("FATAL: Unhandled exception in main loop")
         import traceback
         log(traceback.format_exc())
     finally:

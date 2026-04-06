@@ -1,9 +1,8 @@
 """Tests for heyvox.config — configuration loading and validation."""
 
 import pytest
-from pathlib import Path
 
-from heyvox.config import HeyvoxConfig, WakeWordConfig, TTSConfig, STTConfig, load_config
+from heyvox.config import HeyvoxConfig, WakeWordConfig, TTSConfig, load_config
 
 
 class TestHeyvoxConfigDefaults:

@@ -10,7 +10,6 @@ The recording flag (/tmp/heyvox-recording) must be:
 import os
 import time
 import threading
-import pytest
 
 
 class TestRecordingFlagLifecycle:

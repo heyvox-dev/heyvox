@@ -9,7 +9,6 @@ import time
 import pytest
 
 from heyvox.constants import (
-    TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     GRACE_AFTER_TTS,
     SPEAKER_MODE_THRESHOLD_MULT,

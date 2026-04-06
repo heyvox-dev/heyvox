@@ -609,10 +609,12 @@ def _make_menu_action_class():
 
         def restartHeyVox_(self, sender):
             """Kill heyvox.main, relaunch it (which spawns a new overlay), then quit this overlay."""
-            import subprocess, sys
+            import subprocess
+            import sys
             # Kill the main process
             subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
-            import time; time.sleep(0.5)
+            import time
+            time.sleep(0.5)
             # Relaunch main process — it will spawn its own overlay
             subprocess.Popen(
                 [sys.executable, "-c", "from heyvox.main import run; run()"],
@@ -681,9 +683,9 @@ def _build_transcript_menu(handler):
     hold_count = len(_glob.glob("/tmp/herald-hold/*.wav"))
     try:
         from heyvox.audio.tts import is_muted as _tts_is_muted
-        is_muted = _tts_is_muted()
+        _is_muted = _tts_is_muted()
     except Exception:
-        is_muted = os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute")
+        _is_muted = os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute")
 
     try:
         from heyvox.audio.tts import get_verbosity
@@ -1029,13 +1031,12 @@ def main(menu_bar_only: bool = False):
         NSWindowStyleMaskBorderless, NSScreen, NSBackingStoreBuffered,
         NSStatusWindowLevel, NSVisualEffectView,
         NSTextField, NSButton,
-        NSTextAlignmentCenter, NSAnimationContext,
-        NSWindowCollectionBehaviorCanJoinAllSpaces,
+        NSTextAlignmentCenter, NSWindowCollectionBehaviorCanJoinAllSpaces,
         NSWindowCollectionBehaviorFullScreenAuxiliary,
         NSWindowCollectionBehaviorStationary,
         NSWindowCollectionBehaviorIgnoresCycle,
     )
-    from Foundation import NSObject, NSTimer, NSMakeRect
+    from Foundation import NSObject, NSTimer
 
     try:
         from AppKit import NSVisualEffectMaterialHUDWindow as HUD_MATERIAL
@@ -1199,7 +1200,7 @@ def main(menu_bar_only: bool = False):
     tts_controls = (skip_btn, stop_btn)
 
     # ---- Menu bar status item (lives next to Bluetooth/WiFi icons) ----
-    from AppKit import NSStatusBar, NSVariableStatusItemLength, NSImage, NSFont as _NSFont
+    from AppKit import NSStatusBar, NSVariableStatusItemLength
     status_bar = NSStatusBar.systemStatusBar()
     status_item = status_bar.statusItemWithLength_(NSVariableStatusItemLength)
     status_button = status_item.button()
