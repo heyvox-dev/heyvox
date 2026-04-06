@@ -995,7 +995,8 @@ def _acquire_singleton():
     # Clean up stale flag files and sockets from previous instance
     import glob as _glob
     for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*",
-                     "/tmp/herald-media-paused-*", "/tmp/heyvox-hud.sock",
+                     "/tmp/herald-media-paused-*", "/tmp/herald-pause",
+                     "/tmp/heyvox-hud.sock",
                      "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity"):
         for stale in _glob.glob(pattern):
             try:
@@ -1643,7 +1644,7 @@ def main() -> None:
     finally:
         log("Cleaning up...")
         # Always clean up flag files to avoid blocking TTS orchestrator
-        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG):
+        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, "/tmp/herald-pause"):
             try:
                 os.unlink(flag)
             except FileNotFoundError:
