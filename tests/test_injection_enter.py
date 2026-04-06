@@ -141,35 +141,48 @@ class TestTypeText:
         from heyvox.input import injection
 
         commands_run = []
+        text_to_paste = "hello world"
 
         def mock_run(cmd, **kwargs):
             commands_run.append(" ".join(cmd[:3]) if len(cmd) >= 3 else " ".join(cmd))
             return MagicMock(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr("subprocess.run", mock_run)
+        # Stub out clipboard verify so type_text doesn't abort early.
+        # The real get_clipboard_text() calls osascript; in tests pbcopy is
+        # mocked so the clipboard is never actually set.
+        monkeypatch.setattr(injection, "get_clipboard_text", lambda: text_to_paste)
 
-        injection.type_text("hello world")
+        injection.type_text(text_to_paste)
 
-        # Should have: get clipboard, check image, set clipboard, cmd-v, restore
+        # Should have at minimum: pbcopy (set clipboard) + osascript (Cmd-V paste)
+        pbcopy_calls = [c for c in commands_run if "pbcopy" in c]
         osascript_calls = [c for c in commands_run if "osascript" in c]
-        assert len(osascript_calls) >= 2, f"Expected clipboard + paste calls, got: {commands_run}"
+        assert len(pbcopy_calls) >= 1, f"Expected pbcopy call, got: {commands_run}"
+        assert len(osascript_calls) >= 1, f"Expected osascript paste call, got: {commands_run}"
 
     def test_type_text_escapes_quotes(self, monkeypatch):
-        """type_text() must escape double quotes in the text."""
+        """type_text() uses pbcopy for clipboard — special chars including quotes are safe."""
         from heyvox.input import injection
 
-        captured_scripts = []
+        text_to_paste = 'He said "hello"'
+        pbcopy_inputs = []
+
+        original_run = __import__("subprocess").run
 
         def mock_run(cmd, **kwargs):
-            if cmd[0] == "osascript" and "clipboard" in cmd[2]:
-                captured_scripts.append(cmd[2])
+            if cmd[0] == "pbcopy":
+                # Capture the raw bytes sent to pbcopy
+                pbcopy_inputs.append(kwargs.get("input", b""))
             return MagicMock(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr("subprocess.run", mock_run)
+        # Stub clipboard verify to return the exact text so paste proceeds
+        monkeypatch.setattr(injection, "get_clipboard_text", lambda: text_to_paste)
 
-        injection.type_text('He said "hello"')
+        injection.type_text(text_to_paste)
 
-        # The set-clipboard call should have escaped quotes
-        set_calls = [s for s in captured_scripts if "set the clipboard" in s]
-        assert len(set_calls) >= 1
-        assert '\\"' in set_calls[0], f"Quotes must be escaped: {set_calls[0]}"
+        # pbcopy receives raw UTF-8 bytes — no escaping needed (unlike osascript)
+        assert len(pbcopy_inputs) >= 1, "pbcopy must be called to set clipboard"
+        assert text_to_paste.encode("utf-8") in pbcopy_inputs, \
+            f"pbcopy must receive the verbatim text bytes, got: {pbcopy_inputs}"
