@@ -40,7 +40,9 @@ cmd_speak() {
   herald_is_muted && { echo "Muted"; exit 0; }
   herald_is_paused && { echo "Paused"; exit 0; }
 
-  local raw_file="/tmp/herald-raw-$$.${EPOCHREALTIME//.}.txt"
+  local _ts="${EPOCHREALTIME//.}"
+  [ -z "$_ts" ] && _ts=$(python3 -c "import time;print(int(time.time()*1000000))" 2>/dev/null || date +%s)
+  local raw_file="/tmp/herald-raw-$$.$_ts.txt"
   echo "<tts>${text}</tts>" > "$raw_file"
 
   export TTS_LABEL
@@ -138,7 +140,7 @@ cmd_replay() {
     exit 0
   fi
   echo "Replaying last $count..."
-  echo "$files" | tac | while read f; do
+  echo "$files" | tail -r | while read f; do
     afplay "$f" 2>/dev/null
   done
 }

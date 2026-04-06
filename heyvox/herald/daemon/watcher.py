@@ -314,7 +314,8 @@ def process_new_lines(filepath):
 
 def main():
     try:
-        old_pid = int(open(PID_FILE).read().strip())
+        with open(PID_FILE) as _f:
+            old_pid = int(_f.read().strip())
         os.kill(old_pid, signal.SIGTERM)
         time.sleep(0.5)
     except Exception:

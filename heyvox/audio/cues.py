@@ -9,6 +9,7 @@ the cue sound and triggering a false wake word detection.
 import os
 import signal
 import subprocess
+import threading
 import time
 
 # Auto-reap child processes (afplay) to prevent zombie accumulation.
@@ -16,6 +17,7 @@ signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
 # Module-level suppression timestamp: wake word detection is skipped until this time.
 _cue_suppress_until: float = 0.0
+_suppress_lock = threading.Lock()
 
 
 def get_cues_dir(config_cues_dir: str = "") -> str:
@@ -65,7 +67,8 @@ def audio_cue(name: str, cues_dir: str | None = None) -> None:
 
     # Estimate cue duration for suppression window (safe default for short files)
     duration = 1.0
-    _cue_suppress_until = time.time() + duration + 0.5
+    with _suppress_lock:
+        _cue_suppress_until = time.time() + duration + 0.5
 
     subprocess.Popen(
         ["afplay", cue_file],
@@ -77,7 +80,8 @@ def audio_cue(name: str, cues_dir: str | None = None) -> None:
 
 def is_suppressed() -> bool:
     """Return True if wake word detection should be suppressed right now."""
-    return time.time() < _cue_suppress_until
+    with _suppress_lock:
+        return time.time() < _cue_suppress_until
 
 
 def device_change_cue(device_name: str, device_type: str = "input") -> None:
@@ -100,7 +104,8 @@ def device_change_cue(device_name: str, device_type: str = "input") -> None:
     if not os.path.exists(sound):
         return
 
-    _cue_suppress_until = time.time() + 1.0
+    with _suppress_lock:
+        _cue_suppress_until = time.time() + 1.0
 
     subprocess.Popen(
         ["afplay", sound],

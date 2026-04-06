@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from enum import Enum
 from typing import Optional
 
@@ -65,6 +66,7 @@ def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
 # Module-level state
 # ---------------------------------------------------------------------------
 
+_tts_lock = threading.Lock()
 _muted: bool = False
 _verbosity: Verbosity = Verbosity.FULL
 _style: str = "detailed"
@@ -189,21 +191,24 @@ def clear_queue() -> None:
 def set_muted(muted: bool) -> None:
     """Mute or unmute TTS output. Syncs file flags for cross-process consistency."""
     global _muted
-    _muted = muted
-    _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+    with _tts_lock:
+        _muted = muted
+        _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+        if muted:
+            for flag in _MUTE_FLAGS:
+                try:
+                    open(flag, "w").close()
+                except OSError:
+                    pass
+        else:
+            for flag in _MUTE_FLAGS:
+                try:
+                    os.remove(flag)
+                except FileNotFoundError:
+                    pass
+    # stop_all() outside lock to avoid holding lock during subprocess call
     if muted:
-        for flag in _MUTE_FLAGS:
-            try:
-                open(flag, "w").close()
-            except OSError:
-                pass
         stop_all()
-    else:
-        for flag in _MUTE_FLAGS:
-            try:
-                os.remove(flag)
-            except FileNotFoundError:
-                pass
 
 
 def _is_system_muted() -> bool:
@@ -231,36 +236,37 @@ def set_verbosity(level: str) -> None:
     and the Python is_muted() check consistent.
     """
     global _verbosity, _muted
-    _verbosity = Verbosity(level)
-    # Write to shared file so Herald hooks/watcher can read it
-    from heyvox.constants import VERBOSITY_FILE
-    try:
-        if level == "full":
-            # Remove file = default (full)
-            os.remove(VERBOSITY_FILE)
+    with _tts_lock:
+        _verbosity = Verbosity(level)
+        # Write to shared file so Herald hooks/watcher can read it
+        from heyvox.constants import VERBOSITY_FILE
+        try:
+            if level == "full":
+                # Remove file = default (full)
+                os.remove(VERBOSITY_FILE)
+            else:
+                with open(VERBOSITY_FILE, "w") as f:
+                    f.write(level)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning(f"Failed to write verbosity file: {e}")
+        # Sync legacy mute flags and in-memory state
+        _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+        if level == "skip":
+            _muted = True
+            for flag in _MUTE_FLAGS:
+                try:
+                    open(flag, "w").close()
+                except OSError:
+                    pass
         else:
-            with open(VERBOSITY_FILE, "w") as f:
-                f.write(level)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        log.warning(f"Failed to write verbosity file: {e}")
-    # Sync legacy mute flags and in-memory state
-    _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
-    if level == "skip":
-        _muted = True
-        for flag in _MUTE_FLAGS:
-            try:
-                open(flag, "w").close()
-            except OSError:
-                pass
-    else:
-        _muted = False
-        for flag in _MUTE_FLAGS:
-            try:
-                os.remove(flag)
-            except FileNotFoundError:
-                pass
+            _muted = False
+            for flag in _MUTE_FLAGS:
+                try:
+                    os.remove(flag)
+                except FileNotFoundError:
+                    pass
 
 
 def get_verbosity() -> str:
@@ -304,19 +310,20 @@ def set_tts_style(style: str) -> None:
     if style not in valid:
         log.warning(f"Invalid TTS style '{style}', ignoring (valid: {valid})")
         return
-    _style = style
-    # Write to shared file so MCP server (separate process) can read it
-    try:
-        if style == "detailed":
-            # Remove file = default (detailed)
-            os.remove(_STYLE_FILE)
-        else:
-            with open(_STYLE_FILE, "w") as f:
-                f.write(style)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        log.warning(f"Failed to write style file: {e}")
+    with _tts_lock:
+        _style = style
+        # Write to shared file so MCP server (separate process) can read it
+        try:
+            if style == "detailed":
+                # Remove file = default (detailed)
+                os.remove(_STYLE_FILE)
+            else:
+                with open(_STYLE_FILE, "w") as f:
+                    f.write(style)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning(f"Failed to write style file: {e}")
     try:
         from heyvox.config import update_config
         update_config(**{"tts.style": style})

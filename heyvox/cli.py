@@ -86,7 +86,8 @@ def _cmd_status(args):
     import os
     def _pid_alive(pidfile):
         try:
-            pid = int(open(pidfile).read().strip())
+            with open(pidfile) as _f:
+                pid = int(_f.read().strip())
             os.kill(pid, 0)
             return True
         except Exception:
@@ -377,6 +378,28 @@ def _cmd_debug(args):
 
     print(f"\n  Debug dir: {STT_DEBUG_DIR}")
     print(f"  Log file:  {STT_DEBUG_LOG}")
+
+
+def _cmd_doctor(args):
+    """Run system diagnostics to check HeyVox health."""
+    from heyvox.doctor import run_doctor
+    print(run_doctor())
+
+
+def _cmd_bugreport(args):
+    """Generate a structured bug report for GitHub Issues."""
+    from heyvox.doctor import run_bugreport
+    report = run_bugreport()
+    if getattr(args, "clipboard", True):
+        try:
+            import subprocess
+            subprocess.run(["pbcopy"], input=report.encode(), check=True)
+            print("Bug report copied to clipboard. Paste it into a GitHub Issue.")
+            print(f"({len(report)} characters)")
+        except Exception:
+            print(report)
+    else:
+        print(report)
 
 
 def _cmd_register(args):
