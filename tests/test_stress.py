@@ -10,10 +10,8 @@ Run with: pytest tests/test_stress.py -v -s
 
 import os
 import re
-import resource
 import time
 
-import numpy as np
 import pytest
 
 from tests.conftest import blackhole_installed, vox_running
@@ -23,7 +21,6 @@ from tests.test_e2e import (
     read_vox_log,
     write_wav,
     generate_silence,
-    generate_tone,
 )
 
 
@@ -193,7 +190,7 @@ class TestFlagCoordination:
             any(_flag_exists(f) for f in ["/tmp/heyvox-recording", "/tmp/vox-recording"])
         )
         # Also check via log that recording flag was written
-        flag_logs = [l for l in read_vox_log(t) if "recording" in l.lower()]
+        flag_logs = [line for line in read_vox_log(t) if "recording" in line.lower()]
         assert flag_present or len(flag_logs) > 0, (
             "Recording flag not set during active recording"
         )
@@ -380,7 +377,6 @@ class TestErrorRecovery:
         if not os.path.exists(WAKE_WORD_WAV):
             pytest.skip("Wake word fixture not found")
 
-        t = time.time()
         # Play wake word twice rapidly (start + stop)
         play_to_blackhole(WAKE_WORD_WAV)
         time.sleep(0.5)

@@ -2,17 +2,15 @@
 
 import json
 import os
-import socket
 import time
 import pytest
 
-from heyvox.hud.ipc import HUDServer, HUDClient, DEFAULT_SOCKET_PATH
+from heyvox.hud.ipc import HUDServer, HUDClient
 
 
 @pytest.fixture
 def socket_path():
     """Short socket path (Unix has 104-char limit on macOS)."""
-    import tempfile
     path = f"/tmp/heyvox-test-{os.getpid()}.sock"
     yield path
     try:

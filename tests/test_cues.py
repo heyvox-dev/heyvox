@@ -2,10 +2,9 @@
 
 import os
 import time
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from heyvox.audio.cues import get_cues_dir, audio_cue, is_suppressed, _cue_suppress_until
+from heyvox.audio.cues import get_cues_dir, audio_cue, is_suppressed
 import heyvox.audio.cues as cues_module
 
 

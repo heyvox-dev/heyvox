@@ -147,7 +147,7 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
     verbosity = _get_verbosity()
     speech = _apply_verbosity(speech, verbosity)
     if speech is None:
-        log(f"Verbosity=skip, dropping TTS")
+        log("Verbosity=skip, dropping TTS")
         return False
 
     now = time.time()

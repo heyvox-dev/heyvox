@@ -90,7 +90,6 @@ def restore_target(snap: TargetSnapshot) -> bool:
     try:
         from ApplicationServices import (
             AXUIElementCreateApplication,
-            AXUIElementCopyAttributeValue,
             AXUIElementSetAttributeValue,
         )
         from CoreFoundation import kCFBooleanTrue

@@ -1,6 +1,5 @@
 """Tests for wake word stripping from transcriptions."""
 
-import pytest
 from heyvox.main import _strip_wake_words
 
 

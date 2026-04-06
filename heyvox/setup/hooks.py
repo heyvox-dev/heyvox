@@ -5,7 +5,6 @@ triggers TTS on responses, ambient sounds, notifications, and session lifecycle.
 """
 
 import json
-import sys
 from pathlib import Path
 
 from heyvox.herald import HERALD_HOOKS

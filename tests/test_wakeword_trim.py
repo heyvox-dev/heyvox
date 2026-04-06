@@ -6,7 +6,6 @@ The back trim removes the stop wake word (~1000ms).
 """
 
 import numpy as np
-import pytest
 
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 

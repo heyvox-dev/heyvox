@@ -1,7 +1,6 @@
 """Tests for heyvox.adapters — text injection adapters."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from heyvox.adapters.generic import GenericAdapter
 

@@ -15,14 +15,10 @@ Run with: pytest tests/test_e2e.py -v --timeout=60
 The tests are skipped automatically if BlackHole is not installed or heyvox is not running.
 """
 
-import json
 import os
-import subprocess
 import tempfile
 import time
 import wave
-import struct
-import math
 
 import numpy as np
 import pytest

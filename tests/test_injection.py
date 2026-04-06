@@ -1,7 +1,6 @@
 """Tests for heyvox.input.injection — text injection via clipboard + osascript."""
 
-import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 from heyvox.input.injection import (
     type_text, press_enter, focus_app, focus_input,

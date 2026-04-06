@@ -43,10 +43,10 @@ sys.stdout = sys.stderr
 # ---------------------------------------------------------------------------
 # MCP server setup
 # ---------------------------------------------------------------------------
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager  # noqa: E402
+from collections.abc import AsyncIterator  # noqa: E402
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 
 @asynccontextmanager
