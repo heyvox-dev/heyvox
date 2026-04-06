@@ -93,6 +93,13 @@ class HUDServer:
     def shutdown(self) -> None:
         """Stop accepting connections and clean up the socket file."""
         self._running = False
+        # Connect to the listening socket to unblock accept(), then clean up.
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(self._path)
+            s.close()
+        except OSError:
+            pass
         try:
             os.unlink(self._path)
         except FileNotFoundError:
@@ -116,11 +123,12 @@ class HUDClient:
     def connect(self) -> None:
         """Attempt to connect to the HUD server. Silent on failure."""
         with self._lock:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 s.connect(self._path)
                 self._sock = s
-            except (FileNotFoundError, ConnectionRefusedError):
+            except Exception:
+                s.close()
                 self._sock = None
 
     def send(self, msg: dict) -> None:

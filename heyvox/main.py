@@ -1350,16 +1350,18 @@ def main() -> None:
                     # PortAudio caches the device list — create a temporary instance
                     # to discover newly connected devices (e.g. USB/Bluetooth hotplug)
                     _scan_pa = pyaudio.PyAudio()
-                    current_count = _scan_pa.get_device_count()
-                    current_names = set()
-                    for _di in range(current_count):
-                        try:
-                            _info = _scan_pa.get_device_info_by_index(_di)
-                            if _info['maxInputChannels'] > 0:
-                                current_names.add(_info['name'])
-                        except Exception:
-                            pass
-                    _scan_pa.terminate()
+                    try:
+                        current_count = _scan_pa.get_device_count()
+                        current_names = set()
+                        for _di in range(current_count):
+                            try:
+                                _info = _scan_pa.get_device_info_by_index(_di)
+                                if _info['maxInputChannels'] > 0:
+                                    current_names.add(_info['name'])
+                            except Exception:
+                                pass
+                    finally:
+                        _scan_pa.terminate()
 
                     # Check if a higher-priority device is available but not currently selected.
                     # Use tracked dev_name (not pa.get_device_info which may have stale indices).
@@ -1406,15 +1408,17 @@ def main() -> None:
                                     if requested_name.lower() in n.lower():
                                         # Get index from scan PA
                                         _scan2 = pyaudio.PyAudio()
-                                        for _di2 in range(_scan2.get_device_count()):
-                                            try:
-                                                _d2 = _scan2.get_device_info_by_index(_di2)
-                                                if _d2['name'] == n and _d2['maxInputChannels'] > 0:
-                                                    target_index = _di2
-                                                    break
-                                            except Exception:
-                                                pass
-                                        _scan2.terminate()
+                                        try:
+                                            for _di2 in range(_scan2.get_device_count()):
+                                                try:
+                                                    _d2 = _scan2.get_device_info_by_index(_di2)
+                                                    if _d2['name'] == n and _d2['maxInputChannels'] > 0:
+                                                        target_index = _di2
+                                                        break
+                                                except Exception:
+                                                    pass
+                                        finally:
+                                            _scan2.terminate()
                                         break
                                 if target_index is not None:
                                     try:

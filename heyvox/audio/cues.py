@@ -7,9 +7,12 @@ the cue sound and triggering a false wake word detection.
 """
 
 import os
+import signal
 import subprocess
 import time
 
+# Auto-reap child processes (afplay) to prevent zombie accumulation.
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
 # Module-level suppression timestamp: wake word detection is skipped until this time.
 _cue_suppress_until: float = 0.0

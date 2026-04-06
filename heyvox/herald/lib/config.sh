@@ -159,8 +159,9 @@ herald_get_label() {
     echo ""
     return
   fi
+  local ws_safe="${ws//\'/\'\'}"
   local label
-  label=$(sqlite3 "$CONDUCTOR_DB" "SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='$ws'" 2>/dev/null)
+  label=$(sqlite3 "$CONDUCTOR_DB" "SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='$ws_safe'" 2>/dev/null)
   echo "${label:-$ws}"
 }
 

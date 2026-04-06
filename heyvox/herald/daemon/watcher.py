@@ -175,17 +175,16 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
     })
 
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(KOKORO_SOCK)
-        s.sendall(req.encode())
-        s.shutdown(socket.SHUT_WR)
-        resp = b""
-        while True:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            resp += chunk
-        s.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(KOKORO_SOCK)
+            s.sendall(req.encode())
+            s.shutdown(socket.SHUT_WR)
+            resp = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
         data = json.loads(resp)
 
         if not data.get("ok"):
@@ -220,6 +219,12 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
     except Exception as e:
         log(f"Error sending to Kokoro: {e}")
         return False
+    finally:
+        # Clean up temp WAV if it was not moved to the queue
+        try:
+            os.unlink(temp_wav)
+        except FileNotFoundError:
+            pass
 
 
 def detect_mood_voice(text):

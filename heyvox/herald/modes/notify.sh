@@ -11,7 +11,7 @@ herald_is_muted && exit 0
 INPUT=$(cat)
 
 eval "$(echo "$INPUT" | python3 -c "
-import sys, json
+import sys, json, re
 data = json.load(sys.stdin)
 ntype = data.get('notification_type', '')
 message = data.get('message', '')
@@ -21,7 +21,10 @@ dangerous_patterns = ['rm -rf', 'rm -r', 'git reset --hard', 'git push --force',
     'pkill', 'kill -9', 'shutdown', 'reboot']
 is_dangerous = any(p in message.lower() for p in dangerous_patterns)
 
-print(f'NOTIFY_TYPE=\"{ntype}\"')
+# Sanitize ntype for safe shell assignment: allow only alphanumeric, underscore, hyphen
+safe_ntype = re.sub(r'[^a-zA-Z0-9_-]', '', ntype)
+
+print(f'NOTIFY_TYPE=\"{safe_ntype}\"')
 print(f'IS_DANGEROUS={\"true\" if is_dangerous else \"false\"}')
 " 2>/dev/null)"
 
