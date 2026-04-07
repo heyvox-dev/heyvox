@@ -90,10 +90,10 @@ if not samples:
 rms = math.sqrt(sum(s*s for s in samples) / len(samples))
 if rms < 50:
     sys.exit(0)
-target_rms = 8000
+target_rms = 3000
 scale = target_rms / rms if rms > 0 else 1.0
-scale = min(scale, 8.0)
-peak_limit = 30000
+scale = min(scale, 3.0)
+peak_limit = 24000
 scaled = [s * scale for s in samples]
 out = []
 for s in scaled:
