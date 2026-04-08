@@ -84,7 +84,6 @@ def _cmd_status(args):
     print(f"  Queue:      {len(queue_files)} queued, {len(hold_files)} held")
 
     # Daemons
-    import os
     def _pid_alive(pidfile):
         try:
             with open(pidfile) as _f:
