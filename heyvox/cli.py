@@ -434,9 +434,16 @@ def _cmd_register(args):
 
 
 def main():
+    from heyvox import __version__
+
     parser = argparse.ArgumentParser(
         prog="heyvox",
         description="HeyVox — voice layer for AI coding agents",
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"heyvox {__version__}",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
 

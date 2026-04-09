@@ -55,6 +55,14 @@ if [ -z "${KOKORO_DAEMON_PYTHON:-}" ]; then
 fi
 KOKORO_IDLE_TIMEOUT="${KOKORO_IDLE_TIMEOUT:-300}"
 
+# Piper TTS — lightweight alternative engine (CPU only, ~80MB RAM)
+PIPER_CLI="${PIPER_CLI:-$(command -v piper 2>/dev/null || echo "$HOME/.local/bin/piper")}"
+PIPER_VOICES_DIR="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
+PIPER_DE_MODEL="${PIPER_DE_MODEL:-$PIPER_VOICES_DIR/de/thorsten-high.onnx}"
+PIPER_EN_MODEL="${PIPER_EN_MODEL:-$PIPER_VOICES_DIR/en/en_US-lessac-high.onnx}"
+# Default Piper English voice — used when engine=piper and language is English
+PIPER_EN_VOICE="${PIPER_EN_VOICE:-en_US-lessac-high}"
+
 # Conductor integration (optional — works without Conductor)
 CONDUCTOR_DB="${CONDUCTOR_DB:-$HOME/Library/Application Support/com.conductor.app/conductor.db}"
 CONDUCTOR_SWITCH="${CONDUCTOR_SWITCH:-$(command -v conductor-switch-workspace 2>/dev/null || echo "$HOME/.local/bin/conductor-switch-workspace")}"
@@ -150,6 +158,14 @@ herald_conductor_is_frontmost() {
   local frontmost
   frontmost=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
   [ "$frontmost" = "Conductor" ]
+}
+
+# Get the user's most recently active workspace from the Conductor DB.
+# Uses updated_at as a heuristic — the most recently touched workspace is
+# likely the one the user is interacting with.
+herald_get_user_workspace() {
+  sqlite3 "$CONDUCTOR_DB" \
+    "SELECT directory_name FROM workspaces WHERE state='ready' ORDER BY updated_at DESC LIMIT 1" 2>/dev/null
 }
 
 # Get TTS label from Conductor DB

@@ -4,8 +4,9 @@ Train a custom openwakeword model for "Hey Vox".
 Usage:
     python training/train_model.py \
         --positive-dir training/recordings/ training/synthetic/ \
+        --negative-dir training/negatives/ \
         --output models/hey_vox.onnx \
-        --epochs 50
+        --epochs 200 --false-weight 3.0
 
 This script:
 1. Loads positive samples (wake word clips) from one or more directories
@@ -84,140 +85,154 @@ def generate_negative_samples(count: int, clip_length: int = SAMPLE_RATE * 2) ->
     return negatives
 
 
+N_WINDOW_FRAMES = 16  # openwakeword uses 16 consecutive embedding frames as input
+
+
 def extract_embeddings(clips: list[np.ndarray]) -> np.ndarray:
-    """Extract openwakeword-compatible embeddings from audio clips.
+    """Extract openwakeword-compatible embedding windows from audio clips.
 
-    Uses the same preprocessing pipeline as openwakeword:
-    1. Compute mel spectrogram
-    2. Pass through Google's speech embedding model
+    Uses openwakeword's own AudioFeatures class to ensure the mel spectrogram
+    → embedding pipeline matches exactly what the inference engine expects.
 
-    Returns array of shape (N, embedding_dim).
+    Each clip produces one or more sliding windows of N_WINDOW_FRAMES consecutive
+    96-dim embedding vectors. This matches the [1, 16, 96] input shape that
+    openwakeword's built-in models use at inference time.
+
+    Returns array of shape (N, 16, 96) where N is total windows across all clips.
     """
     try:
-        import onnxruntime as ort
-    except ImportError:
-        print("ERROR: onnxruntime required. Install with: pip install onnxruntime")
-        sys.exit(1)
-
-    # openwakeword bundles the embedding model; we need to find it
-    try:
-        import openwakeword
-        oww_dir = Path(openwakeword.__file__).parent
-        # Look for the embedding model
-        embedding_model_path = None
-        for name in ["embedding_model.onnx", "melspectrogram.onnx"]:
-            candidate = oww_dir / "resources" / name
-            if candidate.exists():
-                embedding_model_path = str(candidate)
-                break
-
-        if embedding_model_path is None:
-            # Try to find via openwakeword's model utils
-            from openwakeword.utils import download_models
-            download_models()
-            for name in ["embedding_model.onnx"]:
-                candidate = oww_dir / "resources" / name
-                if candidate.exists():
-                    embedding_model_path = str(candidate)
-                    break
+        from openwakeword.utils import AudioFeatures
     except ImportError:
         print("ERROR: openwakeword required. Install with: pip install openwakeword")
         sys.exit(1)
 
-    if embedding_model_path is None:
-        print("ERROR: Could not find openwakeword embedding model")
-        sys.exit(1)
+    audio_features = AudioFeatures(inference_framework="onnx")
+    print("Using openwakeword AudioFeatures for embedding extraction")
+    print(f"  Window size: {N_WINDOW_FRAMES} frames of 96-dim embeddings → input shape [1, {N_WINDOW_FRAMES}, 96]")
 
-    print(f"Using embedding model: {embedding_model_path}")
-
-    # Load melspectrogram model
-    melspec_path = oww_dir / "resources" / "melspectrogram.onnx"
-    if not melspec_path.exists():
-        print("ERROR: melspectrogram.onnx not found in openwakeword resources")
-        sys.exit(1)
-
-    mel_session = ort.InferenceSession(str(melspec_path))
-    emb_session = ort.InferenceSession(embedding_model_path)
-
-    embeddings = []
+    all_windows = []
     for i, clip in enumerate(clips):
-        # Pad/truncate to 2 seconds
+        # Pad to at least 2 seconds so we get enough embedding frames
         target_len = SAMPLE_RATE * 2
         if len(clip) < target_len:
             clip = np.pad(clip, (0, target_len - len(clip)))
         else:
             clip = clip[:target_len]
 
-        # Process through mel spectrogram
-        mel_input = clip.reshape(1, -1).astype(np.float32)
-        mel_out = mel_session.run(None, {mel_session.get_inputs()[0].name: mel_input})[0]
+        clip_int16 = (clip * 32767).astype(np.int16)
 
-        # Process through embedding model
-        emb_out = emb_session.run(None, {emb_session.get_inputs()[0].name: mel_out})[0]
-        embeddings.append(emb_out.flatten())
+        # Extract frame-level embeddings: shape (n_frames, 96)
+        emb = audio_features._get_embeddings(clip_int16)
+
+        # Create sliding windows of N_WINDOW_FRAMES consecutive frames
+        n_frames = emb.shape[0]
+        if n_frames >= N_WINDOW_FRAMES:
+            for start in range(n_frames - N_WINDOW_FRAMES + 1):
+                window = emb[start:start + N_WINDOW_FRAMES]  # (16, 96)
+                all_windows.append(window)
+        else:
+            # Pad if too few frames (shouldn't happen with 2s clips)
+            padded = np.zeros((N_WINDOW_FRAMES, 96), dtype=np.float32)
+            padded[:n_frames] = emb
+            all_windows.append(padded)
 
         if (i + 1) % 100 == 0:
             print(f"  Extracted embeddings: {i + 1}/{len(clips)}")
 
-    return np.array(embeddings, dtype=np.float32)
+    result = np.array(all_windows, dtype=np.float32)
+    print(f"  Total windows: {len(result)} from {len(clips)} clips")
+    return result
 
 
 def train_classifier(
-    pos_embeddings: np.ndarray,
-    neg_embeddings: np.ndarray,
-    epochs: int = 50,
+    pos_windows: np.ndarray,
+    neg_windows: np.ndarray,
+    epochs: int = 200,
     lr: float = 0.001,
+    false_weight: float = 3.0,
+    early_stopping_patience: int = 20,
 ) -> tuple:
-    """Train a simple MLP classifier on embeddings.
+    """Train a simple MLP classifier on embedding windows.
+
+    Input windows have shape (N, 16, 96) — matching openwakeword's inference
+    format. The model flattens each window to (16*96=1536) before the MLP.
+
+    Args:
+        pos_windows: Positive sample embedding windows, shape (N, 16, 96).
+        neg_windows: Negative sample embedding windows, shape (M, 16, 96).
+        epochs: Maximum training epochs.
+        lr: Learning rate.
+        false_weight: Extra weight on false positive loss.
+        early_stopping_patience: Stop if val_loss doesn't improve.
 
     Returns (weights, biases) for a 2-layer MLP that can be exported to ONNX.
     """
-    # Simple 2-layer MLP: embedding_dim -> 64 -> 1
-    emb_dim = pos_embeddings.shape[1]
+    # Flatten windows: (N, 16, 96) → (N, 1536)
+    flat_dim = pos_windows.shape[1] * pos_windows.shape[2]  # 16 * 96 = 1536
+    pos_flat = pos_windows.reshape(len(pos_windows), flat_dim)
+    neg_flat = neg_windows.reshape(len(neg_windows), flat_dim)
 
-    # Prepare dataset
-    X = np.vstack([pos_embeddings, neg_embeddings])
+    X = np.vstack([pos_flat, neg_flat])
     y = np.concatenate([
-        np.ones(len(pos_embeddings)),
-        np.zeros(len(neg_embeddings)),
+        np.ones(len(pos_flat)),
+        np.zeros(len(neg_flat)),
     ])
 
-    # Shuffle
-    idx = np.random.permutation(len(X))
-    X, y = X[idx], y[idx]
+    sample_weights = np.ones(len(y), dtype=np.float32)
+    sample_weights[y == 0] = false_weight
 
-    # Split train/val (90/10)
+    idx = np.random.permutation(len(X))
+    X, y, sample_weights = X[idx], y[idx], sample_weights[idx]
+
     split = int(0.9 * len(X))
     X_train, X_val = X[:split], X[split:]
     y_train, y_val = y[:split], y[split:]
+    w_train = sample_weights[:split]
 
-    # Initialize weights (Xavier)
     hidden_size = 64
-    W1 = np.random.randn(emb_dim, hidden_size).astype(np.float32) * np.sqrt(2.0 / emb_dim)
+    W1 = np.random.randn(flat_dim, hidden_size).astype(np.float32) * np.sqrt(2.0 / flat_dim)
     b1 = np.zeros(hidden_size, dtype=np.float32)
     W2 = np.random.randn(hidden_size, 1).astype(np.float32) * np.sqrt(2.0 / hidden_size)
     b2 = np.zeros(1, dtype=np.float32)
 
     def forward(X_batch):
-        h = np.maximum(0, X_batch @ W1 + b1)  # ReLU
+        h = np.maximum(0, X_batch @ W1 + b1)
         logits = h @ W2 + b2
-        return 1.0 / (1.0 + np.exp(-np.clip(logits.flatten(), -500, 500)))  # Sigmoid
+        return 1.0 / (1.0 + np.exp(-np.clip(logits.flatten(), -500, 500)))
+
+    def weighted_bce(probs, labels, weights):
+        eps = 1e-7
+        probs = np.clip(probs, eps, 1 - eps)
+        per_sample = -(labels * np.log(probs) + (1 - labels) * np.log(1 - probs))
+        return np.mean(per_sample * weights)
 
     def binary_cross_entropy(probs, labels):
         eps = 1e-7
         probs = np.clip(probs, eps, 1 - eps)
         return -np.mean(labels * np.log(probs) + (1 - labels) * np.log(1 - probs))
 
-    print(f"\nTraining classifier: {emb_dim} -> {hidden_size} -> 1")
-    print(f"  Positive: {len(pos_embeddings)}, Negative: {len(neg_embeddings)}")
-    print(f"  Train: {len(X_train)}, Val: {len(X_val)}")
+    def compute_fpr(probs, labels):
+        neg_mask = labels == 0
+        if neg_mask.sum() == 0:
+            return 0.0
+        fp = np.sum((probs[neg_mask] > 0.5).astype(float))
+        return float(fp / neg_mask.sum())
+
+    n_val_pos = int(y_val.sum())
+    n_val_neg = int(len(y_val) - n_val_pos)
+
+    print(f"\nTraining classifier: flatten({N_WINDOW_FRAMES}x96={flat_dim}) -> {hidden_size} -> 1")
+    print(f"  Positive windows: {len(pos_flat)}, Negative windows: {len(neg_flat)}")
+    print(f"  Train: {len(X_train)}, Val: {len(X_val)} ({n_val_pos} pos, {n_val_neg} neg)")
+    print(f"  False-positive loss weight: {false_weight}x")
+    print(f"  Early stopping patience: {early_stopping_patience} epochs")
 
     best_val_loss = float("inf")
     best_weights = None
-    batch_size = 32
+    patience_counter = 0
+    batch_size = 64
 
     for epoch in range(epochs):
-        # Mini-batch SGD
         perm = np.random.permutation(len(X_train))
         epoch_loss = 0
         n_batches = 0
@@ -227,62 +242,85 @@ def train_classifier(
             batch_idx = perm[start:end]
             X_b = X_train[batch_idx]
             y_b = y_train[batch_idx]
+            w_b = w_train[batch_idx]
 
-            # Forward
             h = np.maximum(0, X_b @ W1 + b1)
             logits = h @ W2 + b2
             probs = 1.0 / (1.0 + np.exp(-np.clip(logits.flatten(), -500, 500)))
 
-            # Backward
-            dlogits = (probs - y_b).reshape(-1, 1) / len(y_b)
+            grad_scale = w_b / len(y_b)
+            dlogits = ((probs - y_b) * grad_scale).reshape(-1, 1)
             dW2 = h.T @ dlogits
             db2 = dlogits.sum(axis=0)
             dh = dlogits @ W2.T
-            dh[h <= 0] = 0  # ReLU gradient
+            dh[h <= 0] = 0
             dW1 = X_b.T @ dh
             db1 = dh.sum(axis=0)
 
-            # Update
             W1 -= lr * dW1
             b1 -= lr * db1
             W2 -= lr * dW2
             b2 -= lr * db2
 
-            epoch_loss += binary_cross_entropy(probs, y_b)
+            epoch_loss += weighted_bce(probs, y_b, w_b)
             n_batches += 1
 
-        # Validation
         val_probs = forward(X_val)
         val_loss = binary_cross_entropy(val_probs, y_val)
         val_acc = np.mean((val_probs > 0.5) == y_val)
+        val_fpr = compute_fpr(val_probs, y_val)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_weights = (W1.copy(), b1.copy(), W2.copy(), b2.copy())
+            patience_counter = 0
+        else:
+            patience_counter += 1
 
         if (epoch + 1) % 10 == 0:
             print(f"  Epoch {epoch + 1}/{epochs}: "
                   f"train_loss={epoch_loss / n_batches:.4f}, "
-                  f"val_loss={val_loss:.4f}, val_acc={val_acc:.3f}")
+                  f"val_loss={val_loss:.4f}, val_acc={val_acc:.3f}, "
+                  f"val_FPR={val_fpr:.4f}")
+
+        if patience_counter >= early_stopping_patience:
+            print(f"\n  Early stopping at epoch {epoch + 1} "
+                  f"(no improvement for {early_stopping_patience} epochs)")
+            break
+
+    W1, b1, W2, b2 = best_weights
+    val_probs = forward(X_val)
+    final_fpr = compute_fpr(val_probs, y_val)
+    final_acc = np.mean((val_probs > 0.5) == y_val)
+    print(f"\n  Best model — val_acc={final_acc:.3f}, val_FPR={final_fpr:.4f}")
 
     return best_weights
 
 
-def export_onnx(weights: tuple, emb_dim: int, output_path: str) -> None:
-    """Export trained classifier as ONNX model."""
+def export_onnx(weights: tuple, output_path: str) -> None:
+    """Export trained classifier as ONNX model with [1, 16, 96] input.
+
+    openwakeword expects models with input shape [1, N_frames, 96] where
+    N_frames is the number of consecutive embedding frames. The model
+    flattens the input internally before the MLP layers.
+    """
     try:
         import onnx
-        from onnx import TensorProto, helper
+        from onnx import TensorProto, helper, numpy_helper
     except ImportError:
         print("ERROR: onnx package required for export. Install with: pip install onnx")
         sys.exit(1)
 
     W1, b1, W2, b2 = weights
     hidden_size = W1.shape[1]
+    flat_dim = N_WINDOW_FRAMES * 96  # 1536
 
-    # Build ONNX graph
-    X = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, emb_dim])
+    # Input: [1, 16, 96] — openwakeword's standard format
+    X = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, N_WINDOW_FRAMES, 96])
     Y = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1])
+
+    # Reshape target: [1, 1536]
+    reshape_shape = helper.make_tensor("reshape_shape", TensorProto.INT64, [2], [1, flat_dim])
 
     w1_init = helper.make_tensor("W1", TensorProto.FLOAT, W1.shape, W1.flatten().tolist())
     b1_init = helper.make_tensor("b1", TensorProto.FLOAT, [1, hidden_size], b1.tolist())
@@ -290,7 +328,9 @@ def export_onnx(weights: tuple, emb_dim: int, output_path: str) -> None:
     b2_init = helper.make_tensor("b2", TensorProto.FLOAT, [1, 1], b2.tolist())
 
     nodes = [
-        helper.make_node("MatMul", ["input", "W1"], ["mm1"]),
+        # Flatten [1, 16, 96] → [1, 1536]
+        helper.make_node("Reshape", ["input", "reshape_shape"], ["flat"]),
+        helper.make_node("MatMul", ["flat", "W1"], ["mm1"]),
         helper.make_node("Add", ["mm1", "b1"], ["h1"]),
         helper.make_node("Relu", ["h1"], ["relu1"]),
         helper.make_node("MatMul", ["relu1", "W2"], ["mm2"]),
@@ -303,7 +343,7 @@ def export_onnx(weights: tuple, emb_dim: int, output_path: str) -> None:
         "hey_vox_detector",
         [X],
         [Y],
-        initializer=[w1_init, b1_init, w2_init, b2_init],
+        initializer=[reshape_shape, w1_init, b1_init, w2_init, b2_init],
     )
 
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
@@ -316,10 +356,15 @@ def export_onnx(weights: tuple, emb_dim: int, output_path: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Train custom wake word model")
     parser.add_argument("--positive-dir", nargs="+", required=True, help="Directories with positive samples")
-    parser.add_argument("--negative-dir", nargs="*", help="Directories with negative samples (optional)")
+    parser.add_argument("--negative-dir", nargs="*", help="Directories with real negative samples")
     parser.add_argument("--output", default="models/hey_vox.onnx", help="Output ONNX model path")
-    parser.add_argument("--epochs", type=int, default=50, help="Training epochs")
-    parser.add_argument("--negative-ratio", type=float, default=3.0, help="Ratio of negative to positive samples")
+    parser.add_argument("--epochs", type=int, default=200, help="Training epochs (default: 200)")
+    parser.add_argument("--negative-ratio", type=float, default=10.0,
+                        help="Ratio of negative to positive samples (default: 10.0)")
+    parser.add_argument("--false-weight", type=float, default=3.0,
+                        help="Extra weight on false positive loss (default: 3.0)")
+    parser.add_argument("--patience", type=int, default=20,
+                        help="Early stopping patience in epochs (default: 20)")
     args = parser.parse_args()
 
     output_path = Path(args.output)
@@ -348,17 +393,22 @@ def main():
         neg_clips = generate_negative_samples(neg_count)
     print(f"  Using {len(neg_clips)} negative clips")
 
-    # Extract embeddings
-    print("\nExtracting embeddings (this may take a while)...")
-    pos_emb = extract_embeddings(pos_clips)
-    neg_emb = extract_embeddings(neg_clips)
-    print(f"  Embedding shape: {pos_emb.shape[1]}")
+    # Extract embedding windows (shape: N, 16, 96)
+    print("\nExtracting embedding windows (this may take a while)...")
+    pos_windows = extract_embeddings(pos_clips)
+    neg_windows = extract_embeddings(neg_clips)
+    print(f"  Window shape: {pos_windows.shape[1:]} (frames x embedding_dim)")
 
     # Train classifier
-    weights = train_classifier(pos_emb, neg_emb, epochs=args.epochs)
+    weights = train_classifier(
+        pos_windows, neg_windows,
+        epochs=args.epochs,
+        false_weight=args.false_weight,
+        early_stopping_patience=args.patience,
+    )
 
     # Export ONNX
-    export_onnx(weights, pos_emb.shape[1], str(output_path))
+    export_onnx(weights, str(output_path))
 
     # Summary
     print(f"\nTraining complete!")

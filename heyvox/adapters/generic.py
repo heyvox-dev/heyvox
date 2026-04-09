@@ -1,29 +1,20 @@
 """
-Generic AgentAdapter — pastes into whichever app is currently focused, with
-optional app-focusing for pinned-app mode.
+Generic AgentAdapter — controls auto-send behavior for generic/pinned-app mode.
 
-This adapter handles two modes:
-- No target_app (always-focused): paste into whatever is focused. No auto-send.
-- With target_app (pinned-app): focus the given app before pasting. Auto-send.
-
-The user is responsible for having the target agent's input field focused when
-target_app is not set.
+Two modes:
+- No target_app (always-focused): no auto-send, user presses Enter manually.
+- With target_app (pinned-app): auto-send after pasting.
 
 Requirement: INPT-03
 """
 
-import time
-
-from heyvox.input.injection import type_text
-
 
 class GenericAdapter:
-    """Paste transcription into the focused or a specified application.
+    """Controls auto-send behavior for generic injection.
 
     Args:
-        target_app: If set, focus this app before pasting (pinned-app mode).
-            Empty string = always paste into currently focused app.
-        enter_count: Number of Enter keypresses after pasting (for auto-send).
+        target_app: If set, enables auto-send (pinned-app mode).
+        enter_count: Number of Enter keypresses for auto-send.
     """
 
     def __init__(self, target_app: str = "", enter_count: int = 2) -> None:
@@ -34,25 +25,6 @@ class GenericAdapter:
     def enter_count(self) -> int:
         return self._enter_count
 
-    def inject_text(self, text: str) -> None:
-        """Paste text into the focused app (or focused target_app) via clipboard + Cmd-V.
-
-        If target_app is set, focuses that application first, then pastes.
-
-        Args:
-            text: Transcribed text to inject.
-        """
-        if self._target_app:
-            from heyvox.input.injection import focus_app
-            focus_app(self._target_app)
-            time.sleep(0.3)
-        type_text(text)
-
     def should_auto_send(self) -> bool:
-        """Return True if a target app is pinned (AI agent use case).
-
-        Returns:
-            True when target_app is set (pinned-app mode) — user expects Enter
-            to be pressed. False when always-focused — user sends manually.
-        """
+        """Return True if a target app is pinned (AI agent use case)."""
         return bool(self._target_app)

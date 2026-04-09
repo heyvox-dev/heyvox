@@ -562,6 +562,16 @@ def _make_menu_action_class():
                 except Exception:
                     pass
 
+        def switchOutput_(self, sender):
+            """Switch macOS system default output device via CoreAudio."""
+            device_id = sender.representedObject()
+            if device_id is not None:
+                try:
+                    from heyvox.audio.output import set_default_output_device
+                    set_default_output_device(device_id)
+                except Exception:
+                    pass
+
         def openLog_(self, sender):
             import subprocess
             try:
@@ -768,6 +778,39 @@ def _build_transcript_menu(handler):
 
     mic_parent.setSubmenu_(mic_sub)
     menu.addItem_(mic_parent)
+
+    # ── Section 1b: Speaker / Output device (system default switch) ──
+    try:
+        from heyvox.audio.output import list_output_devices, friendly_output_name
+        _output_devices = list_output_devices()
+    except Exception:
+        _output_devices = []
+
+    if _output_devices:
+        _active_output = next((d for d in _output_devices if d.is_default), None)
+        _output_short = friendly_output_name(_active_output.name) if _active_output else "System Default"
+
+        output_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"\U0001f50a Speaker: {_output_short}", None, "",
+        )
+        _styled(output_parent)
+        output_sub = NSMenu.alloc().init()
+        output_sub.setAutoenablesItems_(False)
+
+        for _out_dev in _output_devices:
+            _out_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                friendly_output_name(_out_dev.name), "switchOutput:", "",
+            )
+            _out_item.setTarget_(handler)
+            _out_item.setRepresentedObject_(_out_dev.device_id)
+            _out_item.setEnabled_(not _out_dev.is_default)
+            if _out_dev.is_default:
+                _out_item.setState_(1)
+            _styled(_out_item)
+            output_sub.addItem_(_out_item)
+
+        output_parent.setSubmenu_(output_sub)
+        menu.addItem_(output_parent)
 
     # ── Section 2: Voice Output (verbosity + style in one submenu) ──
     from heyvox.audio.tts import get_tts_style

@@ -207,6 +207,76 @@
   // Message listener
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Text injection
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Inserts text into the currently focused element using execCommand or
+   * InputEvent fallback. Works with contentEditable, textarea, and input fields.
+   * @param {string} text - Text to insert
+   * @returns {boolean} True if text was inserted successfully
+   */
+  function insertText(text) {
+    const el = document.activeElement;
+    if (!el) return false;
+
+    // For input/textarea elements
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      // execCommand preserves undo stack
+      el.focus();
+      if (document.execCommand('insertText', false, text)) {
+        return true;
+      }
+      // Fallback: direct value manipulation + InputEvent
+      el.value = el.value.slice(0, start) + text + el.value.slice(end);
+      el.selectionStart = el.selectionEnd = start + text.length;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      return true;
+    }
+
+    // For contentEditable elements (Electron apps, rich text editors)
+    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
+      el.focus();
+      if (document.execCommand('insertText', false, text)) {
+        return true;
+      }
+      // Fallback: InputEvent
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Simulates pressing Enter by dispatching keyboard events on the focused element.
+   * @param {number} count - Number of Enter presses
+   * @returns {boolean} True if events were dispatched
+   */
+  function pressEnter(count) {
+    const el = document.activeElement;
+    if (!el) return false;
+
+    for (let i = 0; i < count; i++) {
+      // Dispatch full keyboard event sequence
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      // For input/textarea, also insert newline via execCommand
+      if (el.tagName === 'TEXTAREA') {
+        document.execCommand('insertLineBreak', false);
+      }
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Message listener
+  // ---------------------------------------------------------------------------
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.action !== 'string') return false;
 
@@ -226,6 +296,18 @@
         const fade = message.fadeInMs || 0;
         const resumed = resumeAllMedia(rewind, fade);
         sendResponse(resumed);
+        return false;
+      }
+
+      case 'type-text': {
+        const ok = insertText(message.text || '');
+        sendResponse(ok);
+        return false;
+      }
+
+      case 'press-enter': {
+        const ok = pressEnter(message.count || 1);
+        sendResponse(ok);
         return false;
       }
 

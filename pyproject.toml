@@ -2,7 +2,7 @@
 name = "heyvox"
 version = "0.1.0"
 description = "macOS voice layer for AI coding agents — wake word, STT, TTS, HUD, media control"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.12"
 readme = "README.md"
 authors = [
@@ -76,6 +76,8 @@ include = ["heyvox*"]
 [tool.setuptools.package-data]
 heyvox = [
     "cues/*.wav", "cues/*.mp3", "cues/*.aiff",
+    # Wake word models (custom .onnx, e.g. hey_vox)
+    "models/*.onnx",
     # Herald — TTS orchestration (bash scripts + Python daemon)
     "herald/bin/*",
     "herald/lib/*.sh",

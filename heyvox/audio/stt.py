@@ -54,7 +54,12 @@ def _load_mlx_model() -> None:
     with _mlx_lock:
         if _mlx_loaded.is_set():
             return  # Another thread loaded while we waited
-        import mlx_whisper
+        try:
+            import mlx_whisper
+        except ImportError:
+            _log("ERROR: mlx-whisper is not installed. Install with: pip install 'heyvox[apple-silicon]'")
+            _log("MLX Whisper requires Apple Silicon. Use engine: sherpa for Intel Macs.")
+            return
         _log(f"Loading MLX whisper model ({_mlx_model_id})...")
         t0 = time.perf_counter()
         dummy = np.zeros(16000, dtype=np.float32)
@@ -77,8 +82,11 @@ def _unload_mlx_model() -> None:
             # Not idle long enough — reschedule
             _schedule_unload()
             return
-        import mlx.core as mx
-        mx.metal.clear_cache()
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()
+        except ImportError:
+            pass
         # Force Python to release the module's cached model
         import mlx_whisper
         # Clear any cached state in mlx_whisper
@@ -141,7 +149,12 @@ def init_local_stt(
         _mlx_language = language
         _log(f"Local STT configured (MLX Metal GPU, lazy load, lang={'auto' if not language else language})")
     else:
-        import sherpa_onnx
+        try:
+            import sherpa_onnx
+        except ImportError:
+            _log("ERROR: sherpa-onnx is not installed. Install with: pip install sherpa-onnx>=1.0")
+            _log("This is required for STT on Intel Macs (or as fallback on Apple Silicon).")
+            sys.exit(1)
 
         encoder = os.path.join(model_dir, "small-encoder.int8.onnx")
         decoder = os.path.join(model_dir, "small-decoder.int8.onnx")
@@ -206,7 +219,11 @@ def transcribe_audio(
             _log("ERROR: MLX model failed to load within timeout")
             return ""
 
-        import mlx_whisper
+        try:
+            import mlx_whisper
+        except ImportError:
+            _log("ERROR: mlx-whisper is not installed. Install with: pip install 'heyvox[apple-silicon]'")
+            return ""
         kwargs = dict(path_or_hf_repo=_mlx_model_id or mlx_model)
         if _mlx_language or language:
             kwargs["language"] = _mlx_language or language

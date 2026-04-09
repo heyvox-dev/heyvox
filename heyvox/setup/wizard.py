@@ -2,14 +2,16 @@
 Interactive setup wizard for heyvox.
 
 Guides the user through:
-  1. Welcome banner
+  1. Welcome banner + system deps
   2. Permission checks (Accessibility, Microphone, Screen Recording)
   3. Kokoro model download
   4. Microphone level test
   5. Config file initialization
   6. launchd service installation
-  7. MCP auto-approve (writes to ~/.claude/settings.json)
-  8. Setup summary
+  7. Herald TTS hooks
+  8. Hush Chrome extension (browser media control)
+  9. MCP server registration
+  10. Setup summary
 
 All heavy imports (rich, huggingface_hub, pyaudio) are deferred to inside
 run_setup() to avoid load-time cost and import errors in non-setup contexts.
@@ -391,9 +393,91 @@ def run_setup(config) -> None:
     console.print()
 
     # ---------------------------------------------------------------------------
-    # Step 8: Register MCP server with AI coding agents
+    # Step 8: Hush Chrome extension (browser media control)
     # ---------------------------------------------------------------------------
-    console.print("[bold]Step 8: MCP Server Registration[/bold]")
+    console.print("[bold]Step 8: Hush Chrome Extension[/bold]")
+    console.print("  Hush pauses/resumes browser media during recording and TTS playback.")
+    console.print("  [dim]Optional — skip if you don't use browser audio (YouTube, Spotify web, etc.)[/dim]")
+    console.print()
+
+    hush_installed = False
+    install_hush = console.input(
+        "  Install Hush Chrome extension? [y/N] "
+    ).strip().lower()
+
+    if install_hush == "y":
+        import subprocess as _sp
+
+        # Locate the extension and host directories within the heyvox package
+        from heyvox.hush import HUSH_EXTENSION, HUSH_HOME
+
+        ext_dir = HUSH_EXTENSION
+        host_script = str(Path(HUSH_HOME) / "host" / "hush_host.py")
+        manifest_src = str(Path(HUSH_HOME) / "host" / "com.hush.bridge.json")
+
+        if not Path(ext_dir).exists():
+            console.print(f"  [red]✗[/red] Extension directory not found: {ext_dir}")
+        elif not Path(host_script).exists():
+            console.print(f"  [red]✗[/red] Native host not found: {host_script}")
+        else:
+            # Step 8a: Prompt user to side-load the extension
+            console.print()
+            console.print("  [bold]Load the extension in Chrome:[/bold]")
+            console.print(f"    1. Open Chrome → [cyan]chrome://extensions[/cyan]")
+            console.print(f"    2. Enable [bold]Developer mode[/bold] (top-right toggle)")
+            console.print(f"    3. Click [bold]Load unpacked[/bold] → select:")
+            console.print(f"       [dim]{ext_dir}[/dim]")
+            console.print(f"    4. Copy the [bold]Extension ID[/bold] (32 lowercase letters)")
+            console.print()
+
+            ext_id = ""
+            for attempt in range(3):
+                raw = console.input("  Paste Extension ID: ").strip().replace(" ", "")
+                if len(raw) == 32 and raw.isalpha() and raw.islower():
+                    ext_id = raw
+                    break
+                console.print("  [yellow]![/yellow] Extension IDs are exactly 32 lowercase letters. Try again.")
+
+            if ext_id:
+                # Step 8b: Install native messaging host
+                import json as _json
+
+                nmh_dir = Path.home() / "Library" / "Application Support" / "Google" / "Chrome" / "NativeMessagingHosts"
+                nmh_dir.mkdir(parents=True, exist_ok=True)
+
+                # Build manifest with correct paths
+                manifest = {
+                    "name": "com.hush.bridge",
+                    "description": "Hush native messaging host for media control",
+                    "path": host_script,
+                    "type": "stdio",
+                    "allowed_origins": [f"chrome-extension://{ext_id}/"],
+                }
+
+                manifest_dst = nmh_dir / "com.hush.bridge.json"
+                with open(manifest_dst, "w") as f:
+                    _json.dump(manifest, f, indent=2)
+                    f.write("\n")
+
+                # Make host script executable
+                Path(host_script).chmod(0o755)
+
+                console.print(f"  [green]✓[/green] Native messaging host installed: {manifest_dst}")
+                console.print("  [dim]Reload the extension in Chrome to activate.[/dim]")
+                hush_installed = True
+            else:
+                console.print("  [yellow]![/yellow] Skipped — could not get a valid Extension ID.")
+                console.print("  [dim]Run the manual install later: bash heyvox/hush/scripts/install.sh[/dim]")
+    else:
+        console.print("  [dim]Skipped — browser media won't pause during recording/TTS.[/dim]")
+        console.print("  [dim]Install later: heyvox setup (or bash heyvox/hush/scripts/install.sh)[/dim]")
+
+    console.print()
+
+    # ---------------------------------------------------------------------------
+    # Step 9: Register MCP server with AI coding agents
+    # ---------------------------------------------------------------------------
+    console.print("[bold]Step 9: MCP Server Registration[/bold]")
     console.print("  Vox exposes voice tools to AI agents via MCP (Model Context Protocol).")
     console.print()
 
@@ -433,9 +517,9 @@ def run_setup(config) -> None:
     console.print()
 
     # ---------------------------------------------------------------------------
-    # Step 9: Summary
+    # Step 10: Summary
     # ---------------------------------------------------------------------------
-    console.print("[bold]Step 9: Setup Summary[/bold]")
+    console.print("[bold]Step 10: Setup Summary[/bold]")
     console.print()
 
     summary_table = Table(show_header=False, box=None, padding=(0, 2))
@@ -467,6 +551,10 @@ def run_setup(config) -> None:
     summary_table.add_row(
         "[green]✓[/green]" if herald_hooks_installed else "[dim]-[/dim]",
         "Herald TTS hooks installed",
+    )
+    summary_table.add_row(
+        "[green]✓[/green]" if hush_installed else "[dim]-[/dim]",
+        "Hush Chrome extension (browser media pause)",
     )
     if agents_registered:
         summary_table.add_row(
