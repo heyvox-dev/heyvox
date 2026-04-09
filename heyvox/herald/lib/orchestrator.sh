@@ -17,7 +17,10 @@ herald_ensure_dirs
 
 ORIGINAL_VOL=""
 ORIGINAL_VOL_FILE="/tmp/herald-original-vol"
-CURRENT_WORKSPACE=""
+# Track the USER's active workspace — NOT the workspace TTS messages come from.
+# Seeded from Conductor DB on startup, updated only when we actually switch.
+CURRENT_WORKSPACE="$(herald_get_user_workspace)"
+herald_log "ORCH: seeded CURRENT_WORKSPACE=$CURRENT_WORKSPACE from DB"
 
 # Singleton enforcement: only one orchestrator allowed
 # Belt: check all running orchestrator processes via pgrep
@@ -175,19 +178,24 @@ play_wav() {
     # FIX: Switch workspace ONLY if Conductor is the frontmost app
     if [ -f "$workspace_file" ]; then
       local ws=$(cat "$workspace_file")
-      CURRENT_WORKSPACE="$ws"
       if herald_conductor_is_frontmost; then
+        CURRENT_WORKSPACE="$ws"  # Only track as user's workspace when we switch
         "$CONDUCTOR_SWITCH" "$ws" >> "$HERALD_DEBUG_LOG" 2>&1
         sleep 0.3
       else
         herald_log "ORCH: skipping workspace switch (Conductor not frontmost)"
+        # Don't update CURRENT_WORKSPACE — user isn't looking at this workspace
       fi
       rm -f "$workspace_file"
     fi
 
     if [ "$HERALD_MEDIA_PAUSE" = "true" ] && [ -x "${HERALD_HOME}/lib/media.sh" ]; then
       "${HERALD_HOME}/lib/media.sh" pause
-      herald_log "ORCH: media PAUSED"
+      if [ -f "/tmp/herald-media-paused-orch" ]; then
+        herald_log "ORCH: media PAUSED ($(cat /tmp/herald-media-paused-orch 2>/dev/null))"
+      else
+        herald_log "ORCH: no media to pause"
+      fi
     fi
     duck_audio
     set_tts_volume

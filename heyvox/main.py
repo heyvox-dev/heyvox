@@ -35,7 +35,7 @@ from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir, device_cha
 from heyvox.audio.stt import init_local_stt, transcribe_audio
 from heyvox.audio.tts import check_voice_command, execute_voice_command
 from heyvox.input.injection import type_text
-from heyvox.input.target import snapshot_target
+from heyvox.input.target import snapshot_target, restore_target
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +485,11 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         # Snapshot which app/text field is focused right now, so we can
         # restore it at injection time even if the user clicks away.
         _recording_target = snapshot_target()
+        if _recording_target:
+            log(f"[snapshot] app={_recording_target.app_name}, pid={_recording_target.app_pid}, "
+                f"window={_recording_target.window_title!r}, element={_recording_target.element_role}")
+        else:
+            log("[snapshot] WARNING: no target snapshot (AppKit unavailable?)")
 
     # Preload STT model in background while user speaks — hides the ~1s
     # model load latency behind recording time. No-op if already loaded.
@@ -523,6 +528,7 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
     _show_recording_indicator(True)
     _hud_send({"type": "state", "state": "listening"})
     log("Recording started. Waiting for stop wake word.")
+    print(f"[recording] Started, target={_recording_target.app_name if _recording_target else 'None'}", file=sys.stderr)
 
 
 def stop_recording(config: HeyvoxConfig = None) -> None:
@@ -760,6 +766,7 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
             return
 
         log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
+        print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
         t0 = time.time()
         text = transcribe_audio(
             audio_chunks,
@@ -887,40 +894,38 @@ def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapt
                 return
             _last_inject_time = now
 
-        # PTT mode: paste into currently focused app — no restore_target needed.
-        # The Globe key is suppressed during PTT (ptt.py returns None), so focus
-        # stays on whatever app the user was in when they pressed FN.
-        # Requirement: INPT-05 (PTT = always-focused regardless of target_mode)
-        if ptt:
-            log(f"Typing into active app (PTT mode, snapshot was "
-                f"{recording_target.app_name if recording_target else 'none'})...")
-            type_text(paste_text)
-            log("Pasted (PTT mode, no auto-Enter)")
+        # Both PTT and wake word work the same way:
+        # 1. Restore the app/text field that was focused at recording start
+        # 2. Paste the transcribed text there (targeted to the specific app)
+        # The trigger method (fn key vs wake word) is irrelevant for targeting.
+        target_app = recording_target.app_name if recording_target else None
+        target_window = recording_target.window_title if recording_target else None
+        log(f"[inject] target_app={target_app}, window={target_window!r}, "
+            f"mode={'PTT' if ptt else 'wake word'}, text={len(paste_text)} chars: {paste_text[:60]!r}")
+        print(f"[recording] Injecting → {target_app or 'frontmost'} (window={target_window!r})", file=sys.stderr)
+        if recording_target:
+            restore_target(recording_target)
+            log(f"[inject] Restored target: {recording_target.app_name}")
+
+        type_text(paste_text, app_name=target_app)
+
+        # Auto-send Enter in wake word mode if adapter says so
+        auto_send = not ptt and adapter.should_auto_send()
+        log(f"[inject] auto_send={auto_send} (ptt={ptt}, adapter.should_auto_send={adapter.should_auto_send()}, enter_count={adapter.enter_count})")
+        if auto_send:
+            time.sleep(1.0)
+            target_app = recording_target.app_name if recording_target else None
+            from heyvox.input.injection import press_enter as _press_enter
+            log(f"Pressing Enter x{adapter.enter_count} → {target_app or 'frontmost'}...")
+            _press_enter(adapter.enter_count, app_name=target_app)
+            log("Sent!")
         else:
-            # Wake word mode: use the adapter's own focusing logic.
-            # The adapter knows the correct target (e.g. LastAgentAdapter tracks
-            # the last-focused agent). This is more reliable than restore_target
-            # which can capture the wrong app if focus shifted before recording.
-            log(f"Injecting via {type(adapter).__name__} "
-                f"(snapshot was {recording_target.app_name if recording_target else 'none'})...")
-            adapter.inject_text(paste_text)
-            if adapter.should_auto_send():
-                time.sleep(1.0)
-                target_app = (
-                    getattr(adapter, '_last_agent_name', None)
-                    or getattr(adapter, '_target_app', None)
-                )
-                from heyvox.input.injection import press_enter as _press_enter
-                log(f"Pressing Enter x{adapter.enter_count} → {target_app or 'frontmost'}...")
-                _press_enter(adapter.enter_count, app_name=target_app)
-                log("Sent!")
-            else:
-                log("Pasted (no auto-send)")
+            log(f"Pasted ({'PTT' if ptt else 'wake word'})")
         # Show "Sent to [agent]" confirmation in HUD
         _target_name = None
         if not ptt:
             _target_name = (
-                getattr(adapter, '_last_agent_name', None)
+                getattr(adapter, 'last_agent_name', None)
                 or getattr(adapter, '_target_app', None)
             )
         if ptt:
@@ -1055,6 +1060,16 @@ def main() -> None:
     # Requirement: CONF-01
     config = load_config()
     _init_log(config.log_file, config.log_max_bytes)
+    # Diagnostic: verify log() is working (both print to stderr and log to file)
+    print(f"[diag] _LOG_FILE={_LOG_FILE}, exists={os.path.exists(_LOG_FILE)}", file=sys.stderr, flush=True)
+    log("STARTUP: log() initialized")
+    # Verify it actually wrote
+    try:
+        with open(_LOG_FILE) as f:
+            last = f.readlines()[-1].strip()
+        print(f"[diag] log() wrote: {last}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[diag] log() verification FAILED: {e}", file=sys.stderr, flush=True)
 
     # Singleton: kill any previous instance and write our PID
     _acquire_singleton()
@@ -1164,8 +1179,12 @@ def main() -> None:
     # Phase 8: supports custom models dir from config, with fallback search
     from heyvox.audio.wakeword import load_models
     model, use_separate_words = load_models(
-        start_word, stop_word, config.wake_words.models_dir
+        start_word, stop_word, config.wake_words.models_dir,
+        also_load=config.wake_words.also_load,
     )
+    _loaded_models = list(model.prediction_buffer.keys()) if hasattr(model, 'prediction_buffer') else []
+    print(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}", file=sys.stderr, flush=True)
+    log(f"Wake word models loaded: {_loaded_models}")
 
     # Build text injection adapter based on config.target_mode
     # Requirement: INPT-03
@@ -1232,7 +1251,7 @@ def main() -> None:
 
     # Silent-mic health check state (AUDIO-08 completion)
     _zero_streak = 0
-    HEALTH_CHECK_INTERVAL = 15.0  # Check every 15s (was 30s) for faster dead-mic recovery
+    HEALTH_CHECK_INTERVAL = 5.0  # Check every 5s for fast dead-mic recovery
     last_health_check = time.time()
 
     # Device hotplug detection — periodically check if a higher-priority mic appeared
@@ -1351,9 +1370,11 @@ def main() -> None:
                     level = int(np.abs(audio).max())
                     if level == 0:
                         _zero_streak += 1
-                        if _zero_streak >= 2:  # 2 × 15s = 30s to detect (was 3 × 30s = 90s)
-                            log("WARNING: Silent mic detected (3 consecutive zero checks), restarting audio session")
+                        if _zero_streak >= 2:  # 2 × 15s = 30s to detect
+                            log("WARNING: Silent mic detected, re-scanning devices...")
+                            print("[mic] Silent mic detected, re-scanning devices...", file=sys.stderr, flush=True)
                             _zero_streak = 0
+                            _mic_pinned = False  # Allow priority-based re-selection
                             try:
                                 stream.stop_stream()
                                 stream.close()
@@ -1363,13 +1384,15 @@ def main() -> None:
                             time.sleep(1)
                             pa = pyaudio.PyAudio()
                             dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                                      sample_rate=sample_rate, chunk_size=chunk_size)
+                                                      sample_rate=sample_rate, chunk_size=chunk_size,
+                                                      require_audio=True)
                             if dev_index is None:
                                 log("No mic after reinit, retrying in 5s...")
                                 time.sleep(5)
                                 continue
                             dev_name = pa.get_device_info_by_index(dev_index)['name']
-                            log(f"Reinitialized audio: [{dev_index}] {dev_name}")
+                            log(f"Mic recovered: [{dev_index}] {dev_name}")
+                            print(f"[mic] Recovered: [{dev_index}] {dev_name}", file=sys.stderr, flush=True)
                             stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
                             headset_mode = detect_headset(pa, dev_index)
                             _write_active_mic(dev_name)
@@ -1604,21 +1627,25 @@ def main() -> None:
             # when no headset is detected to reduce false triggers from ambient audio.
             _speaker_mult = config.echo_suppression.speaker_threshold_multiplier if not headset_mode else 1.0
 
-            # Stop threshold is lower than start — saying the wake word mid-speech
-            # produces weaker scores due to overlapping audio energy.
-            stop_threshold = threshold * _speaker_mult * 0.7  # e.g. 0.5 * 1.4 * 0.7 = 0.49
             # Cooldown is shorter during recording — repeated stop attempts should
             # get through quickly. Start cooldown stays normal to prevent double-triggers.
             stop_cooldown = min(cooldown, 0.5)
 
+            _model_thresholds = config.wake_words.model_thresholds
+
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
-                active_threshold = stop_threshold if _is_rec else (threshold * _speaker_mult)
+                # Per-model threshold override (e.g. hey_vox: 0.95 for noisy models)
+                base_thr = _model_thresholds.get(ww_name, threshold)
+                active_threshold = (base_thr * _speaker_mult * 0.85) if _is_rec else (base_thr * _speaker_mult)
                 active_cooldown = stop_cooldown if _is_rec else cooldown
                 log_threshold = active_threshold * 0.5
                 if s > log_threshold:
                     triggered = s > active_threshold
-                    log(f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) {'>>> TRIGGER' if triggered else ''}")
+                    msg = f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) {'>>> TRIGGER' if triggered else ''}"
+                    log(msg)
+                    if triggered:
+                        print(f"[wakeword] {msg.strip()}", file=sys.stderr, flush=True)
                 if s > active_threshold:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
@@ -1711,3 +1738,7 @@ def _cancel_recording_from_ptt(config: HeyvoxConfig) -> None:
 def run() -> None:
     """CLI entry point — called by vox.cli on 'heyvox start'."""
     main()
+
+
+if __name__ == "__main__":
+    run()

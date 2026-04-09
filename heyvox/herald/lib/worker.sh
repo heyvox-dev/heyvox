@@ -102,20 +102,21 @@ if agent_name:
     voice = agent_pool[idx]
 
 # Language Detection
+# Returns (lang_code, voice_override, engine) where engine is 'kokoro' or 'piper'
 def detect_language(text):
     if re.search(r'[\u4e00-\u9fff]', text):
-        return 'cmn', 'zf_xiaoxiao'
+        return 'cmn', 'zf_xiaoxiao', 'kokoro'
     if re.search(r'[\u3040-\u309f\u30a0-\u30ff]', text):
-        return 'ja', 'jf_alpha'
+        return 'ja', 'jf_alpha', 'kokoro'
     if re.search(r'\b(je suis|merci|bonjour|s.il vous|c.est|nous avons|vous avez)\b', text, re.I):
-        return 'fr-fr', 'ff_siwis'
+        return 'fr-fr', 'ff_siwis', 'kokoro'
     if re.search(r'\b(grazie|buongiorno|ciao|sono|questo|quello|perch.)\b', text, re.I):
-        return 'it', 'if_sara'
-    if re.search(r'\b(ich|nicht|haben|werden|k.nnen|m.ssen|danke|bitte)\b', text, re.I):
-        return 'en-gb', 'bf_emma'
-    return 'en-us', None
+        return 'it', 'if_sara', 'kokoro'
+    if re.search(r'\b(ich|nicht|haben|werden|k.nnen|m.ssen|danke|bitte|auch|oder|aber|noch|schon|jetzt|dann|ganz|sehr|gibt|kann|wird|sind|eine?|keine?|diese[rsmn]?|welche|doch|gerade|bereits|zwischen|vielleicht|allerdings|trotzdem|deshalb|nat.rlich|eigentlich)\b', text, re.I):
+        return 'de', None, 'piper'
+    return 'en-us', None, 'kokoro'
 
-lang, lang_voice = detect_language(speech)
+lang, lang_voice, engine = detect_language(speech)
 if lang_voice and lang != 'en-us':
     voice = lang_voice
 
@@ -128,7 +129,7 @@ if label:
 with open(os.environ['_HERALD_SPEECH_FILE'], 'w') as f:
     f.write(speech)
 
-meta = {'voice': voice, 'lang': lang, 'mood': mood, 'agent': agent_name}
+meta = {'voice': voice, 'lang': lang, 'mood': mood, 'agent': agent_name, 'engine': engine}
 with open(os.environ['_HERALD_META_FILE'], 'w') as f:
     json.dump(meta, f)
 " 2>/dev/null
@@ -142,15 +143,57 @@ fi
 
 VOICE="${KOKORO_VOICE:-af_sarah}"
 LANG="en-us"
+ENGINE="kokoro"
 if [ -f "$META_FILE" ]; then
   VOICE=$(_HERALD_META_FILE="$META_FILE" python3 -c "import json, os; print(json.load(open(os.environ['_HERALD_META_FILE']))['voice'])" 2>/dev/null || echo "$VOICE")
   LANG=$(_HERALD_META_FILE="$META_FILE" python3 -c "import json, os; print(json.load(open(os.environ['_HERALD_META_FILE']))['lang'])" 2>/dev/null || echo "$LANG")
+  ENGINE=$(_HERALD_META_FILE="$META_FILE" python3 -c "import json, os; print(json.load(open(os.environ['_HERALD_META_FILE'])).get('engine', 'kokoro'))" 2>/dev/null || echo "$ENGINE")
   rm -f "$META_FILE"
 fi
 
 [ -n "${KOKORO_VOICE:-}" ] && VOICE="$KOKORO_VOICE"
 
+# Config-driven engine override: HEYVOX_TTS_ENGINE env var (set by heyvox from config.yaml)
+# Forces all TTS through the configured engine, regardless of language detection.
+if [ -n "${HEYVOX_TTS_ENGINE:-}" ]; then
+  ENGINE="$HEYVOX_TTS_ENGINE"
+fi
+
 TEMP_WAV="/tmp/herald-generating-$$.wav"
+
+# --- Piper TTS path ---
+# Used as primary engine when tts.engine=piper, or as fallback for German
+generate_piper() {
+  local speech_file="$1" output="$2" lang="$3" voice="${4:-}"
+  local model=""
+
+  # Resolve model path: check for voice-specific model, then fall back to language default
+  if [ -n "$voice" ] && [ -f "$PIPER_VOICES_DIR/en/${voice}.onnx" ]; then
+    model="$PIPER_VOICES_DIR/en/${voice}.onnx"
+  else
+    case "$lang" in
+      de) model="$PIPER_DE_MODEL" ;;
+      en-us|en-gb|en*) model="$PIPER_EN_MODEL" ;;
+      *) model="$PIPER_EN_MODEL" ;;  # Default to English
+    esac
+  fi
+
+  if [ ! -f "$model" ]; then
+    herald_log "WORKER: piper model not found: $model"
+    herald_log "WORKER: install: pip install piper-tts && download model to $PIPER_VOICES_DIR"
+    return 1
+  fi
+  herald_log "WORKER: piper generating (model=$(basename "$model"), lang=$lang)"
+  # Use python3 -m piper (works with pyenv/venv) with fallback to bare piper CLI
+  if python3 -m piper -m "$model" -f "$output" < "$speech_file" 2>>"$HERALD_DEBUG_LOG"; then
+    return 0
+  elif command -v piper >/dev/null 2>&1; then
+    piper -m "$model" -f "$output" < "$speech_file" 2>>"$HERALD_DEBUG_LOG"
+  else
+    herald_log "WORKER: piper not available (tried python3 -m piper and piper CLI)"
+    return 1
+  fi
+}
 
 ensure_daemon() {
   if [ -S "$KOKORO_DAEMON_SOCK" ] && kill -0 "$(cat "$KOKORO_DAEMON_PID" 2>/dev/null)" 2>/dev/null; then
@@ -168,7 +211,28 @@ ensure_daemon() {
 
 GENERATED=false
 
-if ensure_daemon; then
+# --- Route by engine ---
+if [ "$ENGINE" = "piper" ]; then
+  herald_log "WORKER: using piper (lang=$LANG, voice=$VOICE)"
+  if generate_piper "$SPEECH_FILE" "$TEMP_WAV" "$LANG" "$VOICE"; then
+    if [ -s "$TEMP_WAV" ]; then
+      TIMESTAMP="$(date +%s%N)"
+      WAV_NAME="${TIMESTAMP}-01.wav"
+      mv "$TEMP_WAV" "$HERALD_QUEUE_DIR/$WAV_NAME"
+      if [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
+        echo "${CONDUCTOR_WORKSPACE_NAME}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.workspace"
+      fi
+      herald_log "WORKER: piper enqueued -> $WAV_NAME"
+      GENERATED=true
+    fi
+  fi
+  if [ "$GENERATED" != "true" ]; then
+    herald_log "WORKER: piper failed, falling through to kokoro"
+    ENGINE="kokoro"
+  fi
+fi
+
+if [ "$ENGINE" = "kokoro" ] && ensure_daemon; then
   REQ_FILE="/tmp/kokoro-req-$$.json"
   _HERALD_SPEECH_FILE="$SPEECH_FILE" _HERALD_REQ_FILE="$REQ_FILE" _HERALD_VOICE="$VOICE" _HERALD_LANG="$LANG" _HERALD_TEMP_WAV="$TEMP_WAV" python3 -c "
 import json, os
@@ -245,9 +309,14 @@ except Exception as e:
 fi
 
 if [ "$GENERATED" != "true" ]; then
-  herald_log "WORKER: falling back to CLI"
-  cd "$KOKORO_DIR"
-  $KOKORO_CLI "$SPEECH_FILE" "$TEMP_WAV" --voice "$VOICE" --lang "$LANG" --speed 1.2 &>/dev/null
+  if [ "$ENGINE" = "piper" ]; then
+    herald_log "WORKER: falling back to piper CLI"
+    generate_piper "$SPEECH_FILE" "$TEMP_WAV" "$LANG" "$VOICE" || true
+  else
+    herald_log "WORKER: falling back to kokoro CLI"
+    cd "$KOKORO_DIR"
+    $KOKORO_CLI "$SPEECH_FILE" "$TEMP_WAV" --voice "$VOICE" --lang "$LANG" --speed 1.2 &>/dev/null
+  fi
 fi
 
 if [ "$GENERATED" != "true" ] && [ -s "$TEMP_WAV" ]; then

@@ -35,6 +35,9 @@ def write_plist() -> Path:
     python_bin_dir = str(Path(sys.executable).parent)
     env_path = f"{python_bin_dir}:/usr/local/bin:/usr/bin:/bin"
 
+    # WorkingDirectory = the repo root so `python -m heyvox.main` resolves correctly
+    working_dir = str(Path(__file__).resolve().parent.parent.parent)
+
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,10 +51,17 @@ def write_plist() -> Path:
         <string>-m</string>
         <string>heyvox.main</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>{working_dir}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string>/tmp/heyvox.log</string>
     <key>StandardErrorPath</key>
@@ -96,8 +106,61 @@ def bootstrap() -> tuple[bool, str]:
         return False, f"Failed to start: {err} (exit {result.returncode})"
 
 
+def _kill_heyvox_processes() -> int:
+    """Kill any running heyvox processes (main, HUD, orchestrator, kokoro-daemon).
+
+    Returns the number of processes killed.
+    """
+    import signal
+    import time
+
+    patterns = ["heyvox.main", "heyvox.cli start", "heyvox.hud.overlay",
+                "herald/lib/orchestrator.sh", "herald/daemon/kokoro-daemon.py"]
+    killed = 0
+
+    for pattern in patterns:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True, text=True,
+            )
+            for line in result.stdout.strip().splitlines():
+                pid = int(line.strip())
+                if pid == os.getpid():
+                    continue  # Don't kill ourselves
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    killed += 1
+                except ProcessLookupError:
+                    pass
+        except (ValueError, subprocess.SubprocessError):
+            continue
+
+    if killed > 0:
+        time.sleep(1)
+        # Force kill any survivors
+        for pattern in patterns:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    capture_output=True, text=True,
+                )
+                for line in result.stdout.strip().splitlines():
+                    pid = int(line.strip())
+                    if pid == os.getpid():
+                        continue
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            except (ValueError, subprocess.SubprocessError):
+                continue
+
+    return killed
+
+
 def bootout() -> tuple[bool, str]:
-    """Unload and stop the vox launchd service.
+    """Unload and stop the vox launchd service, then kill any orphan processes.
 
     Returns (True, message) on success or if not running,
     (False, message) on unexpected error.
@@ -105,25 +168,28 @@ def bootout() -> tuple[bool, str]:
     Returns:
         Tuple of (success: bool, message: str).
     """
-    # If plist doesn't exist, the service was never installed — nothing to stop
-    if not PLIST_PATH.exists():
-        return True, "Not running (service not installed)"
+    # Step 1: Unload from launchd (stops auto-restart before we kill processes)
+    if PLIST_PATH.exists():
+        result = subprocess.run(
+            ["launchctl", "bootout", GUI_DOMAIN, str(PLIST_PATH)],
+            capture_output=True,
+            text=True,
+        )
+        # returncode 3 = not loaded, 5 = not loaded — both are fine
+        launchd_stopped = result.returncode in (0, 3, 5)
+    else:
+        launchd_stopped = True
 
-    result = subprocess.run(
-        ["launchctl", "bootout", GUI_DOMAIN, str(PLIST_PATH)],
-        capture_output=True,
-        text=True,
-    )
+    # Step 2: Kill any remaining heyvox processes (orphans, manual starts)
+    killed = _kill_heyvox_processes()
 
-    # returncode 3 = not loaded (no such process)
-    # returncode 5 = boot-out failed (service not loaded)
-    if result.returncode == 0:
-        return True, "HeyVox service stopped"
-    elif result.returncode in (3, 5):
+    if launchd_stopped and killed == 0:
         return True, "Not running"
+    elif launchd_stopped:
+        return True, f"HeyVox service stopped ({killed} processes killed)"
     else:
         err = result.stderr.strip() or result.stdout.strip()
-        return False, f"Failed to stop: {err} (exit {result.returncode})"
+        return False, f"launchd bootout failed: {err} (but killed {killed} processes)"
 
 
 def get_status() -> dict:

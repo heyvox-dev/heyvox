@@ -149,6 +149,24 @@ async function handleNativeMessage(message) {
         }
         break;
 
+      case 'type-text': {
+        // Insert text into the active tab's focused element
+        const text = message.text;
+        if (typeof text !== 'string') {
+          response = { error: 'type-text requires a string text field' };
+        } else {
+          response = await typeTextInActiveTab(text);
+        }
+        break;
+      }
+
+      case 'press-enter': {
+        // Press Enter in the active tab's focused element
+        const count = typeof message.count === 'number' ? message.count : 1;
+        response = await pressEnterInActiveTab(count);
+        break;
+      }
+
       default:
         response = { error: `Unknown action: ${message.action}` };
         console.warn('[Hush] Unknown action from native host:', message.action);
@@ -183,16 +201,28 @@ async function pauseAllTabs() {
   const paused = [];
   await Promise.allSettled(
     nowPlaying.map(async (tab) => {
+      let method = 'content-script';
       const count = await sendToContentScript(tab.id, { action: 'pause-media' });
-      if (count > 0 || count === null) {
-        // count === null means we couldn't confirm but attempted the pause
-        pausedTabs.set(tab.id, {
-          title: tab.title ?? '',
-          url: tab.url ?? '',
-          timestamp: Date.now(),
-        });
-        paused.push(tab);
+      if (count > 0) {
+        // Content script successfully paused media elements
+      } else if (tab.audible) {
+        // Content script couldn't reach media (YouTube Shadow DOM, etc.)
+        // Fall back to tab muting — silences audio without affecting playback state
+        await chrome.tabs.update(tab.id, { muted: true });
+        method = 'tab-mute';
+      } else if (count === null) {
+        // Couldn't confirm but attempted — treat as paused
+      } else {
+        // Nothing to pause in this tab
+        return;
       }
+      pausedTabs.set(tab.id, {
+        title: tab.title ?? '',
+        url: tab.url ?? '',
+        method,
+        timestamp: Date.now(),
+      });
+      paused.push(tab);
     })
   );
 
@@ -206,15 +236,20 @@ async function pauseAllTabs() {
  * @returns {Promise<object>} Status response
  */
 async function resumeAllPausedTabs(rewindSecs = 0, fadeInMs = 0) {
-  const tabIds = [...pausedTabs.keys()];
+  const entries = [...pausedTabs.entries()];
 
   await Promise.allSettled(
-    tabIds.map(async (tabId) => {
-      await sendToContentScript(tabId, {
-        action: 'resume-media',
-        rewindSecs,
-        fadeInMs,
-      });
+    entries.map(async ([tabId, info]) => {
+      if (info.method === 'tab-mute') {
+        // Unmute tabs that were muted as fallback
+        await chrome.tabs.update(tabId, { muted: false }).catch(() => {});
+      } else {
+        await sendToContentScript(tabId, {
+          action: 'resume-media',
+          rewindSecs,
+          fadeInMs,
+        });
+      }
     })
   );
 
@@ -254,18 +289,61 @@ async function pauseSingleTab(tabId) {
  * @returns {Promise<object>}
  */
 async function resumeSingleTab(tabId, rewindSecs = 0, fadeInMs = 0) {
-  if (!pausedTabs.has(tabId)) {
+  const info = pausedTabs.get(tabId);
+  if (!info) {
     return { error: `Tab ${tabId} was not paused by Hush` };
   }
 
-  await sendToContentScript(tabId, {
-    action: 'resume-media',
-    rewindSecs,
-    fadeInMs,
-  });
+  if (info.method === 'tab-mute') {
+    await chrome.tabs.update(tabId, { muted: false }).catch(() => {});
+  } else {
+    await sendToContentScript(tabId, {
+      action: 'resume-media',
+      rewindSecs,
+      fadeInMs,
+    });
+  }
   pausedTabs.delete(tabId);
 
   return buildStatusResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Text injection helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Inserts text into the active tab's focused element via the content script.
+ * @param {string} text
+ * @returns {Promise<object>}
+ */
+async function typeTextInActiveTab(text) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    return { error: 'No active tab found', ok: false };
+  }
+  if (!isScriptableUrl(tab.url)) {
+    return { error: 'Active tab is not scriptable (chrome:// or similar)', ok: false };
+  }
+  const ok = await sendToContentScript(tab.id, { action: 'type-text', text });
+  return { ok: !!ok, tabId: tab.id, title: tab.title ?? '' };
+}
+
+/**
+ * Presses Enter in the active tab's focused element via the content script.
+ * @param {number} count
+ * @returns {Promise<object>}
+ */
+async function pressEnterInActiveTab(count) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    return { error: 'No active tab found', ok: false };
+  }
+  if (!isScriptableUrl(tab.url)) {
+    return { error: 'Active tab is not scriptable', ok: false };
+  }
+  const ok = await sendToContentScript(tab.id, { action: 'press-enter', count });
+  return { ok: !!ok, tabId: tab.id };
 }
 
 // ---------------------------------------------------------------------------
@@ -274,10 +352,21 @@ async function resumeSingleTab(tabId, rewindSecs = 0, fadeInMs = 0) {
 
 /**
  * Filters a list of tabs to those that currently have playing media.
+ * Uses Chrome's native tab.audible property first (reliable for YouTube
+ * and other sites where content script DOM access fails), then falls
+ * back to content script query for silent video.
  * @param {chrome.tabs.Tab[]} tabs
  * @returns {Promise<chrome.tabs.Tab[]>}
  */
 async function findPlayingTabs(tabs) {
+  // Primary: Chrome's built-in audible detection — works regardless of
+  // Shadow DOM, cross-origin iframes, or content script availability.
+  const audible = tabs.filter(
+    (tab) => tab.audible && tab.id && isScriptableUrl(tab.url)
+  );
+  if (audible.length > 0) return audible;
+
+  // Fallback: ask content scripts (catches silent video, e.g. muted autoplay)
   const results = await Promise.allSettled(
     tabs.map(async (tab) => {
       if (!tab.id || !isScriptableUrl(tab.url)) return null;

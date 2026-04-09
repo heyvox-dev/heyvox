@@ -173,11 +173,24 @@ for cmd in heyvox herald heyvox-chrome-bridge; do
     fi
 done
 
-# Check if BIN_DIR is on PATH
+# Check if BIN_DIR is on PATH — fix it automatically
 if ! echo "$PATH" | tr ':' '\n' | grep -q "^$BIN_DIR$"; then
-    warn "$BIN_DIR is not on your PATH"
-    info "Add this to your shell profile (~/.zshrc):"
-    printf "    ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
+    SHELL_RC=""
+    case "$(basename "$SHELL")" in
+        zsh)  SHELL_RC="$HOME/.zshrc" ;;
+        bash) SHELL_RC="$HOME/.bashrc" ;;
+        *)    SHELL_RC="$HOME/.profile" ;;
+    esac
+
+    if [[ -n "$SHELL_RC" ]] && ! grep -q '.local/bin' "$SHELL_RC" 2>/dev/null; then
+        printf '\n# Added by HeyVox installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$SHELL_RC"
+        success "Added $BIN_DIR to PATH in $SHELL_RC"
+        info "Run 'source $SHELL_RC' or open a new terminal to use the heyvox command"
+    else
+        warn "$BIN_DIR is not on your PATH"
+        info "Add this to your shell profile ($SHELL_RC):"
+        printf "    ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
+    fi
     # Add it for this session
     export PATH="$BIN_DIR:$PATH"
 fi
@@ -193,6 +206,7 @@ printf "${DIM}  - STT model download${RESET}\n"
 printf "${DIM}  - Microphone test${RESET}\n"
 printf "${DIM}  - Configuration${RESET}\n"
 printf "${DIM}  - Herald TTS hooks (for Claude Code)${RESET}\n"
+printf "${DIM}  - Hush Chrome extension (browser media pause)${RESET}\n"
 printf "${DIM}  - MCP server registration${RESET}\n"
 printf "${DIM}  - launchd auto-start${RESET}\n\n"
 

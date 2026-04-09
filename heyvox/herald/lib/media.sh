@@ -19,6 +19,9 @@ HUSH_FADE_IN_MS=1000
 # Try Hush (Chrome extension) for browser media — returns 0 on success
 # Usage: hush_cmd <action> [extra_json_fields]
 # e.g.: hush_cmd resume '"rewindSecs":3,"fadeInMs":1000'
+# Send a command to Hush and print the JSON response.
+# Returns 0 if Hush responded without error, 1 otherwise.
+# Caller must check pausedCount if needed.
 hush_cmd() {
   local action="$1"
   local extra="${2:-}"
@@ -47,7 +50,13 @@ finally: sock.close()
 PYEOF
   ) 2>/dev/null || return 1
   echo "$resp" | grep -q '"error"' && return 1
+  HUSH_RESP="$resp"
   return 0
+}
+
+# Extract pausedCount from last Hush response. Returns the count or 0.
+hush_paused_count() {
+  echo "${HUSH_RESP:-}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pausedCount',0))" 2>/dev/null || echo 0
 }
 
 send_media_key() {
@@ -106,11 +115,60 @@ except: pass
 " > "${FLAG}.pos" 2>/dev/null
 }
 
+chrome_js_state() {
+  osascript -e '
+tell application "System Events"
+    if not (exists process "Google Chrome") then return "no-app"
+end tell
+tell application "Google Chrome"
+    repeat with w in every window
+        repeat with t in every tab of w
+            try
+                set r to execute t javascript "var els = document.querySelectorAll('"'"'video, audio'"'"'); var state = '"'"'no-media'"'"'; for (var i = 0; i < els.length; i++) { if (!els[i].paused) { state = '"'"'playing'"'"'; break; } state = '"'"'paused'"'"'; } state"
+                if r is "playing" then return "playing"
+                if r is "paused" then return "paused"
+            end try
+        end repeat
+    end repeat
+    return "no-media"
+end tell' 2>/dev/null
+}
+
+chrome_js_pause() {
+  osascript -e '
+tell application "Google Chrome"
+    repeat with w in every window
+        repeat with t in every tab of w
+            try
+                set r to execute t javascript "var els = document.querySelectorAll('"'"'video, audio'"'"'); var c = 0; for (var i = 0; i < els.length; i++) { els[i].pause(); c++; } c"
+                if r is not "0" and r is not 0 then return "ok"
+            end try
+        end repeat
+    end repeat
+    return "no-media"
+end tell' 2>/dev/null
+}
+
+chrome_js_play() {
+  osascript -e '
+tell application "Google Chrome"
+    repeat with w in every window
+        repeat with t in every tab of w
+            try
+                set r to execute t javascript "var els = document.querySelectorAll('"'"'video, audio'"'"'); var c = 0; for (var i = 0; i < els.length; i++) { els[i].play(); c++; } c"
+                if r is not "0" and r is not 0 then return "ok"
+            end try
+        end repeat
+    end repeat
+    return "no-media"
+end tell' 2>/dev/null
+}
+
 if [ "$ACTION" = "pause" ]; then
     [ -f "$FLAG" ] && exit 0
 
     # Tier 1: Try Hush for browser media (most reliable)
-    if hush_cmd pause; then
+    if hush_cmd pause && [ "$(hush_paused_count)" -gt 0 ] 2>/dev/null; then
         echo "hush" > "$FLAG"
     else
         # Tier 2: Try native MediaRemote (Spotify, Music, Podcasts)
@@ -120,15 +178,23 @@ if [ "$ACTION" = "pause" ]; then
             send_mr_command 1
             echo "mr" > "$FLAG"
         else
-            # Tier 3: Media key fallback
-            send_media_key
-            echo "key" > "$FLAG"
+            # Tier 3: Try Chrome JS (AppleScript → video.pause()/audio.pause())
+            JS_STATE=$(chrome_js_state)
+            if [ "$JS_STATE" = "playing" ]; then
+                RESULT=$(chrome_js_pause)
+                if [ "$RESULT" = "ok" ]; then
+                    echo "chrome-js" > "$FLAG"
+                fi
+            fi
+            # If no media found or already paused, exit cleanly
         fi
     fi
 else
     [ ! -f "$FLAG" ] && exit 0
+    # Don't resume if another caller still has media paused
+    # Check both Herald (herald-media-paused-*) and HeyVox (heyvox-media-paused-*) namespaces
     HAS_OTHER=false
-    for f in /tmp/herald-media-paused-*; do
+    for f in /tmp/herald-media-paused-* /tmp/heyvox-media-paused-*; do
         [ "$f" != "$FLAG" ] && [ -f "$f" ] && HAS_OTHER=true && break
     done
     if [ "$HAS_OTHER" = "true" ]; then
@@ -146,8 +212,8 @@ else
         send_rewind "$HERALD_REWIND_SECS"
         sleep 0.3
         send_mr_command 0
-    else
-        send_media_key
+    elif [ "$METHOD" = "chrome-js" ]; then
+        chrome_js_play
     fi
     rm -f "$FLAG" "${FLAG}.pos"
 fi

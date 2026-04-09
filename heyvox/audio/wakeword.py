@@ -44,19 +44,27 @@ def _default_search_dirs(extra_dir: str = "") -> list[str]:
     if extra_dir:
         dirs.append(extra_dir)
 
-    # User-local models directory
-    from platformdirs import user_config_dir
-    user_models = os.path.join(user_config_dir("heyvox"), "models")
+    # User-local models directory (use same CONFIG_DIR as config.py)
+    from heyvox.config import CONFIG_DIR
+    user_models = os.path.join(str(CONFIG_DIR), "models")
     dirs.append(user_models)
 
-    # Package-relative legacy path
+    # Package-bundled models (shipped in pip package)
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dirs.append(os.path.join(pkg_dir, "models"))
+
+    # Package-relative legacy path
     dirs.append(os.path.join(pkg_dir, "training", "models"))
 
     return dirs
 
 
-def load_models(start_word: str, stop_word: str, models_dir: str = "") -> tuple[Any, bool]:
+def load_models(
+    start_word: str,
+    stop_word: str,
+    models_dir: str = "",
+    also_load: list[str] | None = None,
+) -> tuple[Any, bool]:
     """Load openwakeword models for start/stop wake words.
 
     Looks for custom .onnx files in multiple directories, then falls back to
@@ -66,6 +74,9 @@ def load_models(start_word: str, stop_word: str, models_dir: str = "") -> tuple[
         start_word: Model name for recording start trigger.
         stop_word: Model name for recording stop trigger.
         models_dir: Additional directory to search for custom .onnx model files.
+        also_load: Additional model names to load alongside start/stop.
+            Any of these models can also trigger start/stop. Useful as
+            fallback wake words (e.g. hey_jarvis alongside hey_vox).
 
     Returns:
         Tuple of (Model instance, use_separate_words flag).
@@ -75,6 +86,10 @@ def load_models(start_word: str, stop_word: str, models_dir: str = "") -> tuple[
 
     use_separate_words = start_word != stop_word
     models_to_load = list({start_word, stop_word})
+    if also_load:
+        for m in also_load:
+            if m not in models_to_load:
+                models_to_load.append(m)
     search_dirs = _default_search_dirs(models_dir)
 
     model_paths = []

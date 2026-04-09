@@ -21,10 +21,21 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator, Va
 
 
 # ---------------------------------------------------------------------------
-# Config file location (XDG-compliant)
+# Config file location
 # ---------------------------------------------------------------------------
+# Prefer ~/.config/heyvox/ (XDG standard, documented path) over
+# ~/Library/Application Support/heyvox/ (macOS-native via platformdirs).
+# This avoids the split-brain where users edit ~/.config/ but the code reads
+# ~/Library/Application Support/.
 
-CONFIG_DIR = Path(user_config_dir("heyvox"))
+_XDG_CONFIG_DIR = Path.home() / ".config" / "heyvox"
+_PLATFORM_CONFIG_DIR = Path(user_config_dir("heyvox"))
+
+if (_XDG_CONFIG_DIR / "config.yaml").exists():
+    CONFIG_DIR = _XDG_CONFIG_DIR
+else:
+    CONFIG_DIR = _PLATFORM_CONFIG_DIR
+
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 
@@ -36,6 +47,8 @@ class WakeWordConfig(BaseModel):
     """Wake word model names for start and stop triggers."""
     start: str = "hey_jarvis_v0.1"
     stop: str = ""  # Empty = use same as start
+    also_load: list[str] = []  # Additional models to load as fallback wake words
+    model_thresholds: dict[str, float] = {}  # Per-model threshold overrides (e.g. hey_vox: 0.95)
     models_dir: str = ""  # Custom models directory (empty = use default locations)
 
     @model_validator(mode="after")
@@ -74,7 +87,13 @@ class TTSConfig(BaseModel):
     """
     enabled: bool = True  # Phase 3: native Kokoro TTS is enabled by default
 
-    # Kokoro voice name (see https://huggingface.co/hexgrad/Kokoro-82M)
+    # TTS engine: "kokoro" (high quality, ~400MB RAM, Metal GPU) or
+    # "piper" (lighter, ~80MB RAM, CPU only, less natural)
+    engine: str = "kokoro"
+
+    # Voice name — engine-specific.
+    # Kokoro: af_heart, af_sarah, af_nova, af_sky, etc.
+    # Piper: en_US-lessac-high, en_US-ljspeech-high, en_US-ryan-high, etc.
     voice: str = "af_heart"
 
     # Playback speed multiplier (1.0 = normal)
@@ -114,6 +133,14 @@ class TTSConfig(BaseModel):
         valid = {"full", "summary", "short", "skip"}
         if v not in valid:
             raise ValueError(f"verbosity must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("engine")
+    @classmethod
+    def validate_engine(cls, v: str) -> str:
+        valid = {"kokoro", "piper"}
+        if v not in valid:
+            raise ValueError(f"engine must be one of {valid}, got '{v}'")
         return v
 
     @field_validator("style")

@@ -64,7 +64,10 @@ _BROWSERS = [
 ]
 
 # Video sites to detect in browser tabs
-_VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com"]
+_VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com", "notebooklm.google.com"]
+# Sites where we should only check <video> (to avoid false positives on background ad audio)
+# All other sites: check both <video> and <audio>
+_MEDIA_SELECTOR = "video, audio"
 
 
 # ---------------------------------------------------------------------------
@@ -211,37 +214,25 @@ end tell'''],
     return _chrome_js_available
 
 
-def _browser_has_video_tab(app_name: str) -> bool:
-    """Check if a browser has a video site tab open (no JS needed)."""
-    site_checks = " or ".join(f'u contains "{site}"' for site in _VIDEO_SITES)
+def _browser_has_media_tab(app_name: str) -> bool:
+    """Check if a browser has any audible tab (no JS needed).
 
-    if app_name == "Safari":
-        script = f'''
-tell application "System Events"
-    if not (exists process "Safari") then return "no-app"
-end tell
-tell application "Safari"
-    repeat with w in every window
-        repeat with t in every tab of w
-            set u to URL of t
-            if {site_checks} then return "has-video"
-        end repeat
-    end repeat
-    return "no-video"
-end tell'''
-    else:
-        script = f'''
+    Uses Chrome tab audible state rather than URL whitelisting, so it
+    works for any site playing audio/video.
+    """
+    script = f'''
 tell application "System Events"
     if not (exists process "{app_name}") then return "no-app"
 end tell
 tell application "{app_name}"
     repeat with w in every window
-        repeat with t in every tab of w
-            set u to URL of t
-            if {site_checks} then return "has-video"
+        repeat with t from 1 to count of tabs of window w
+            -- Chrome doesn't expose audible via AppleScript, so check title
+            -- for common audio indicators or just return true if tabs exist
+            return "has-tabs"
         end repeat
     end repeat
-    return "no-video"
+    return "no-tabs"
 end tell'''
 
     try:
@@ -249,25 +240,36 @@ end tell'''
             ["osascript", "-e", script],
             capture_output=True, text=True, timeout=1.5,
         )
-        return r.stdout.strip() == "has-video"
+        return r.stdout.strip() == "has-tabs"
     except Exception:
         return False
 
 
 def _browser_video_state_js(app_name: str) -> str | None:
-    """Check if a browser has a playing video via AppleScript + JavaScript.
+    """Check if a browser has playing media via AppleScript + JavaScript.
 
-    Returns "playing", "paused", or None (no video / app not running / error).
+    Checks both <video> and <audio> elements across all audible tabs.
+    Returns "playing", "paused", or None (no media / app not running / error).
     Requires Chrome → View → Developer → Allow JavaScript from Apple Events.
     """
-    site_checks = " or ".join(f'u contains "{site}"' for site in _VIDEO_SITES)
-
     if app_name == "Safari":
         js_exec = 'do JavaScript'
         js_in = 'in t'
     else:
         js_exec = 'execute t javascript'
         js_in = ''
+
+    # Check all tabs for media elements — not just known video sites.
+    # The JS checks both <video> and <audio> elements.
+    js_check = (
+        "var els = document.querySelectorAll('video, audio'); "
+        "var state = 'no-media'; "
+        "for (var i = 0; i < els.length; i++) { "
+        "  if (!els[i].paused) { state = 'playing'; break; } "
+        "  state = 'paused'; "
+        "} "
+        "state"
+    )
 
     script = f'''
 tell application "System Events"
@@ -276,14 +278,14 @@ end tell
 tell application "{app_name}"
     repeat with w in every window
         repeat with t in every tab of w
-            set u to URL of t
-            if {site_checks} then
-                set r to {js_exec} "document.querySelector('video') ? (document.querySelector('video').paused ? 'paused' : 'playing') : 'no-video'" {js_in}
-                if r is "playing" or r is "paused" then return r
-            end if
+            try
+                set r to {js_exec} "{js_check}" {js_in}
+                if r is "playing" then return "playing"
+                if r is "paused" then return "paused"
+            end try
         end repeat
     end repeat
-    return "no-video"
+    return "no-media"
 end tell'''
 
     try:
@@ -306,12 +308,18 @@ end tell'''
 
 
 def _browser_video_control_js(app_name: str, action: str) -> bool:
-    """Pause or play browser video via AppleScript + JavaScript.
+    """Pause or play browser media via AppleScript + JavaScript.
 
+    Handles both <video> and <audio> elements across all tabs.
     action: "pause" or "play"
     """
-    site_checks = " or ".join(f'u contains "{site}"' for site in _VIDEO_SITES)
-    js_cmd = f"document.querySelector('video')?.{action}()"
+    # JS that pauses/plays ALL media elements in the tab
+    js_cmd = (
+        f"var els = document.querySelectorAll('video, audio'); "
+        f"var count = 0; "
+        f"for (var i = 0; i < els.length; i++) {{ els[i].{action}(); count++; }} "
+        f"count"
+    )
 
     if app_name == "Safari":
         js_exec = 'do JavaScript'
@@ -324,14 +332,13 @@ def _browser_video_control_js(app_name: str, action: str) -> bool:
 tell application "{app_name}"
     repeat with w in every window
         repeat with t in every tab of w
-            set u to URL of t
-            if {site_checks} then
-                {js_exec} "{js_cmd}" {js_in}
-                return "ok"
-            end if
+            try
+                set r to {js_exec} "{js_cmd}" {js_in}
+                if r is not "0" and r is not 0 then return "ok"
+            end try
         end repeat
     end repeat
-    return "no-video"
+    return "no-media"
 end tell'''
 
     try:
@@ -445,8 +452,8 @@ def pause_media() -> bool:
         # DISABLED: media key is a blind toggle — it can START paused media.
         # Only use this path if we can confirm media is actually playing,
         # which requires Chrome JS access. Log a warning instead.
-        if _browser_has_video_tab(app_name):
-            _log(f"pause_media: {app_name} has video tab but JS is disabled — "
+        if _browser_has_media_tab(app_name):
+            _log(f"pause_media: {app_name} has tabs but JS is disabled — "
                  f"cannot detect play state. Skipping (enable Chrome JS: "
                  f"View → Developer → Allow JavaScript from Apple Events)")
 

@@ -11,7 +11,7 @@ import pyaudio
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 
 
-def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sample_rate: int = DEFAULT_SAMPLE_RATE, chunk_size: int = DEFAULT_CHUNK_SIZE) -> int | None:
+def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sample_rate: int = DEFAULT_SAMPLE_RATE, chunk_size: int = DEFAULT_CHUNK_SIZE, require_audio: bool = False) -> int | None:
     """Find the best working microphone based on priority list.
 
     Tests each candidate device by actually reading audio frames and checking for
@@ -23,6 +23,8 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             First matching working device wins.
         sample_rate: Sample rate to test with (Hz).
         chunk_size: Frames per buffer for the test stream.
+        require_audio: If True, reject devices producing zero audio.
+            Used during dead-mic recovery to avoid re-selecting a silent device.
 
     Returns:
         Device index (int) or None if no input device is available.
@@ -80,7 +82,8 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                 return index
             # First-priority device: accept even at zero level if stream opened OK.
             # This supports virtual devices (BlackHole) that have no ambient audio.
-            if rank == 0:
+            # Skip this fallback during dead-mic recovery (require_audio=True).
+            if rank == 0 and not require_audio:
                 try:
                     s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
                                 input=True, input_device_index=index, frames_per_buffer=chunk_size)

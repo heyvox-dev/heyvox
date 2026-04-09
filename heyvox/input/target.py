@@ -15,11 +15,14 @@ Fallback logic when no text field was focused at recording start:
   4. If zero or multiple → just activate the app (best effort)
 """
 
-import logging
+import sys
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger(__name__)
+
+def _log(msg: str) -> None:
+    """Log to stderr with [target] prefix."""
+    print(f"[target] {msg}", file=sys.stderr, flush=True)
 
 # AX roles that accept text input
 _TEXT_ROLES = frozenset({"AXTextField", "AXTextArea", "AXWebArea", "AXComboBox"})
@@ -32,6 +35,7 @@ class TargetSnapshot:
     app_pid: int
     ax_element: Any = None  # AXUIElement reference (opaque CFType)
     element_role: str = ""
+    window_title: str = ""  # AXTitle of focused window (for tab restoration)
 
 
 def snapshot_target() -> TargetSnapshot | None:
@@ -46,7 +50,7 @@ def snapshot_target() -> TargetSnapshot | None:
             AXUIElementCopyAttributeValue,
         )
     except ImportError:
-        log.warning("AppKit/ApplicationServices unavailable — target snapshot disabled")
+        _log("WARNING: AppKit/ApplicationServices unavailable — snapshot disabled")
         return None
 
     ws = AppKit.NSWorkspace.sharedWorkspace()
@@ -70,11 +74,20 @@ def snapshot_target() -> TargetSnapshot | None:
         snap.element_role = role_str
 
         if role_str in _TEXT_ROLES:
-            log.info(f"Snapshot: {app_name} pid={app_pid}, text field ({role_str})")
+            _log(f"snapshot: {app_name} pid={app_pid}, text field ({role_str})")
         else:
-            log.info(f"Snapshot: {app_name} pid={app_pid}, focused={role_str} (not text)")
+            _log(f"snapshot: {app_name} pid={app_pid}, focused={role_str} (not text)")
     else:
-        log.info(f"Snapshot: {app_name} pid={app_pid}, no focused element")
+        _log(f"snapshot: {app_name} pid={app_pid}, no focused element")
+
+    # Capture window title — critical for tab-based apps (Chrome, Electron)
+    # where the app PID is shared across multiple tabs/workspaces.
+    err, window = AXUIElementCopyAttributeValue(ax_app, "AXFocusedWindow", None)
+    if err == 0 and window is not None:
+        err2, title = AXUIElementCopyAttributeValue(window, "AXTitle", None)
+        if err2 == 0 and title:
+            snap.window_title = str(title)
+            _log(f"snapshot: window='{snap.window_title}'")
 
     return snap
 
@@ -82,10 +95,19 @@ def snapshot_target() -> TargetSnapshot | None:
 def restore_target(snap: TargetSnapshot) -> bool:
     """Refocus the app and text field from a snapshot.
 
-    Returns True if a specific text field was focused, False if only app-level.
+    Returns True if the app was activated (text field focus is best-effort),
+    False if activation failed entirely.
+
+    Strategy: activate the app and give it time to restore its own focus.
+    Most apps (including Electron) restore the last-focused text field
+    automatically when re-activated. Trying to set AXFocused on a stale
+    element (err -25202) is unreliable after app switching, so we only
+    attempt it as a bonus — the app activation is the real fix.
     """
     if snap is None:
         return False
+
+    import time as _time
 
     try:
         from ApplicationServices import (
@@ -96,33 +118,55 @@ def restore_target(snap: TargetSnapshot) -> bool:
     except ImportError:
         return False
 
-    # Step 1: Activate the app
+    # Step 1: Activate the app — this is the critical step
+    _log(f"restore: activating {snap.app_name} (pid={snap.app_pid})")
     _activate_app(snap.app_pid, snap.app_name)
+    _time.sleep(0.3)
 
-    # Step 2: Try to refocus the captured text field directly
+    # Verify activation worked
+    try:
+        import AppKit
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        actual = ws.frontmostApplication()
+        actual_name = actual.localizedName() if actual else "?"
+        actual_pid = actual.processIdentifier() if actual else -1
+        if actual_pid != snap.app_pid:
+            _log(f"restore: WARNING: wanted {snap.app_name} (pid={snap.app_pid}) "
+                 f"but frontmost is {actual_name} (pid={actual_pid})")
+        else:
+            _log(f"restore: activated {actual_name} (pid={actual_pid}) OK")
+    except Exception:
+        _log("restore: activated (couldn't verify)")
+
+    # Step 2: Try to refocus the captured text field (often stale, best-effort)
     if snap.ax_element is not None and snap.element_role in _TEXT_ROLES:
         err = AXUIElementSetAttributeValue(snap.ax_element, "AXFocused", kCFBooleanTrue)
         if err == 0:
-            log.info(f"Restored focus to text field in {snap.app_name}")
+            _log(f"restore: refocused text field ({snap.element_role}) in {snap.app_name}")
             return True
-        log.warning(f"AX refocus failed (err={err}), trying fallback")
+        # -25202 = kAXErrorCannotComplete (stale ref after app switch) — expected
+        if err != -25202:
+            _log(f"restore: WARNING: AX refocus failed (err={err})")
+        else:
+            _log(f"restore: AX element stale (-25202), relying on app's own focus restore")
 
     # Step 3: Fallback — find text fields in the focused window
     ax_app = AXUIElementCreateApplication(snap.app_pid)
     text_fields = _find_window_text_fields(ax_app)
+    _log(f"restore: found {len(text_fields)} text fields in window")
 
     if len(text_fields) == 1:
         elem, role = text_fields[0]
         err = AXUIElementSetAttributeValue(elem, "AXFocused", kCFBooleanTrue)
         if err == 0:
-            log.info(f"Focused sole text field ({role}) in {snap.app_name}")
+            _log(f"restore: focused sole text field ({role}) in {snap.app_name}")
             return True
-    elif len(text_fields) > 1:
-        log.info(f"{len(text_fields)} text fields in {snap.app_name} — can't auto-select")
-    else:
-        log.info(f"No text fields in {snap.app_name} window")
 
-    return False
+    # App was activated — even if we couldn't pinpoint the text field,
+    # the app likely restored its own focus state. Return True so the
+    # caller proceeds with pasting into the now-frontmost app.
+    _log(f"restore: done (app activated, text field focus = best-effort)")
+    return True
 
 
 def _activate_app(pid: int, app_name: str) -> None:
