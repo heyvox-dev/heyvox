@@ -107,11 +107,35 @@ def _set_clipboard(text: str) -> bool:
         return False
 
 
+def _save_frontmost_pid() -> int:
+    """Return the PID of the currently frontmost app (for restoring later)."""
+    try:
+        import AppKit
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        return app.processIdentifier() if app else 0
+    except Exception:
+        return 0
+
+
+def _restore_frontmost(pid: int) -> None:
+    """Re-activate the app that was frontmost before we stole focus."""
+    if not pid:
+        return
+    try:
+        import AppKit
+        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app:
+            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+    except Exception:
+        pass
+
+
 def _osascript_type_text(text: str, app_name: str | None = None) -> None:
     """Paste text via clipboard + Cmd-V (osascript).
 
-    When app_name is provided, targets that process directly. This prevents
-    pasting into the wrong app if the user switches focus during transcription.
+    When app_name is provided, targets that process directly. Briefly
+    activates the target for the paste, then restores the previously
+    focused app so the user isn't interrupted on multi-monitor setups.
     """
     _log(f"paste: target={app_name or 'frontmost'}, text={len(text)} chars: {text[:60]!r}")
 
@@ -127,7 +151,8 @@ def _osascript_type_text(text: str, app_name: str | None = None) -> None:
     _log(f"paste: clipboard verified OK ({len(text)} chars)")
 
     frontmost_before = _get_frontmost_app()
-    _log(f"paste: frontmost app BEFORE = {frontmost_before}")
+    original_pid = _save_frontmost_pid()
+    _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
 
     time.sleep(0.05)
     if app_name:
@@ -162,8 +187,8 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
     """Press Enter via osascript.
 
     When app_name is provided, targets that process directly via
-    `tell process`. Does NOT activate the app — the keystroke is sent
-    to the process in the background. This avoids stealing focus.
+    `tell process`. Must set frontmost briefly because macOS only
+    delivers keystrokes to the frontmost process.
     """
     _log(f"enter: count={count}, target={app_name or 'frontmost'}")
 
@@ -196,6 +221,16 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def save_frontmost_pid() -> int:
+    """Return the PID of the currently frontmost app (for restoring later)."""
+    return _save_frontmost_pid()
+
+
+def restore_frontmost(pid: int) -> None:
+    """Re-activate the app that was frontmost before injection stole focus."""
+    _restore_frontmost(pid)
+
 
 def type_text(text: str, app_name: str | None = None) -> None:
     """Insert text into an app.
