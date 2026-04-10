@@ -144,29 +144,41 @@ Once registered, your AI agent gets these voice tools:
 Edit `~/.config/heyvox/config.yaml`:
 
 ```yaml
-wake_word:
-  model: hey_jarvis       # or custom model path
-  threshold: 0.5
+wake_words:
+  start: hey_jarvis_v0.1   # Wake word model (custom "hey_vox" coming soon)
+
+threshold: 0.5
+silence_timeout_secs: 5.0
 
 stt:
-  backend: local           # local (MLX Whisper) or sherpa
-  language: en
+  backend: local
+  local:
+    engine: mlx             # mlx (Apple Silicon GPU) or sherpa (CPU)
+    mlx_model: mlx-community/whisper-small-mlx
 
 tts:
-  voice: af_sarah
-  speed: 1.2
-  pause_media: true        # Pause YouTube/Spotify during TTS
-
-input:
-  mode: last_agent         # last_agent | pinned | generic
-  agents:                  # Apps to track for last_agent mode
-    - Claude
-    - Cursor
-    - Windsurf
-
-ptt:
   enabled: true
-  key: right_option        # Push-to-talk key
+  voice: af_heart           # Kokoro voice (af_sarah, af_nova, af_sky, etc.)
+  speed: 1.0
+  verbosity: full           # full | short (first sentence only) | skip (mute)
+  style: detailed           # detailed | concise | technical | casual
+  pause_media: true         # Pause YouTube/Spotify during TTS
+
+target_mode: last-agent     # last-agent | pinned | generic
+agents:                     # Apps to track for last-agent mode
+  - Claude
+  - Conductor
+  - Cursor
+  - Terminal
+
+push_to_talk:
+  enabled: true
+  key: fn                   # Push-to-talk key
+
+mic_priority:               # Preferred mics (checked in order)
+  - Jabra
+  - G435
+  - MacBook Pro Microphone
 ```
 
 ## Supported Agents
@@ -232,7 +244,7 @@ HeyVox works with any app that supports MCP (Model Context Protocol):
 | CPU | <1% | ~15% during STT |
 
 - **Whisper STT** runs on Apple Silicon GPU via MLX (not system RAM)
-- **Kokoro TTS** model loads on-demand, auto-unloads after idle timeout
+- **Kokoro TTS** runs on Metal GPU via mlx-audio (~5-10x faster than CPU), auto-unloads after idle timeout
 - **Wake word** model is tiny (~5 MB), always loaded
 - **Memory watchdog** auto-restarts if RSS exceeds 1 GB
 
@@ -244,18 +256,21 @@ HeyVox works with any app that supports MCP (Model Context Protocol):
 
 ## Audio Devices
 
-HeyVox works best with a dedicated microphone. Bluetooth headsets have a fundamental limitation:
-
-| Device Type | Mic Quality | Playback Quality | Recommended |
-|-------------|-------------|------------------|-------------|
-| 2.4 GHz wireless (USB dongle) | High | High | Best option |
+| Device Type | Mic Quality | Playback Quality | Notes |
+|-------------|-------------|------------------|-------|
+| 2.4 GHz wireless (USB dongle) | High | High | Best option — bypasses Bluetooth entirely |
 | USB/3.5mm wired headset | High | High | Great option |
-| Built-in Mac mic | Good | N/A | Works fine |
-| Bluetooth headset (incl. AirPods) | Low | Low | Not recommended |
+| Built-in Mac mic | Good | N/A | Works fine for voice input |
+| Bluetooth headset (incl. AirPods) | Reduced | Reduced | Works — with automatic mitigations (see below) |
 
-**Why Bluetooth is problematic**: Bluetooth can either stream high-quality audio (A2DP) or do bidirectional mic+speaker (HFP) — not both. When the mic activates, quality drops to phone-call level. This affects all Bluetooth headsets on macOS, including AirPods.
+**Bluetooth and HFP mode**: Bluetooth can either stream high-quality audio (A2DP) or do bidirectional mic+speaker (HFP) — not both simultaneously. When the mic activates, audio quality drops to phone-call level (~16 kHz). This is a macOS/Bluetooth limitation, not a HeyVox bug.
 
-**Workaround**: Headsets with a 2.4 GHz USB dongle (Logitech G435, SteelSeries Arctis, etc.) bypass Bluetooth entirely and appear as standard USB audio.
+**HeyVox mitigations**: Bluetooth headsets work in practice because HeyVox handles the rough edges automatically:
+- **Dead device filtering** — CoreAudio queries skip paired-but-disconnected Bluetooth devices
+- **Silent mic recovery** — detects when a Bluetooth mic goes silent and auto-switches to an alternative (with exponential backoff)
+- **Echo suppression** — TTS echo buffer strips recently spoken text from STT output, preventing feedback loops in speaker mode
+
+**For best results**: Headsets with a 2.4 GHz USB dongle (Logitech G435, SteelSeries Arctis, Jabra) bypass Bluetooth entirely and appear as standard USB audio — no codec switching, no quality drop.
 
 ## Privacy
 
