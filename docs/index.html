@@ -937,7 +937,7 @@
           <div><span class="prompt">$</span> git clone https://github.com/heyvox-dev/heyvox.git</div>
           <div><span class="prompt">$</span> cd heyvox &amp;&amp; pip install -e ".[apple-silicon]"</div>
           <div><span class="prompt">$</span> heyvox setup</div>
-          <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/heyvox-dev/heyvox.git && cd heyvox && pip install -e \".[apple-silicon]\" && heyvox setup');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)" title="Copy" style="position:absolute;right:16px;top:16px;">Copy</button>
+          <button class="copy-btn" id="hero-copy" title="Copy" style="position:absolute;right:16px;top:16px;">Copy</button>
         </div>
 
         <div class="hero-actions">
@@ -1307,6 +1307,16 @@
 
     document.querySelectorAll(".reveal:not(.visible)").forEach(el => {
       observer.observe(el);
+    });
+
+    // ── Copy install command ──
+    document.getElementById("hero-copy").addEventListener("click", function() {
+      var cmd = "git clone https://github.com/heyvox-dev/heyvox.git && cd heyvox && pip install -e '.[apple-silicon]' && heyvox setup";
+      var btn = this;
+      navigator.clipboard.writeText(cmd).then(function() {
+        btn.textContent = "Copied!";
+        setTimeout(function() { btn.textContent = "Copy"; }, 1500);
+      });
     });
 
   </script>
