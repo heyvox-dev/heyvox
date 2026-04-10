@@ -621,13 +621,48 @@ def _make_menu_action_class():
             """Kill heyvox.main, relaunch it (which spawns a new overlay), then quit this overlay."""
             import subprocess
             import sys
-            # Kill the main process
-            subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
             import time
-            time.sleep(0.5)
+            import os
+            import signal as _sig
+
+            # Send SIGTERM to main process and wait for clean shutdown
+            # (atexit handler releases PID lock). Avoid pkill which can
+            # also kill the newly spawned process.
+            pid_file = "/tmp/heyvox.pid"
+            old_pid = 0
+            try:
+                with open(pid_file) as f:
+                    old_pid = int(f.read().strip())
+                os.kill(old_pid, _sig.SIGTERM)
+            except (FileNotFoundError, ValueError, ProcessLookupError):
+                # No PID file or process already dead — try pkill as fallback
+                subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+
+            # Wait for process to exit and release PID lock
+            if old_pid:
+                for _ in range(20):  # up to 2 seconds
+                    time.sleep(0.1)
+                    try:
+                        os.kill(old_pid, 0)  # Check if still alive
+                    except ProcessLookupError:
+                        break  # Process exited
+                else:
+                    # Force kill if still alive after 2s
+                    try:
+                        os.kill(old_pid, _sig.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    time.sleep(0.3)
+
+            # Clean up stale PID file in case atexit didn't run
+            try:
+                os.unlink(pid_file)
+            except FileNotFoundError:
+                pass
+
             # Relaunch main process — it will spawn its own overlay
             subprocess.Popen(
-                [sys.executable, "-c", "from heyvox.main import run; run()"],
+                [sys.executable, "-m", "heyvox.main"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,  # Detach so our exit doesn't kill it
             )
@@ -637,8 +672,15 @@ def _make_menu_action_class():
 
         def quitHeyVox_(self, sender):
             """Send SIGTERM to parent heyvox.main process, then quit overlay."""
-            import subprocess
-            subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+            import os
+            import signal as _sig
+            try:
+                with open("/tmp/heyvox.pid") as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, _sig.SIGTERM)
+            except (FileNotFoundError, ValueError, ProcessLookupError):
+                import subprocess
+                subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
 
@@ -791,7 +833,7 @@ def _build_transcript_menu(handler):
         _output_short = friendly_output_name(_active_output.name) if _active_output else "System Default"
 
         output_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"\U0001f50a Speaker: {_output_short}", None, "",
+            f"\U0001f508 Output: {_output_short}", None, "",
         )
         _styled(output_parent)
         output_sub = NSMenu.alloc().init()
@@ -812,7 +854,7 @@ def _build_transcript_menu(handler):
         output_parent.setSubmenu_(output_sub)
         menu.addItem_(output_parent)
 
-    # ── Section 2: Voice Output (verbosity + style in one submenu) ──
+    # ── Section 2: Speech (verbosity + style in one submenu) ──
     from heyvox.audio.tts import get_tts_style
     current_style = get_tts_style()
     _TTS_LABELS = {
@@ -823,7 +865,7 @@ def _build_transcript_menu(handler):
         "technical": "Technical", "casual": "Casual",
     }
     voice_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f50a Voice: {_TTS_LABELS.get(current_verbosity, 'Speak All')} \u00b7 {_STYLE_LABELS.get(current_style, 'Detailed')}", None, "",
+        f"\U0001f4ac Speech: {_TTS_LABELS.get(current_verbosity, 'Speak All')} \u00b7 {_STYLE_LABELS.get(current_style, 'Detailed')}", None, "",
     )
     _styled(voice_parent)
     voice_sub = NSMenu.alloc().init()
