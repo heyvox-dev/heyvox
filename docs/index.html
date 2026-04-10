@@ -754,6 +754,7 @@
 
     .tier-best   { color: #34d399; }
     .tier-good   { color: #60a5fa; }
+    .tier-ok     { color: #facc15; }
     .tier-avoid  { color: #f87171; }
 
     .device-card h4 {
@@ -930,9 +931,14 @@
           Voice layer runs fully local. Open source. Zero cloud fees.
         </p>
 
+        <div class="hero-install">
+          <span class="prompt">$</span> pip install heyvox &amp;&amp; heyvox setup
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install heyvox && heyvox setup');this.textContent='✓';setTimeout(()=>this.textContent='⧉',1500)" title="Copy">⧉</button>
+        </div>
+
         <div class="hero-actions">
-          <a href="#early-access" class="btn btn-primary">
-            Request Early Access
+          <a href="https://github.com/heyvox-dev/heyvox#install" class="btn btn-primary">
+            Get Started
           </a>
           <a href="https://github.com/heyvox-dev/heyvox" class="btn btn-secondary">
             View on GitHub
@@ -1080,7 +1086,7 @@
         <div class="feature-card reveal">
           <span class="feature-icon">&#x1F50A;</span>
           <h4>Herald TTS Orchestration</h4>
-          <p>Kokoro TTS with multi-part streaming, audio ducking, and workspace-aware queue. Your agent speaks, you listen.</p>
+          <p>Kokoro TTS on Metal GPU via mlx-audio. Multi-part streaming, audio ducking, and workspace-aware queue. Your agent speaks, you listen.</p>
         </div>
 
         <div class="feature-card reveal">
@@ -1146,7 +1152,7 @@
         <div class="feature-card reveal">
           <span class="feature-icon">&#x1F6E1;</span>
           <h4>Self-Healing</h4>
-          <p>Dead mic recovery in 30s. Memory watchdog auto-restarts at 1 GB. STT timeout prevents hangs.</p>
+          <p>Dead mic recovery in 10s with exponential backoff. Bluetooth device filtering via CoreAudio. Memory watchdog auto-restarts at 1 GB.</p>
         </div>
       </div>
     </div>
@@ -1230,30 +1236,30 @@
         </div>
 
         <div class="device-card reveal">
-          <div class="device-tier tier-avoid">Not Recommended</div>
+          <div class="device-tier tier-ok">Works</div>
           <h4>Bluetooth Mic Mode</h4>
           <p>
-            When a Bluetooth headset's mic is active, macOS switches to HFP mode,
-            dropping audio to 8&ndash;16 kHz mono. Use the built-in mic instead.
+            Bluetooth mic activates HFP mode (reduced quality), but HeyVox handles it:
+            dead device filtering via CoreAudio, silent mic auto-recovery, and echo suppression.
+            USB dongles are still better, but Bluetooth works.
           </p>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ── EARLY ACCESS CTA ── -->
+  <!-- ── GET STARTED CTA ── -->
   <section id="early-access">
     <div class="container">
       <div class="ea-box reveal">
-        <div class="section-label">Early access</div>
-        <h2>Join the beta</h2>
+        <div class="section-label">Open source</div>
+        <h2>Get started in 2 minutes</h2>
         <p>
-          HeyVox is in early access. We&rsquo;re onboarding testers who use
-          AI coding agents daily and want a real voice workflow.
-          Tell us what agent you use and we&rsquo;ll get you set up.
+          HeyVox is open source and free. Clone, install, run the setup wizard &mdash;
+          you&rsquo;ll be voice coding before your coffee gets cold.
         </p>
-        <a href="mailto:hello@heyvox.dev?subject=HeyVox%20Early%20Access&body=Agent%20I%20use%3A%20%0AMac%20chip%3A%20Apple%20Silicon%20%2F%20Intel%0AWhy%20I%20want%20voice%20coding%3A%20" class="btn btn-primary">
-          Request Access
+        <a href="https://github.com/heyvox-dev/heyvox#install" class="btn btn-primary">
+          Install from GitHub
         </a>
       </div>
     </div>
