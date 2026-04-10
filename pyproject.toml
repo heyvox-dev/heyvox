@@ -1,6 +1,6 @@
 [project]
 name = "heyvox"
-version = "0.1.0"
+version = "1.0.0"
 description = "macOS voice layer for AI coding agents — wake word, STT, TTS, HUD, media control"
 license = "MIT"
 requires-python = ">=3.12"
