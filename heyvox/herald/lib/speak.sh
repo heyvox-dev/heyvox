@@ -57,9 +57,12 @@ except FileExistsError:
     print(f'SKIP:claimed_by_watcher:{speech_hash}')
     sys.exit(0)
 
+hook_epoch_ms = int(time.time() * 1000)
 raw_file = f'/tmp/herald-raw-{os.getpid()}.{time.time_ns()}.txt'
 with open(raw_file, 'w') as f:
     f.write(message)
+with open(raw_file + '.timing', 'w') as f:
+    f.write(str(hook_epoch_ms))
 
 ws = os.environ.get('CONDUCTOR_WORKSPACE_NAME', '')
 label = ws

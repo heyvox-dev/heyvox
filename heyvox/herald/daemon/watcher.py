@@ -139,7 +139,7 @@ def _apply_verbosity(text, verbosity):
 
 
 def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
-                    workspace=""):
+                    workspace="", hook_epoch_ms=0):
     """Send speech text to Kokoro daemon and enqueue result."""
     global last_tts_time
 
@@ -154,6 +154,10 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
     if now - last_tts_time < TTS_DEDUP_SECS:
         log(f"Dedup: skipping (last TTS {now - last_tts_time:.1f}s ago)")
         return False
+
+    watcher_start_ms = int(time.time() * 1000)
+    if not hook_epoch_ms:
+        hook_epoch_ms = watcher_start_ms
 
     timestamp = str(time.time_ns())
 
@@ -192,11 +196,16 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             return False
 
         os.makedirs(QUEUE_DIR, exist_ok=True)
+        tts_end_ms = int(time.time() * 1000)
         wav_name = f"{timestamp}-01.wav"
         os.rename(temp_wav, f"{QUEUE_DIR}/{wav_name}")
         if workspace:
             with open(f"{QUEUE_DIR}/{wav_name.replace('.wav', '.workspace')}", "w") as f:
                 f.write(workspace)
+        # Write timing sidecar
+        timing_str = f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{tts_end_ms}"
+        with open(f"{QUEUE_DIR}/{wav_name.replace('.wav', '.timing')}", "w") as f:
+            f.write(timing_str)
 
         base = temp_wav.replace(".wav", "")
         part = 2
@@ -206,8 +215,12 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             if workspace:
                 with open(f"{QUEUE_DIR}/{part_name.replace('.wav', '.workspace')}", "w") as f:
                     f.write(workspace)
+            part_ms = int(time.time() * 1000)
+            with open(f"{QUEUE_DIR}/{part_name.replace('.wav', '.timing')}", "w") as f:
+                f.write(f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{part_ms}")
             part += 1
 
+        log(f"TIMING: watcher tts={tts_end_ms - watcher_start_ms}ms, hook->enqueue={tts_end_ms - hook_epoch_ms}ms")
         log(f"Enqueued {part - 1} part(s) in {data['duration']:.2f}s, ws={workspace}")
         last_tts_time = time.time()
 
@@ -298,9 +311,11 @@ def process_new_lines(filepath):
                     except FileExistsError:
                         log(f"Skipped (hook claimed {speech_hash}): \"{speech[:50]}...\"")
                         continue
+                    detect_ms = int(time.time() * 1000)
                     log(f"Detected TTS in {os.path.basename(filepath)}: "
                         f"\"{speech[:50]}...\"")
-                    ok = send_to_kokoro(speech, workspace=workspace)
+                    ok = send_to_kokoro(speech, workspace=workspace,
+                                        hook_epoch_ms=detect_ms)
                     if not ok:
                         try:
                             os.unlink(claim_file)
