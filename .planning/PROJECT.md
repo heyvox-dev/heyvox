@@ -37,7 +37,18 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 
 ### Active
 
-(None — next milestone requirements TBD via `/gsd:new-milestone`)
+(See REQUIREMENTS.md for v1.1 requirements)
+
+## Current Milestone: v1.1 Architecture Hardening
+
+**Goal:** Refactor the core architecture for reliability, testability, and maintainability — decompose the monolithic main loop, eliminate the bash/Python boundary in Herald, consolidate fragile flag-file IPC, and add a test suite.
+
+**Target features:**
+- Decompose main.py into RecordingStateMachine, DeviceManager, WakeWordProcessor modules
+- Port Herald orchestrator.sh to Python
+- Consolidate 25+ /tmp flag files into a single atomic state file
+- Add core test suite (pure functions, state transitions, IPC)
+- Kokoro daemon health monitoring (shipped pre-milestone)
 
 ### Out of Scope
 
@@ -106,5 +117,22 @@ Tech stack: Python 3.12+, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, she
 | pipx install as v1 distribution | Avoids Homebrew formula complexity | Confirmed |
 | Package name TBD | "vox" taken; need availability check | ⚠️ Revisit |
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd:transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd:complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
-*Last updated: 2026-03-27 after v1.0 milestone*
+*Last updated: 2026-04-10 — v1.1 Architecture Hardening milestone started*
