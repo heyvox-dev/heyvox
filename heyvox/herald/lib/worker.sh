@@ -12,6 +12,17 @@ META_FILE="/tmp/herald-meta-$$.json"
 
 RAW_FILE="${1:-/tmp/herald-raw.txt}"
 
+# Pipeline timing: read hook entry timestamp
+HOOK_EPOCH_MS=""
+if [ -f "${RAW_FILE}.timing" ]; then
+  HOOK_EPOCH_MS=$(cat "${RAW_FILE}.timing" 2>/dev/null)
+  rm -f "${RAW_FILE}.timing"
+fi
+WORKER_START_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
+if [ -n "$HOOK_EPOCH_MS" ]; then
+  herald_log "TIMING: hook->worker = $((WORKER_START_MS - HOOK_EPOCH_MS))ms"
+fi
+
 herald_ensure_dirs
 
 # Ensure orchestrator is running (atomic: mkdir lock prevents duplicate launches)
@@ -210,6 +221,7 @@ ensure_daemon() {
 }
 
 GENERATED=false
+TTS_START_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
 
 # --- Route by engine ---
 if [ "$ENGINE" = "piper" ]; then
@@ -221,6 +233,11 @@ if [ "$ENGINE" = "piper" ]; then
       mv "$TEMP_WAV" "$HERALD_QUEUE_DIR/$WAV_NAME"
       if [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
         echo "${CONDUCTOR_WORKSPACE_NAME}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.workspace"
+      fi
+      TTS_END_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
+      echo "${HOOK_EPOCH_MS:-0}|${WORKER_START_MS:-0}|${TTS_START_MS:-0}|${TTS_END_MS}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.timing"
+      if [ -n "$HOOK_EPOCH_MS" ]; then
+        herald_log "TIMING: hook->enqueue = $((TTS_END_MS - HOOK_EPOCH_MS))ms (tts=$((TTS_END_MS - TTS_START_MS))ms)"
       fi
       herald_log "WORKER: piper enqueued -> $WAV_NAME"
       GENERATED=true
@@ -250,6 +267,11 @@ with open(os.environ['_HERALD_REQ_FILE'], 'w') as f:
           cp "$TEMP_WAV" "$HERALD_QUEUE_DIR/$WAV_NAME"
           if [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
             echo "${CONDUCTOR_WORKSPACE_NAME}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.workspace"
+          fi
+          ENQUEUE_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
+          echo "${HOOK_EPOCH_MS:-0}|${WORKER_START_MS:-0}|${TTS_START_MS:-0}|${ENQUEUE_MS}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.timing"
+          if [ -n "$HOOK_EPOCH_MS" ]; then
+            herald_log "TIMING: hook->part1_enqueue = $((ENQUEUE_MS - HOOK_EPOCH_MS))ms (tts=$((ENQUEUE_MS - TTS_START_MS))ms)"
           fi
           herald_log "WORKER: early-enqueued part 1 -> $WAV_NAME"
           break
@@ -289,6 +311,10 @@ except Exception as e:
     rm -f "$REQ_FILE"
 
     if [ $DAEMON_OK -eq 0 ]; then
+      TTS_END_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
+      if [ -n "$HOOK_EPOCH_MS" ]; then
+        herald_log "TIMING: hook->tts_done = $((TTS_END_MS - HOOK_EPOCH_MS))ms (tts=$((TTS_END_MS - TTS_START_MS))ms, worker_overhead=$((TTS_START_MS - WORKER_START_MS))ms)"
+      fi
       herald_log "WORKER: daemon completed ${RESULT}"
       GENERATED=true
       TEMP_WAV_BASE="${TEMP_WAV%.wav}"
@@ -300,6 +326,8 @@ except Exception as e:
         if [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
           echo "${CONDUCTOR_WORKSPACE_NAME}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.workspace"
         fi
+        PART_ENQUEUE_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
+        echo "${HOOK_EPOCH_MS:-0}|${WORKER_START_MS:-0}|${TTS_START_MS:-0}|${PART_ENQUEUE_MS}" > "$HERALD_QUEUE_DIR/${WAV_NAME%.wav}.timing"
         herald_log "WORKER: enqueued part $PART_NUM -> $WAV_NAME"
         PART_NUM=$((PART_NUM + 1))
       done
