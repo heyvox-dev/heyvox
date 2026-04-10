@@ -60,27 +60,27 @@ Deferred to v2.0+. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DECOMP-01 | — | Pending |
-| DECOMP-02 | — | Pending |
-| DECOMP-03 | — | Pending |
-| DECOMP-04 | — | Pending |
-| HERALD-01 | — | Pending |
-| HERALD-02 | — | Pending |
-| HERALD-03 | — | Pending |
-| HERALD-04 | — | Pending |
-| IPC-01 | — | Pending |
-| IPC-02 | — | Pending |
-| IPC-03 | — | Pending |
-| TEST-01 | — | Pending |
-| TEST-02 | — | Pending |
-| TEST-03 | — | Pending |
-| TEST-04 | — | Pending |
+| DECOMP-01 | Phase 6 | Pending |
+| DECOMP-02 | Phase 6 | Pending |
+| DECOMP-03 | Phase 6 | Pending |
+| DECOMP-04 | Phase 6 | Pending |
+| HERALD-01 | Phase 7 | Pending |
+| HERALD-02 | Phase 7 | Pending |
+| HERALD-03 | Phase 7 | Pending |
+| HERALD-04 | Phase 7 | Pending |
+| IPC-01 | Phase 8 | Pending |
+| IPC-02 | Phase 8 | Pending |
+| IPC-03 | Phase 8 | Pending |
+| TEST-01 | Phase 9 | Pending |
+| TEST-02 | Phase 9 | Pending |
+| TEST-03 | Phase 9 | Pending |
+| TEST-04 | Phase 9 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 15 total
-- Mapped to phases: 0
-- Unmapped: 15 (awaiting roadmap)
+- Mapped to phases: 15
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-10*
-*Last updated: 2026-04-10 after initial definition*
+*Last updated: 2026-04-10 — all 15 requirements mapped to phases 6-9*
