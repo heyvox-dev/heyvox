@@ -205,7 +205,7 @@
 
     .hero-install {
       display: inline-flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 12px;
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -216,6 +216,8 @@
       color: #a5b4fc;
       margin-bottom: 36px;
       letter-spacing: 0.01em;
+      position: relative;
+      text-align: left;
     }
 
     .hero-install .prompt {
@@ -931,9 +933,11 @@
           Voice layer runs fully local. Open source. Zero cloud fees.
         </p>
 
-        <div class="hero-install">
-          <span class="prompt">$</span> git clone https://github.com/heyvox-dev/heyvox.git &amp;&amp; cd heyvox &amp;&amp; pip install -e ".[apple-silicon]" &amp;&amp; heyvox setup
-          <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/heyvox-dev/heyvox.git && cd heyvox && pip install -e \".[apple-silicon]\" && heyvox setup');this.textContent='✓';setTimeout(()=>this.textContent='⧉',1500)" title="Copy">⧉</button>
+        <div class="hero-install" style="flex-direction:column;gap:4px;align-items:flex-start;">
+          <div><span class="prompt">$</span> git clone https://github.com/heyvox-dev/heyvox.git</div>
+          <div><span class="prompt">$</span> cd heyvox &amp;&amp; pip install -e ".[apple-silicon]"</div>
+          <div><span class="prompt">$</span> heyvox setup</div>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/heyvox-dev/heyvox.git && cd heyvox && pip install -e \".[apple-silicon]\" && heyvox setup');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)" title="Copy" style="position:absolute;right:16px;top:16px;">Copy</button>
         </div>
 
         <div class="hero-actions">
