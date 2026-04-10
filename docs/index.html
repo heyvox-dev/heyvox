@@ -932,8 +932,8 @@
         </p>
 
         <div class="hero-install">
-          <span class="prompt">$</span> pip install heyvox &amp;&amp; heyvox setup
-          <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install heyvox && heyvox setup');this.textContent='✓';setTimeout(()=>this.textContent='⧉',1500)" title="Copy">⧉</button>
+          <span class="prompt">$</span> git clone https://github.com/heyvox-dev/heyvox.git &amp;&amp; cd heyvox &amp;&amp; pip install -e ".[apple-silicon]" &amp;&amp; heyvox setup
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/heyvox-dev/heyvox.git && cd heyvox && pip install -e \".[apple-silicon]\" && heyvox setup');this.textContent='✓';setTimeout(()=>this.textContent='⧉',1500)" title="Copy">⧉</button>
         </div>
 
         <div class="hero-actions">
