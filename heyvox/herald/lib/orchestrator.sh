@@ -175,16 +175,24 @@ play_wav() {
   done
 
   if [ "$is_continuation" != "true" ]; then
-    # FIX: Switch workspace ONLY if Conductor is the frontmost app
+    # Switch Conductor to the workspace that produced TTS
     if [ -f "$workspace_file" ]; then
       local ws=$(cat "$workspace_file")
-      if herald_conductor_is_frontmost; then
-        CURRENT_WORKSPACE="$ws"  # Only track as user's workspace when we switch
-        "$CONDUCTOR_SWITCH" "$ws" >> "$HERALD_DEBUG_LOG" 2>&1
+      CURRENT_WORKSPACE="$ws"
+      # Always record last TTS workspace for jump-to-speaker shortcut
+      echo "$ws" > /tmp/herald-last-tts-workspace
+      "$CONDUCTOR_SWITCH" "$ws" >> "$HERALD_DEBUG_LOG" 2>&1
+      local switch_exit=$?
+      if [ "$switch_exit" -eq 0 ]; then
         sleep 0.3
-      else
-        herald_log "ORCH: skipping workspace switch (Conductor not frontmost)"
-        # Don't update CURRENT_WORKSPACE — user isn't looking at this workspace
+        # Scroll to bottom so user sees the TTS message context (only if switch happened)
+        /opt/homebrew/bin/hs -c "
+          local app = hs.application.get('com.conductor.app')
+          if app then
+            local win = app:mainWindow()
+            if win then hs.eventtap.keyStroke({'cmd'}, 'down', 0, app) end
+          end
+        " 2>/dev/null &
       fi
       rm -f "$workspace_file"
     fi
@@ -226,6 +234,21 @@ play_wav() {
     while herald_is_paused; do
       sleep 0.3
     done
+  fi
+
+  # Pipeline timing: compute end-to-end latency
+  local timing_file="${wav_file%.wav}.timing"
+  if [ -f "$timing_file" ]; then
+    local play_ms=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null)
+    local timing_data=$(cat "$timing_file" 2>/dev/null)
+    local hook_ms=$(echo "$timing_data" | cut -d'|' -f1)
+    local worker_ms=$(echo "$timing_data" | cut -d'|' -f2)
+    local tts_start_ms=$(echo "$timing_data" | cut -d'|' -f3)
+    local enqueue_ms=$(echo "$timing_data" | cut -d'|' -f4)
+    if [ "$hook_ms" != "0" ] && [ -n "$hook_ms" ]; then
+      herald_log "TIMING: PIPELINE hook->play = $((play_ms - hook_ms))ms (hook->worker=$((worker_ms - hook_ms))ms, worker_prep=$((tts_start_ms - worker_ms))ms, tts=$((enqueue_ms - tts_start_ms))ms, queue_wait=$((play_ms - enqueue_ms))ms) file=$basename"
+    fi
+    rm -f "$timing_file"
   fi
 
   normalize_wav "$wav_file"
@@ -292,7 +315,7 @@ while true; do
 
   if [ -n "$NEXT" ] && [ -f "$NEXT" ]; then
     if herald_is_muted || herald_is_skip; then
-      rm -f "$NEXT" "${NEXT%.wav}.workspace"
+      rm -f "$NEXT" "${NEXT%.wav}.workspace" "${NEXT%.wav}.timing"
       continue
     fi
 
@@ -300,11 +323,22 @@ while true; do
     NEXT_WORKSPACE=""
     [ -f "$WORKSPACE_FILE" ] && NEXT_WORKSPACE=$(cat "$WORKSPACE_FILE")
 
-    if [ -n "$NEXT_WORKSPACE" ] && [ -n "$CURRENT_WORKSPACE" ] \
+    # Never hold continuation parts of a message that already started playing.
+    # Without this, part 2 gets held for 15s while part 1 already played.
+    NEXT_BASENAME=$(basename "$NEXT")
+    NEXT_MSG_PREFIX="${NEXT_BASENAME%%-*}"
+    IS_CONTINUATION=false
+    if [ -n "$LAST_MSG_PREFIX" ] && [ "$NEXT_MSG_PREFIX" = "$LAST_MSG_PREFIX" ]; then
+      IS_CONTINUATION=true
+    fi
+
+    if [ "$IS_CONTINUATION" != "true" ] \
+       && [ -n "$NEXT_WORKSPACE" ] && [ -n "$CURRENT_WORKSPACE" ] \
        && [ "$NEXT_WORKSPACE" != "$CURRENT_WORKSPACE" ] && user_is_active; then
       BASENAME=$(basename "$NEXT")
       mv "$NEXT" "$HERALD_HOLD_DIR/$BASENAME"
       [ -f "$WORKSPACE_FILE" ] && mv "$WORKSPACE_FILE" "$HERALD_HOLD_DIR/${BASENAME%.wav}.workspace"
+      [ -f "${NEXT%.wav}.timing" ] && mv "${NEXT%.wav}.timing" "$HERALD_HOLD_DIR/${BASENAME%.wav}.timing"
       herald_log "ORCH: held $BASENAME from $NEXT_WORKSPACE (user active on $CURRENT_WORKSPACE)"
       if ! herald_is_paused; then
         notify_held "$NEXT_WORKSPACE"
