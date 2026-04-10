@@ -1,0 +1,86 @@
+# Requirements: HeyVox v1.1
+
+**Defined:** 2026-04-10
+**Core Value:** One voice layer that works across ALL your AI coding agents — wake word, local STT, local TTS, beautiful HUD — without sending audio to the cloud.
+
+## v1.1 Requirements
+
+Requirements for Architecture Hardening milestone. Each maps to roadmap phases.
+
+### Decomposition
+
+- [ ] **DECOMP-01**: Recording logic extracted into RecordingStateMachine with start/stop/send_local + state
+- [ ] **DECOMP-02**: Device management extracted into DeviceManager (hotplug, zombie detection, health checks, cooldown)
+- [ ] **DECOMP-03**: Wake word processing extracted into WakeWordProcessor (stripping, garbled detection)
+- [ ] **DECOMP-04**: 17+ module globals replaced with shared AppContext dataclass passed by reference
+
+### Herald Python Port
+
+- [ ] **HERALD-01**: orchestrator.sh ported to Python (heyvox/herald/orchestrator.py) with equivalent behavior
+- [ ] **HERALD-02**: WAV normalization moved from orchestrator to Kokoro daemon (normalize at generation time)
+- [ ] **HERALD-03**: osascript volume calls replaced with CoreAudio ctypes bindings
+- [ ] **HERALD-04**: Mute/volume detection cached (check every 5s, not every 300ms loop iteration)
+
+### IPC Consolidation
+
+- [ ] **IPC-01**: All flag/socket/PID/queue paths consolidated into heyvox/constants.py (single source of truth)
+- [ ] **IPC-02**: Flag-file constellation replaced with atomic /tmp/heyvox-state.json (temp file + os.rename)
+- [ ] **IPC-03**: Periodic garbage collection added for orphaned WAV/timing/workspace files in queue directories
+
+### Test Suite
+
+- [ ] **TEST-01**: Pure function tests for garbled detection, wake word stripping, config loading, echo filtering
+- [ ] **TEST-02**: State machine transition tests for recording start/stop/busy/cancel flows
+- [ ] **TEST-03**: IPC round-trip tests for HUD Unix socket (client/server, reconnection, message loss)
+- [ ] **TEST-04**: Device selection tests with mocked PyAudio (priority, cooldown, fallback)
+
+## Future Requirements
+
+Deferred to v2.0+. Tracked but not in current roadmap.
+
+### Cross-Platform
+- **XPLAT-01**: TTS server mode (Kokoro on Mac Mini, stream to clients)
+- **XPLAT-02**: Lightweight client for Windows/Linux (sherpa-onnx STT, no Apple Silicon)
+
+### Polish
+- **POLISH-01**: Custom "Hey Vox" wake word (trained openwakeword model)
+- **POLISH-02**: PyPI / Homebrew distribution
+- **POLISH-03**: Demo video for heyvox.dev
+
+## Out of Scope
+
+| Feature | Reason |
+|---------|--------|
+| New user-facing features | This is a reliability/refactoring milestone only |
+| Herald bash script removal | Python port replaces it; old script kept for rollback |
+| Full IPC protocol redesign | Atomic state file is incremental improvement, not full redesign |
+| Performance benchmarks | Focus is correctness, not speed |
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| DECOMP-01 | — | Pending |
+| DECOMP-02 | — | Pending |
+| DECOMP-03 | — | Pending |
+| DECOMP-04 | — | Pending |
+| HERALD-01 | — | Pending |
+| HERALD-02 | — | Pending |
+| HERALD-03 | — | Pending |
+| HERALD-04 | — | Pending |
+| IPC-01 | — | Pending |
+| IPC-02 | — | Pending |
+| IPC-03 | — | Pending |
+| TEST-01 | — | Pending |
+| TEST-02 | — | Pending |
+| TEST-03 | — | Pending |
+| TEST-04 | — | Pending |
+
+**Coverage:**
+- v1.1 requirements: 15 total
+- Mapped to phases: 0
+- Unmapped: 15 (awaiting roadmap)
+
+---
+*Requirements defined: 2026-04-10*
+*Last updated: 2026-04-10 after initial definition*
