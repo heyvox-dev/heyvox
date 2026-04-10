@@ -58,6 +58,17 @@ _inject_lock = threading.Lock()
 _INJECT_DEDUP_SECS = 2.0  # Suppress duplicate injections within this window
 
 # ---------------------------------------------------------------------------
+# Zombie stream detection (AUDIO-12)
+# Tracks consecutive failed recordings to detect corrupted audio streams
+# that pass the level-based health check but produce unusable audio.
+# ---------------------------------------------------------------------------
+_consecutive_failed_recordings = 0
+_zombie_mic_reinit = False  # Set True to force mic reinit on next main loop iteration
+_ZOMBIE_FAIL_THRESHOLD = 2  # Force reinit after N consecutive failed recordings
+_busy_since: float = 0.0  # Timestamp when busy flag was set (watchdog)
+_BUSY_TIMEOUT = 60.0  # Force-reset busy after this many seconds
+
+# ---------------------------------------------------------------------------
 # HUD client state (Phase 5 — optional, never crashes main loop)
 # ---------------------------------------------------------------------------
 
@@ -561,6 +572,18 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
     log("Stopping recording...")
     _show_recording_indicator(False)
     _hud_send({"type": "state", "state": "processing"})
+
+    # Zombie stream detection: track consecutive failed recordings (AUDIO-12)
+    global _consecutive_failed_recordings, _zombie_mic_reinit
+    if len(recorded_chunks) == 0:
+        _consecutive_failed_recordings += 1
+        log(f"WARNING: Recording produced 0 chunks (consecutive failures: {_consecutive_failed_recordings})")
+        if _consecutive_failed_recordings >= _ZOMBIE_FAIL_THRESHOLD:
+            log(f"WARNING: {_ZOMBIE_FAIL_THRESHOLD} consecutive empty recordings — flagging zombie stream for reinit")
+            _zombie_mic_reinit = True
+            _consecutive_failed_recordings = 0
+    else:
+        _consecutive_failed_recordings = 0
 
     # NOTE: Recording flag (RECORDING_FLAG + _recording_active event) stays set
     # through the STT→paste pipeline. It is released in _send_local's finally block
@@ -1074,7 +1097,7 @@ def _release_singleton():
 
 def main() -> None:
     """Main event loop — loads config, starts PTT, runs wake word detection."""
-    global is_recording, _audio_buffer, busy
+    global is_recording, _audio_buffer, busy, _zombie_mic_reinit, _consecutive_failed_recordings, _busy_since
 
     # Load configuration from ~/.config/heyvox/config.yaml (or defaults)
     # Requirement: CONF-01
@@ -1290,6 +1313,11 @@ def main() -> None:
     HEALTH_CHECK_INTERVAL = 5.0  # Check every 5s for fast dead-mic recovery
     last_health_check = time.time()
 
+    # Variance-based zombie stream detection (AUDIO-12)
+    # Zombie streams from AUHAL error -50 produce noise with unnaturally stable
+    # coefficient of variation (~0.577 = 1/sqrt(3) for uniform noise).
+    _health_cv_history: deque = deque(maxlen=6)  # Last 30s of CV values
+
     # Device hotplug detection — periodically check if a higher-priority mic appeared
     # Also tracks output device changes for audio feedback. Requirement: AUDIO-11
     _DEVICE_SCAN_INTERVAL = 3.0  # seconds — fast detection for USB/BT hotplug
@@ -1380,6 +1408,46 @@ def main() -> None:
                 _write_active_mic(dev_name)
                 device_change_cue(dev_name, "input")
                 _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                model.reset()  # Clear corrupted wake word state (AUDIO-12)
+                _health_cv_history.clear()
+                consecutive_errors = 0
+                continue
+
+            # Zombie stream reinit — triggered by consecutive failed recordings (AUDIO-12)
+            if _zombie_mic_reinit:
+                _zombie_mic_reinit = False
+                log("Zombie stream reinit: forcing mic recovery after consecutive empty recordings")
+                print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
+                _hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
+                _mic_pinned = False
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+                pa.terminate()
+                time.sleep(0.5)
+                pa = pyaudio.PyAudio()
+                dev_index = find_best_mic(pa, mic_priority=mic_priority,
+                                          sample_rate=sample_rate, chunk_size=chunk_size,
+                                          require_audio=True)
+                if dev_index is None:
+                    dev_index = find_best_mic(pa, mic_priority=mic_priority,
+                                              sample_rate=sample_rate, chunk_size=chunk_size)
+                if dev_index is None:
+                    log("No mic found after zombie reinit, retrying in 2s...")
+                    time.sleep(2)
+                    continue
+                dev_name = pa.get_device_info_by_index(dev_index)['name']
+                log(f"Zombie reinit recovered: [{dev_index}] {dev_name}")
+                print(f"[mic] Zombie reinit recovered: [{dev_index}] {dev_name}", file=sys.stderr, flush=True)
+                stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
+                headset_mode = detect_headset(pa, dev_index)
+                _write_active_mic(dev_name)
+                device_change_cue(dev_name, "input")
+                _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                model.reset()
+                _health_cv_history.clear()
                 consecutive_errors = 0
                 continue
 
@@ -1420,9 +1488,29 @@ def main() -> None:
                 if now - last_health_check >= HEALTH_CHECK_INTERVAL:
                     last_health_check = now
                     level = int(np.abs(audio).max())
-                    if level < 10:  # Near-zero: dead BT mic sends quantization noise (1-2 LSB)
-                        _zero_streak += 1
-                        if _zero_streak >= 2:  # 2 × 5s = 10s to detect
+
+                    # Variance-based zombie stream detection (AUDIO-12)
+                    # Zombie streams return noise with unnaturally stable coefficient
+                    # of variation (~0.577 for uniform noise). Real mic audio varies widely.
+                    if level >= 10:
+                        abs_audio = np.abs(audio.astype(np.float32))
+                        _mean = float(abs_audio.mean())
+                        if _mean > 1e-6:
+                            _cv = float(abs_audio.std() / _mean)
+                            _health_cv_history.append(_cv)
+                            if len(_health_cv_history) >= 4:
+                                _cv_values = list(_health_cv_history)
+                                _cv_std = float(np.std(_cv_values))
+                                _cv_mean = float(np.mean(_cv_values))
+                                if _cv_std < 0.05 and 0.45 < _cv_mean < 0.70:
+                                    log(f"WARNING: Zombie stream detected (CV={_cv_mean:.3f}±{_cv_std:.3f}), forcing recovery")
+                                    print(f"[mic] Zombie stream (CV={_cv_mean:.3f}±{_cv_std:.3f})", file=sys.stderr, flush=True)
+                                    _zero_streak = 2  # Force the existing recovery path below
+
+                    if level < 10 or _zero_streak >= 2:  # Dead mic OR zombie stream
+                        if level < 10:
+                            _zero_streak += 1
+                        if _zero_streak >= 2:  # 2 × 5s = 10s to detect (or forced by zombie check)
                             _dead_mic_name = pa.get_device_info_by_index(dev_index)['name']
                             _silent_recover_count = getattr(main, '_silent_recover_count', 0) + 1
                             main._silent_recover_count = _silent_recover_count
@@ -1465,6 +1553,8 @@ def main() -> None:
                             _write_active_mic(dev_name)
                             device_change_cue(dev_name, "input")
                             _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                            model.reset()  # Clear corrupted wake word state (AUDIO-12)
+                            _health_cv_history.clear()
                             consecutive_errors = 0
                             continue
                     else:
@@ -1667,7 +1757,22 @@ def main() -> None:
                                 continue
 
             if _is_busy:
-                continue
+                # Busy flag watchdog — force-reset if stuck (AUDIO-12)
+                if _busy_since == 0.0:
+                    _busy_since = time.time()
+                elif time.time() - _busy_since > _BUSY_TIMEOUT:
+                    log(f"WARNING: busy flag stuck for {_BUSY_TIMEOUT}s, force-resetting (watchdog)")
+                    print(f"[watchdog] busy flag stuck for {_BUSY_TIMEOUT}s, resetting", file=sys.stderr, flush=True)
+                    with _state_lock:
+                        busy = False
+                    _busy_since = 0.0
+                    _release_recording_guard()
+                    _hud_send({"type": "state", "state": "idle"})
+                    # Fall through to wake word processing
+                else:
+                    continue
+            else:
+                _busy_since = 0.0
 
             # Suppress wake word detection while audio cue plays
             if is_suppressed():
