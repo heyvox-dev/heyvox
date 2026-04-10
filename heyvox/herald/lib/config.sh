@@ -43,15 +43,19 @@ KOKORO_DIR="${KOKORO_DIR:-$HOME/.kokoro-tts}"
 KOKORO_DAEMON_SOCK="/tmp/kokoro-daemon.sock"
 KOKORO_DAEMON_PID="/tmp/kokoro-daemon.pid"
 KOKORO_DAEMON_SCRIPT="${HERALD_HOME}/daemon/kokoro-daemon.py"
-# Find Kokoro Python: prefer uv tool venv, fall back to system python3
+# Find Kokoro Python: prefer mlx-audio (Metal GPU), fall back to uv kokoro-onnx venv, then system
 if [ -z "${KOKORO_DAEMON_PYTHON:-}" ]; then
+  _sys_python="$(command -v python3)"
   _kokoro_venv="$HOME/.local/share/uv/tools/kokoro-tts/bin/python"
-  if [ -x "$_kokoro_venv" ]; then
+  # Prefer system python3 if it has mlx-audio (Metal GPU, much faster)
+  if [ -n "$_sys_python" ] && "$_sys_python" -c "import mlx_audio" 2>/dev/null; then
+    KOKORO_DAEMON_PYTHON="$_sys_python"
+  elif [ -x "$_kokoro_venv" ]; then
     KOKORO_DAEMON_PYTHON="$_kokoro_venv"
   else
-    KOKORO_DAEMON_PYTHON="$(command -v python3)"
+    KOKORO_DAEMON_PYTHON="$_sys_python"
   fi
-  unset _kokoro_venv
+  unset _sys_python _kokoro_venv
 fi
 KOKORO_IDLE_TIMEOUT="${KOKORO_IDLE_TIMEOUT:-300}"
 
