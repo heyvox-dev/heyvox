@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
 status: executing
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-04-11T17:31:26.354Z"
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-04-11T17:32:02.920Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
@@ -62,6 +62,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 08-ipc-consolidation]: Dual-write strategy: old flag files kept intact, state file populated alongside for safe migration to 08-03
 - [Phase 08-ipc-consolidation]: TRANSIENT_FIELDS as a set constant makes reset_transient_state() self-documenting
 - [Phase 08-ipc-consolidation]: Inline try/except around all update_state() calls prevents IPC failure from crashing callers
+- [Phase 08-ipc-consolidation]: Queue GC: claim_dir added to dir_thresholds (1h) replacing inline block; HERALD_WATCHER_HANDLED_DIR cleaned via separate loop to avoid dataclass change
 
 ### Pending Todos
 
@@ -76,6 +77,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T17:31:26.349Z
-Stopped at: Completed 08-02-PLAN.md
+Last session: 2026-04-11T17:32:02.916Z
+Stopped at: Completed 08-03-PLAN.md
 Resume file: None

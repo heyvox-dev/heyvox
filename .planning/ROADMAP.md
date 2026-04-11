@@ -73,11 +73,11 @@ Plans:
   1. Every socket, flag, PID, and queue path in the codebase is imported from heyvox/constants.py — no hardcoded /tmp strings elsewhere
   2. Cross-process state (recording, speaking, mute, active workspace) reads/writes /tmp/heyvox-state.json via atomic temp file + os.rename — no individual flag files
   3. A cleanup routine runs periodically and removes orphaned WAV, timing, and workspace sidecar files from queue directories
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 Plans:
 - [x] 08-01-PLAN.md — Constants consolidation + caller migration (IPC-01)
 - [x] 08-02-PLAN.md — Atomic state file module + dual-write wiring (IPC-02)
-- [ ] 08-03-PLAN.md — Queue garbage collection in orchestrator (IPC-03)
+- [x] 08-03-PLAN.md — Queue garbage collection in orchestrator (IPC-03)
 
 ### Phase 9: Test Suite
 **Goal**: A pytest suite exists that validates pure functions, state machine transitions, IPC round-trips, and device selection logic without requiring real hardware
@@ -101,5 +101,5 @@ Plans:
 | 5. HUD Overlay | v1.0 | 2/2 | Complete | 2026-03-27 |
 | 6. Decomposition | v1.1 | 3/4 | In Progress|  |
 | 7. Herald Python Port | v1.1 | 4/5 | In Progress|  |
-| 8. IPC Consolidation | v1.1 | 1/3 | In Progress|  |
+| 8. IPC Consolidation | v1.1 | 2/3 | In Progress|  |
 | 9. Test Suite | v1.1 | 0/? | Not started | — |
