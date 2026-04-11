@@ -78,9 +78,13 @@ def _cmd_status(args):
     print(f"  Verbosity:  {get_verbosity()}")
     print(f"  Muted:      {mute_str}")
 
+    from heyvox.constants import (
+        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_ORCH_PID,
+        KOKORO_DAEMON_SOCK, KOKORO_DAEMON_PID, HUD_SOCKET_PATH,
+    )
     # Queue
-    queue_files = glob.glob("/tmp/herald-queue/*.wav")
-    hold_files = glob.glob("/tmp/herald-hold/*.wav")
+    queue_files = glob.glob(HERALD_QUEUE_DIR + "/*.wav")
+    hold_files = glob.glob(HERALD_HOLD_DIR + "/*.wav")
     print(f"  Queue:      {len(queue_files)} queued, {len(hold_files)} held")
 
     # Daemons
@@ -93,9 +97,9 @@ def _cmd_status(args):
         except Exception:
             return False
 
-    orch = "running" if _pid_alive("/tmp/herald-orchestrator.pid") else "stopped"
-    kokoro = "running" if (os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")) else "stopped"
-    hud = "running" if os.path.exists("/tmp/heyvox-hud.sock") else "stopped"
+    orch = "running" if _pid_alive(HERALD_ORCH_PID) else "stopped"
+    kokoro = "running" if (os.path.exists(KOKORO_DAEMON_SOCK) and _pid_alive(KOKORO_DAEMON_PID)) else "stopped"
+    hud = "running" if os.path.exists(HUD_SOCKET_PATH) else "stopped"
     print(f"  Orchestrator: {orch}")
     print(f"  Kokoro TTS:   {kokoro}")
     print(f"  HUD:          {hud}")

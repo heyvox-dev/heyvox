@@ -45,7 +45,7 @@ _MR_PAUSE = 1
 # The TTS orchestrator uses /tmp/heyvox-media-paused-orch separately.
 # Contents: "hush" (Hush extension), "mr" (MediaRemote), "chrome-js" (Chrome JS),
 #           "media-key" (media key toggle)
-_PAUSE_FLAG = "/tmp/heyvox-media-paused-rec"
+_PAUSE_FLAG = "/tmp/heyvox-media-paused-rec"  # Must match heyvox.constants.HEYVOX_MEDIA_PAUSED_REC
 
 # Lazy-loaded framework handle
 _mr_lib = None
@@ -68,7 +68,7 @@ _VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com"]
 # Hush (Chrome extension) integration
 # ---------------------------------------------------------------------------
 
-_HUSH_SOCK = "/tmp/hush.sock"
+_HUSH_SOCK = "/tmp/hush.sock"  # Must match heyvox.constants.HUSH_SOCK
 
 
 def _hush_command(action: str, **kwargs) -> dict | None:

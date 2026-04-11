@@ -27,6 +27,23 @@ from heyvox.constants import (
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
     STT_DEBUG_DIR,
+    LOG_FILE_DEFAULT,
+    HEYVOX_PID_FILE,
+    HEYVOX_HEARTBEAT_FILE,
+    HEYVOX_MEDIA_PAUSED_REC,
+    HEYVOX_MEDIA_PAUSED_PREFIX,
+    HERALD_MEDIA_PAUSED_PREFIX,
+    HERALD_PAUSE_FLAG,
+    HERALD_MUTE_FLAG,
+    HERALD_AMBIENT_FLAG,
+    HERALD_MODE_FILE,
+    HERALD_LAST_PLAY,
+    HERALD_WORKSPACE_FILE,
+    HERALD_GENERATING_WAV_PREFIX,
+    CLAUDE_TTS_MUTE_FLAG,
+    CLAUDE_TTS_PLAYING_PID,
+    HERALD_PLAYING_PID,
+    VERBOSITY_FILE,
 )
 from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from heyvox.audio.stt import init_local_stt
@@ -64,7 +81,7 @@ _HUD_LEVEL_INTERVAL = 0.05    # 20fps throttle for audio_level messages
 # Logging (module-level path set from config at startup)
 # ---------------------------------------------------------------------------
 
-_LOG_FILE = "/tmp/heyvox.log"
+_LOG_FILE = LOG_FILE_DEFAULT
 _LOG_MAX_BYTES = 1_000_000
 
 
@@ -197,7 +214,7 @@ def stop_recording(config: HeyvoxConfig = None) -> None:
 # Singleton / PID management
 # ---------------------------------------------------------------------------
 
-_PID_FILE = "/tmp/heyvox.pid"
+_PID_FILE = HEYVOX_PID_FILE
 _pid_fd = None  # File descriptor kept open to hold the flock for the process lifetime.
 
 
@@ -239,15 +256,15 @@ def _acquire_singleton():
 
     # Clean up stale flag files and sockets from previous instance
     import glob as _glob
-    for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*",
-                     "/tmp/herald-media-paused-*", "/tmp/herald-pause",
-                     "/tmp/heyvox-hud.sock",
-                     "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity",
+    for pattern in (RECORDING_FLAG, HEYVOX_MEDIA_PAUSED_PREFIX + "*",
+                     HERALD_MEDIA_PAUSED_PREFIX + "*", HERALD_PAUSE_FLAG,
+                     HUD_SOCKET_PATH,
+                     CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG, VERBOSITY_FILE,
                      # Herald state files that can go stale after crash
-                     "/tmp/herald-ambient", "/tmp/herald-mode",
-                     "/tmp/herald-last-play", "/tmp/herald-workspace",
+                     HERALD_AMBIENT_FLAG, HERALD_MODE_FILE,
+                     HERALD_LAST_PLAY, HERALD_WORKSPACE_FILE,
                      # Temp WAVs from crashed TTS worker
-                     "/tmp/herald-generating-*.wav"):
+                     HERALD_GENERATING_WAV_PREFIX + "*.wav"):
         for stale in _glob.glob(pattern):
             try:
                 os.unlink(stale)
@@ -337,13 +354,13 @@ def _setup(config: HeyvoxConfig):
 
     # Startup cleanup: remove stale flags from previous crash/kill
     try:
-        hb_age = time.time() - os.path.getmtime("/tmp/heyvox-heartbeat")
+        hb_age = time.time() - os.path.getmtime(HEYVOX_HEARTBEAT_FILE)
         if hb_age > 30:
             log(f"WARNING: Previous instance died without clean shutdown (heartbeat stale by {hb_age:.0f}s)")
     except FileNotFoundError:
         pass
-    for stale_flag in (RECORDING_FLAG, "/tmp/heyvox-tts-playing", "/tmp/claude-tts-playing.pid",
-                       "/tmp/heyvox-media-paused-rec"):
+    for stale_flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID,
+                       HEYVOX_MEDIA_PAUSED_REC):
         try:
             age = time.time() - os.path.getmtime(stale_flag)
             if age > 60:
@@ -359,7 +376,7 @@ def _setup(config: HeyvoxConfig):
 
     # B6: Clean up orphaned media-pause flags
     import glob as _glob_b6
-    for _mp_pattern in ("/tmp/herald-media-paused-*", "/tmp/heyvox-media-paused-*"):
+    for _mp_pattern in (HERALD_MEDIA_PAUSED_PREFIX + "*", HEYVOX_MEDIA_PAUSED_PREFIX + "*"):
         for _mp_file in _glob_b6.glob(_mp_pattern):
             try:
                 _mp_age = time.time() - os.path.getmtime(_mp_file)
@@ -475,7 +492,7 @@ def _setup(config: HeyvoxConfig):
             "is_busy": lambda: ctx.busy,
             "is_recording": lambda: ctx.is_recording,
             "is_speaking": lambda: (
-                os.path.exists(TTS_PLAYING_FLAG) or os.path.exists("/tmp/herald-playing.pid")
+                os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
             ),
         }
         start_ptt_listener(config.push_to_talk.key, ptt_callbacks, log_fn=log)
@@ -564,7 +581,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _MEM_CHECK_INTERVAL = 60.0
 
     # SIGKILL-proof heartbeat
-    _HEARTBEAT_FILE = "/tmp/heyvox-heartbeat"
+    _HEARTBEAT_FILE = HEYVOX_HEARTBEAT_FILE
     _HEARTBEAT_INTERVAL = 10.0
     _last_heartbeat = 0.0
 
@@ -764,7 +781,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             # Echo suppression: skip wake word while ANY TTS is playing.
             _tts_active = False
-            for _tts_flag in (TTS_PLAYING_FLAG, "/tmp/claude-tts-playing.pid"):
+            for _tts_flag in (TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID):
                 if os.path.exists(_tts_flag):
                     try:
                         flag_age = time.time() - os.path.getmtime(_tts_flag)
@@ -862,14 +879,14 @@ def main() -> None:
     finally:
         log("Cleaning up...")
         # Always clean up flag files to avoid blocking TTS orchestrator
-        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, "/tmp/herald-pause"):
+        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, HERALD_PAUSE_FLAG):
             try:
                 os.unlink(flag)
             except FileNotFoundError:
                 pass
         # Clean up media pause flags (both heyvox and herald namespaces)
         import glob as _glob
-        for f in _glob.glob("/tmp/heyvox-media-paused-*") + _glob.glob("/tmp/herald-media-paused-*"):
+        for f in _glob.glob(HEYVOX_MEDIA_PAUSED_PREFIX + "*") + _glob.glob(HERALD_MEDIA_PAUSED_PREFIX + "*"):
             try:
                 os.unlink(f)
             except FileNotFoundError:

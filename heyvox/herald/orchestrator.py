@@ -40,32 +40,41 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+from heyvox.constants import (  # noqa: E402 — after __future__ import
+    HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_HISTORY_DIR, HERALD_CLAIM_DIR,
+    HERALD_DEBUG_LOG, HERALD_VIOLATIONS_LOG,
+    HERALD_ORCH_PID, HERALD_PLAYING_PID, HERALD_ORIGINAL_VOL_FILE,
+    HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG, RECORDING_FLAG, HERALD_PLAY_NEXT,
+    HERALD_LAST_PLAY, VERBOSITY_FILE,
+)
+
+
 @dataclass
 class OrchestratorConfig:
     """All runtime configuration for the Herald orchestrator."""
 
     # Queue directories
-    queue_dir: Path = field(default_factory=lambda: Path("/tmp/herald-queue"))
-    hold_dir: Path = field(default_factory=lambda: Path("/tmp/herald-hold"))
-    history_dir: Path = field(default_factory=lambda: Path("/tmp/herald-history"))
-    claim_dir: Path = field(default_factory=lambda: Path("/tmp/herald-claim"))
+    queue_dir: Path = field(default_factory=lambda: Path(HERALD_QUEUE_DIR))
+    hold_dir: Path = field(default_factory=lambda: Path(HERALD_HOLD_DIR))
+    history_dir: Path = field(default_factory=lambda: Path(HERALD_HISTORY_DIR))
+    claim_dir: Path = field(default_factory=lambda: Path(HERALD_CLAIM_DIR))
 
     # Log file
-    debug_log: Path = field(default_factory=lambda: Path("/tmp/herald-debug.log"))
-    violations_log: Path = field(default_factory=lambda: Path("/tmp/herald-violations.log"))
+    debug_log: Path = field(default_factory=lambda: Path(HERALD_DEBUG_LOG))
+    violations_log: Path = field(default_factory=lambda: Path(HERALD_VIOLATIONS_LOG))
 
     # PID / lock files
-    orch_pid_file: Path = field(default_factory=lambda: Path("/tmp/herald-orchestrator.pid"))
-    playing_pid_file: Path = field(default_factory=lambda: Path("/tmp/herald-playing.pid"))
-    original_vol_file: Path = field(default_factory=lambda: Path("/tmp/herald-original-vol"))
+    orch_pid_file: Path = field(default_factory=lambda: Path(HERALD_ORCH_PID))
+    playing_pid_file: Path = field(default_factory=lambda: Path(HERALD_PLAYING_PID))
+    original_vol_file: Path = field(default_factory=lambda: Path(HERALD_ORIGINAL_VOL_FILE))
 
     # State files (shared with worker.sh / main process)
-    pause_flag: Path = field(default_factory=lambda: Path("/tmp/herald-pause"))
-    mute_flag: Path = field(default_factory=lambda: Path("/tmp/herald-mute"))
-    recording_flag: Path = field(default_factory=lambda: Path("/tmp/heyvox-recording"))
-    play_next_flag: Path = field(default_factory=lambda: Path("/tmp/herald-play-next"))
-    last_play_file: Path = field(default_factory=lambda: Path("/tmp/herald-last-play"))
-    verbosity_file: Path = field(default_factory=lambda: Path("/tmp/heyvox-verbosity"))
+    pause_flag: Path = field(default_factory=lambda: Path(HERALD_PAUSE_FLAG))
+    mute_flag: Path = field(default_factory=lambda: Path(HERALD_MUTE_FLAG))
+    recording_flag: Path = field(default_factory=lambda: Path(RECORDING_FLAG))
+    play_next_flag: Path = field(default_factory=lambda: Path(HERALD_PLAY_NEXT))
+    last_play_file: Path = field(default_factory=lambda: Path(HERALD_LAST_PLAY))
+    verbosity_file: Path = field(default_factory=lambda: Path(VERBOSITY_FILE))
 
     # Herald home (for conductor-switch-workspace and relative paths)
     herald_home: Path = field(
@@ -791,7 +800,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Herald Python Orchestrator — plays queued TTS WAV files"
     )
-    parser.add_argument("--queue-dir", default="/tmp/herald-queue",
+    parser.add_argument("--queue-dir", default=HERALD_QUEUE_DIR,
                         help="Queue directory for WAV files")
     parser.add_argument("--no-duck", action="store_true",
                         help="Disable audio ducking")
