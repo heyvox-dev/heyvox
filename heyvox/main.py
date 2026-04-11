@@ -191,6 +191,11 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
             pass
     except Exception:
         pass
+    try:
+        from heyvox.ipc import update_state
+        update_state({"recording": True})
+    except Exception:
+        pass
 
 
 def stop_recording(config: HeyvoxConfig = None) -> None:
@@ -270,6 +275,10 @@ def _acquire_singleton():
                 os.unlink(stale)
             except (FileNotFoundError, IsADirectoryError):
                 pass
+
+    # Reset transient state (recording/tts_playing/herald_playing_pid/paused) on startup
+    from heyvox.ipc import reset_transient_state
+    reset_transient_state()
 
     # Write PID file and hold an advisory lock for the lifetime of the process.
     import fcntl

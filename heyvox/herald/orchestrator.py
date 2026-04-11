@@ -504,6 +504,11 @@ def _play_wav(
         cfg.playing_pid_file.write_text(str(proc.pid))
     except OSError:
         pass
+    try:
+        from heyvox.ipc import update_state
+        update_state({"herald_playing_pid": proc.pid})
+    except Exception:
+        pass
 
     # Watchdog: kill afplay if recording starts mid-playback
     watchdog_stop = threading.Event()
@@ -529,6 +534,11 @@ def _play_wav(
     watchdog_stop.set()
     watchdog_thread.join(timeout=0.5)
     cfg.playing_pid_file.unlink(missing_ok=True)
+    try:
+        from heyvox.ipc import update_state
+        update_state({"herald_playing_pid": None})
+    except Exception:
+        pass
 
     # If watchdog killed playback, wait for recording to finish
     if play_exit != 0 and _is_paused(cfg, debug_log):
@@ -542,6 +552,11 @@ def _play_wav(
     try:
         cfg.last_play_file.write_text(str(int(time.time())))
     except OSError:
+        pass
+    try:
+        from heyvox.ipc import update_state
+        update_state({"last_play_ts": time.time()})
+    except Exception:
         pass
 
     # Check if queue and hold are empty → resume media + restore volume
@@ -599,6 +614,11 @@ class HeraldOrchestrator:
             pass
         cfg.playing_pid_file.unlink(missing_ok=True)
         cfg.play_next_flag.unlink(missing_ok=True)
+        try:
+            from heyvox.ipc import update_state
+            update_state({"herald_playing_pid": None})
+        except Exception:
+            pass
 
     def run(self) -> None:
         """Main orchestrator loop — blocks until stop() is called or signal received."""

@@ -114,6 +114,11 @@ def _release_recording_guard() -> None:
         os.remove(RECORDING_FLAG)
     except FileNotFoundError:
         pass
+    try:
+        from heyvox.ipc import update_state
+        update_state({"recording": False})
+    except Exception:
+        pass
 
 
 class RecordingStateMachine:
@@ -221,6 +226,11 @@ class RecordingStateMachine:
         try:
             with open(RECORDING_FLAG, "w"):
                 pass
+        except Exception:
+            pass
+        try:
+            from heyvox.ipc import update_state
+            update_state({"recording": True})
         except Exception:
             pass
 
