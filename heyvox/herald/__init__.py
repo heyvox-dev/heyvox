@@ -41,3 +41,20 @@ def run_herald(*args: str, env: dict | None = None) -> int:
         capture_output=True,
     )
     return result.returncode
+
+
+# Python orchestrator (pure Python replacement for orchestrator.sh)
+from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
+
+__all__ = [
+    "HERALD_HOME",
+    "HERALD_BIN",
+    "HERALD_LIB",
+    "HERALD_DAEMON",
+    "HERALD_HOOKS",
+    "HERALD_MODES",
+    "get_herald_home",
+    "run_herald",
+    "HeraldOrchestrator",
+    "OrchestratorConfig",
+]
