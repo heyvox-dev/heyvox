@@ -29,8 +29,8 @@ Requirements for Architecture Hardening milestone. Each maps to roadmap phases.
 
 ### Test Suite
 
-- [ ] **TEST-01**: Pure function tests for garbled detection, wake word stripping, config loading, echo filtering
-- [ ] **TEST-02**: State machine transition tests for recording start/stop/busy/cancel flows
+- [x] **TEST-01**: Pure function tests for garbled detection, wake word stripping, config loading, echo filtering
+- [x] **TEST-02**: State machine transition tests for recording start/stop/busy/cancel flows
 - [ ] **TEST-03**: IPC round-trip tests for HUD Unix socket (client/server, reconnection, message loss)
 - [ ] **TEST-04**: Device selection tests with mocked PyAudio (priority, cooldown, fallback)
 
@@ -71,8 +71,8 @@ Deferred to v2.0+. Tracked but not in current roadmap.
 | IPC-01 | Phase 8 | Complete |
 | IPC-02 | Phase 8 | Complete |
 | IPC-03 | Phase 8 | Complete |
-| TEST-01 | Phase 9 | Pending |
-| TEST-02 | Phase 9 | Pending |
+| TEST-01 | Phase 9 | Complete |
+| TEST-02 | Phase 9 | Complete |
 | TEST-03 | Phase 9 | Pending |
 | TEST-04 | Phase 9 | Pending |
 
