@@ -76,7 +76,7 @@ Plans:
 **Plans:** 1/3 plans executed
 Plans:
 - [x] 08-01-PLAN.md — Constants consolidation + caller migration (IPC-01)
-- [ ] 08-02-PLAN.md — Atomic state file module + dual-write wiring (IPC-02)
+- [x] 08-02-PLAN.md — Atomic state file module + dual-write wiring (IPC-02)
 - [ ] 08-03-PLAN.md — Queue garbage collection in orchestrator (IPC-03)
 
 ### Phase 9: Test Suite
