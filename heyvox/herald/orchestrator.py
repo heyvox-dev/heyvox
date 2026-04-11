@@ -67,7 +67,7 @@ class OrchestratorConfig:
     last_play_file: Path = field(default_factory=lambda: Path("/tmp/herald-last-play"))
     verbosity_file: Path = field(default_factory=lambda: Path("/tmp/heyvox-verbosity"))
 
-    # Herald home (for media.sh and conductor-switch-workspace)
+    # Herald home (for conductor-switch-workspace and relative paths)
     herald_home: Path = field(
         default_factory=lambda: Path(__file__).parent
     )
@@ -288,30 +288,28 @@ def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Media pause/resume (delegates to media.sh)
+# Media pause/resume (via heyvox.audio.media)
 # ---------------------------------------------------------------------------
 
 
 def _media_pause(cfg: OrchestratorConfig) -> None:
-    """Pause browser / native media via Herald media.sh."""
-    media_sh = cfg.herald_home / "lib" / "media.sh"
-    if not media_sh.exists():
+    """Pause browser / native media via heyvox.audio.media."""
+    if not cfg.media_pause:
         return
     try:
-        subprocess.Popen(["bash", str(media_sh), "pause", "orch"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from heyvox.audio.media import pause_media
+        pause_media()
     except Exception as e:
         _herald_log(f"ORCH: media pause failed: {e}", cfg.debug_log)
 
 
 def _media_resume(cfg: OrchestratorConfig) -> None:
-    """Resume browser / native media via Herald media.sh."""
-    media_sh = cfg.herald_home / "lib" / "media.sh"
-    if not media_sh.exists():
+    """Resume browser / native media via heyvox.audio.media."""
+    if not cfg.media_pause:
         return
     try:
-        subprocess.Popen(["bash", str(media_sh), "play", "orch"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from heyvox.audio.media import resume_media
+        resume_media()
     except Exception as e:
         _herald_log(f"ORCH: media resume failed: {e}", cfg.debug_log)
 
