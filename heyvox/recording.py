@@ -438,6 +438,22 @@ class RecordingStateMachine:
                 sample_rate=self.config.audio.sample_rate,
             )
             elapsed = time.time() - t0
+            # Free audio chunks immediately — no longer needed after transcription
+            audio_chunks.clear()
+
+            # Post-STT memory check: if MLX Whisper ballooned, force unload now
+            try:
+                import psutil
+                _rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+                if _rss_mb > 1500:
+                    self._log(
+                        f"WARNING: RSS {_rss_mb:.0f}MB after STT, "
+                        "force-unloading MLX model"
+                    )
+                    from heyvox.audio.stt import _unload_mlx_model
+                    _unload_mlx_model()
+            except (ImportError, Exception) as e:
+                self._log(f"Post-STT memory check error: {e}")
             self._log(
                 f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}"
             )
@@ -588,16 +604,24 @@ class RecordingStateMachine:
                 f"target pid={target_pid}"
             )
 
-            if recording_target:
-                if recording_target.conductor_workspace:
-                    self._log(
-                        f"[inject] Restoring Conductor workspace "
-                        f"'{recording_target.conductor_workspace}'"
-                    )
-                restore_target(recording_target)
-                self._log(f"[inject] Restored target: {recording_target.app_name}")
+            # NOTE: Conductor sidecar socket injection is disabled. The sidecar
+            # registers the "query" method on an internal tunnel (Electron ↔ sidecar),
+            # not on the external Unix socket. Direct socket calls return result:null
+            # but don't actually deliver messages. Kept conductor.py for future use
+            # if Conductor exposes a public API.
+            _injected_via_conductor = False
 
-            type_text(paste_text, app_name=target_app)
+            if not _injected_via_conductor:
+                if recording_target:
+                    if recording_target.conductor_workspace:
+                        self._log(
+                            f"[inject] Restoring Conductor workspace "
+                            f"'{recording_target.conductor_workspace}'"
+                        )
+                    restore_target(recording_target)
+                    self._log(f"[inject] Restored target: {recording_target.app_name}")
+
+                type_text(paste_text, app_name=target_app)
 
             # Auto-send Enter in wake word mode if adapter says so
             adapter = self.ctx.adapter
@@ -614,8 +638,7 @@ class RecordingStateMachine:
                 _press_enter(adapter.enter_count, app_name=target_app)
                 self._log("Sent!")
             else:
-                via = "socket" if getattr(adapter, '_last_injected_via_conductor', False) else "paste"
-                self._log(f"Injected ({via}, {'PTT' if ptt else 'wake word'})")
+                self._log(f"Injected (paste, {'PTT' if ptt else 'wake word'})")
 
             # Only restore focus if the user was already in the target app before injection.
             if pre_inject_pid and pre_inject_pid == target_pid:
