@@ -41,6 +41,7 @@ from heyvox.constants import (
     KOKORO_DAEMON_PID,
     KOKORO_DAEMON_SOCK,
     VERBOSITY_FILE,
+    HERALD_GENERATING_WAV_PREFIX,
 )
 
 log = logging.getLogger(__name__)
@@ -327,7 +328,7 @@ class HeraldWorker:
     def _generate(self, text: str, voice: str, lang: str, speed: float) -> bool:
         """Generate TTS WAV and enqueue it. Tries Kokoro daemon first, Piper fallback."""
         timestamp = str(int(time.time() * 1000))
-        temp_wav = f"/tmp/herald-generating-{os.getpid()}.wav"
+        temp_wav = f"{HERALD_GENERATING_WAV_PREFIX}{os.getpid()}.wav"
 
         if self._generate_kokoro(text, voice, lang, speed, temp_wav, timestamp):
             return True

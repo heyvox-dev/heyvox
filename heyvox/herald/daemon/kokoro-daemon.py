@@ -29,8 +29,8 @@ import wave
 
 import numpy as np
 
-SOCKET_PATH = "/tmp/kokoro-daemon.sock"
-PID_FILE = "/tmp/kokoro-daemon.pid"
+SOCKET_PATH = "/tmp/kokoro-daemon.sock"  # Must match heyvox.constants.KOKORO_DAEMON_SOCK
+PID_FILE = "/tmp/kokoro-daemon.pid"  # Must match heyvox.constants.KOKORO_DAEMON_PID
 IDLE_TIMEOUT = int(os.environ.get("KOKORO_IDLE_TIMEOUT", "300"))
 
 # Legacy kokoro-onnx paths (used for fallback)

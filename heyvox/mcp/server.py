@@ -90,11 +90,14 @@ def voice_status() -> str:
     The 'style_instruction' field tells you how to formulate <tts> blocks.
     Always follow the style instruction when writing TTS output.
     """
-    from heyvox.constants import RECORDING_FLAG, TTS_PLAYING_FLAG
+    from heyvox.constants import (
+        RECORDING_FLAG, TTS_PLAYING_FLAG, HERALD_PLAYING_PID,
+        HERALD_QUEUE_DIR, HERALD_HOLD_DIR,
+    )
     from heyvox.audio.tts import is_muted, get_verbosity, get_tts_style, get_tts_style_prompt
 
     recording = os.path.exists(RECORDING_FLAG)
-    speaking = os.path.exists(TTS_PLAYING_FLAG) or os.path.exists("/tmp/herald-playing.pid")
+    speaking = os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
 
     if recording:
         state = "recording"
@@ -104,8 +107,8 @@ def voice_status() -> str:
         state = "idle"
 
     import glob
-    queue_count = len(glob.glob("/tmp/herald-queue/*.wav"))
-    hold_count = len(glob.glob("/tmp/herald-hold/*.wav"))
+    queue_count = len(glob.glob(HERALD_QUEUE_DIR + "/*.wav"))
+    hold_count = len(glob.glob(HERALD_HOLD_DIR + "/*.wav"))
 
     return (
         f"state={state} muted={is_muted()} verbosity={get_verbosity()} "

@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 import time
+from heyvox.constants import HUD_STDERR_LOG
 
 
 # Module-level state for the overlay subprocess
@@ -89,7 +90,7 @@ def launch_hud_overlay(menu_bar_only: bool = False, log_fn=None) -> None:
                 _hud_log_fh.close()
             except OSError:
                 pass
-        _hud_log_fh = open("/tmp/heyvox-hud-stderr.log", "a")
+        _hud_log_fh = open(HUD_STDERR_LOG, "a")
         _indicator_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
