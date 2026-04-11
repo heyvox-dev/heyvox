@@ -88,7 +88,10 @@ Plans:
   2. RecordingStateMachine transition tests cover start, stop, busy, and cancel flows with all edge cases verified
   3. HUD Unix socket tests verify client/server round-trips, reconnection after server restart, and message loss behavior
   4. Device selection tests with mocked PyAudio verify priority ordering, cooldown enforcement, and fallback behavior
-**Plans:** [To be planned]
+**Plans:** 2 plans
+Plans:
+- [ ] 09-01-PLAN.md — Pure function tests (TEST-01) + state machine tests (TEST-02) + adapter fix
+- [ ] 09-02-PLAN.md — HUD IPC tests (TEST-03) + device selection tests (TEST-04)
 
 ## Progress
 
@@ -102,4 +105,4 @@ Plans:
 | 6. Decomposition | v1.1 | 3/4 | In Progress|  |
 | 7. Herald Python Port | v1.1 | 4/5 | In Progress|  |
 | 8. IPC Consolidation | v1.1 | 2/3 | In Progress|  |
-| 9. Test Suite | v1.1 | 0/? | Not started | — |
+| 9. Test Suite | v1.1 | 0/2 | Not started | — |

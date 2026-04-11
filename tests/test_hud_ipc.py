@@ -115,6 +115,63 @@ class TestHUDServerClient:
         assert not os.path.exists(socket_path)
 
 
+    def test_client_reconnects_after_server_restart(self, socket_path):
+        received = []
+        server1 = HUDServer(path=socket_path, on_message=received.append)
+        server1.start()
+        time.sleep(0.1)
+
+        client = HUDClient(path=socket_path)
+        client.connect()
+
+        # Confirm initial connection works
+        client.send({"type": "state", "state": "listening"})
+        time.sleep(0.1)
+
+        # Shutdown server1 and close client (simulates disconnect)
+        server1.shutdown()
+        client.close()
+        time.sleep(0.1)
+
+        # Send while disconnected — should be a silent no-op (_sock is None)
+        client.send({"type": "state", "state": "orphaned"})
+
+        # Start server2 on same path
+        server2 = HUDServer(path=socket_path, on_message=received.append)
+        server2.start()
+        time.sleep(0.1)
+
+        # Reconnect client and send post-reconnect message
+        client.reconnect()
+        client.send({"type": "state", "state": "reconnected"})
+        time.sleep(0.1)
+
+        server2.shutdown()
+        client.close()
+
+        assert any(m.get("state") == "listening" for m in received), "First message should have arrived"
+        assert any(m.get("state") == "reconnected" for m in received), "Post-reconnect message should have arrived"
+        assert not any(m.get("state") == "orphaned" for m in received), "Message while disconnected should be lost"
+
+    def test_send_silently_drops_when_server_gone(self, socket_path):
+        server = HUDServer(path=socket_path)
+        server.start()
+        time.sleep(0.1)
+
+        client = HUDClient(path=socket_path)
+        client.connect()
+
+        server.shutdown()
+        time.sleep(0.1)
+
+        # All sends should be silent no-ops — no exception raised
+        for i in range(10):
+            client.send({"type": "state", "state": "idle", "seq": i})
+
+        client.close()
+        # Test passes if no exception was raised
+
+
 class TestMessageSerialization:
     """Verify JSON message format."""
 
