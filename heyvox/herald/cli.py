@@ -59,6 +59,11 @@ def _cmd_pause() -> int:
     from heyvox.constants import HERALD_PAUSE_FLAG
     from pathlib import Path
     Path(HERALD_PAUSE_FLAG).touch()
+    try:
+        from heyvox.ipc import update_state
+        update_state({"paused": True})
+    except Exception:
+        pass
     return 0
 
 
@@ -68,6 +73,11 @@ def _cmd_resume() -> int:
     try:
         os.unlink(HERALD_PAUSE_FLAG)
     except FileNotFoundError:
+        pass
+    try:
+        from heyvox.ipc import update_state
+        update_state({"paused": False})
+    except Exception:
         pass
     return 0
 
@@ -90,8 +100,15 @@ def _cmd_mute() -> int:
     from pathlib import Path
     if os.path.exists(HERALD_MUTE_FLAG):
         os.unlink(HERALD_MUTE_FLAG)
+        muted = False
     else:
         Path(HERALD_MUTE_FLAG).touch()
+        muted = True
+    try:
+        from heyvox.ipc import update_state
+        update_state({"muted": muted})
+    except Exception:
+        pass
     return 0
 
 
