@@ -9,10 +9,10 @@ Requirements for Architecture Hardening milestone. Each maps to roadmap phases.
 
 ### Decomposition
 
-- [ ] **DECOMP-01**: Recording logic extracted into RecordingStateMachine with start/stop/send_local + state
-- [ ] **DECOMP-02**: Device management extracted into DeviceManager (hotplug, zombie detection, health checks, cooldown)
+- [x] **DECOMP-01**: Recording logic extracted into RecordingStateMachine with start/stop/send_local + state
+- [x] **DECOMP-02**: Device management extracted into DeviceManager (hotplug, zombie detection, health checks, cooldown)
 - [ ] **DECOMP-03**: Wake word processing extracted into WakeWordProcessor (stripping, garbled detection)
-- [ ] **DECOMP-04**: 17+ module globals replaced with shared AppContext dataclass passed by reference
+- [x] **DECOMP-04**: 17+ module globals replaced with shared AppContext dataclass passed by reference
 
 ### Herald Python Port
 
@@ -60,10 +60,10 @@ Deferred to v2.0+. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DECOMP-01 | Phase 6 | Pending |
-| DECOMP-02 | Phase 6 | Pending |
+| DECOMP-01 | Phase 6 | Complete |
+| DECOMP-02 | Phase 6 | Complete |
 | DECOMP-03 | Phase 6 | Pending |
-| DECOMP-04 | Phase 6 | Pending |
+| DECOMP-04 | Phase 6 | Complete |
 | HERALD-01 | Phase 7 | Pending |
 | HERALD-02 | Phase 7 | Pending |
 | HERALD-03 | Phase 7 | Pending |
