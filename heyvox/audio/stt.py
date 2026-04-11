@@ -279,20 +279,16 @@ def transcribe_audio(
                     parts.append(text)
             return " ".join(parts)
 
-        executor = ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(_sherpa_transcribe)
-            return future.result(timeout=_TRANSCRIBE_TIMEOUT)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_sherpa_transcribe)
+                return future.result(timeout=_TRANSCRIBE_TIMEOUT)
         except FuturesTimeout:
             _log(f"ERROR: Sherpa transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
-            executor.shutdown(wait=False, cancel_futures=True)
             return ""
         except Exception as e:
             _log(f"ERROR: Sherpa transcription failed: {e}")
-            executor.shutdown(wait=False, cancel_futures=True)
             return ""
-        else:
-            executor.shutdown(wait=False)
 
 
 def model_loaded() -> bool:
