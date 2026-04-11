@@ -356,8 +356,12 @@ def restore_target(snap: TargetSnapshot) -> bool:
     except Exception:
         _log("restore: activated (couldn't verify)")
 
-    # Step 2: Try to refocus the captured text field (often stale, best-effort)
-    if snap.ax_element is not None and snap.element_role in _TEXT_ROLES:
+    # Step 2: Try to refocus the captured element directly.
+    # Skip AXWebArea — in Electron/Tauri apps (e.g. Conductor) this is the
+    # conversation content area, not the text input. Pasting there silently
+    # fails. Go straight to the text field search instead.
+    is_web_area = snap.element_role == "AXWebArea"
+    if snap.ax_element is not None and snap.element_role in _TEXT_ROLES and not is_web_area:
         err = AXUIElementSetAttributeValue(snap.ax_element, "AXFocused", kCFBooleanTrue)
         if err == 0:
             _log(f"restore: refocused text field ({snap.element_role}) in {snap.app_name}")
@@ -367,17 +371,24 @@ def restore_target(snap: TargetSnapshot) -> bool:
             _log(f"restore: WARNING: AX refocus failed (err={err})")
         else:
             _log(f"restore: AX element stale (-25202), relying on app's own focus restore")
+    elif is_web_area:
+        _log(f"restore: skipping AXWebArea refocus (not an input field), searching for text input")
 
-    # Step 3: Fallback — find text fields in the focused window
+    # Step 3: Fallback — find text fields in the focused window.
+    # Prefer AXTextArea/AXTextField over AXWebArea — the latter is typically
+    # a content view (e.g. chat history) that doesn't accept pasted input.
     ax_app = AXUIElementCreateApplication(snap.app_pid)
     text_fields = _find_window_text_fields(ax_app)
     _log(f"restore: found {len(text_fields)} text fields in window")
+    input_fields = [(e, r) for e, r in text_fields if r != "AXWebArea"]
+    if not input_fields:
+        input_fields = text_fields
 
-    if len(text_fields) == 1:
-        elem, role = text_fields[0]
+    if len(input_fields) == 1:
+        elem, role = input_fields[0]
         err = AXUIElementSetAttributeValue(elem, "AXFocused", kCFBooleanTrue)
         if err == 0:
-            _log(f"restore: focused sole text field ({role}) in {snap.app_name}")
+            _log(f"restore: focused text field ({role}) in {snap.app_name}")
             return True
 
     # App was activated — even if we couldn't pinpoint the text field,

@@ -604,7 +604,8 @@ class RecordingStateMachine:
                 _press_enter(adapter.enter_count, app_name=target_app)
                 self._log("Sent!")
             else:
-                self._log(f"Pasted ({'PTT' if ptt else 'wake word'})")
+                via = "socket" if getattr(adapter, '_last_injected_via_conductor', False) else "paste"
+                self._log(f"Injected ({via}, {'PTT' if ptt else 'wake word'})")
 
             # Only restore focus if the user was already in the target app before injection.
             if pre_inject_pid and pre_inject_pid == target_pid:

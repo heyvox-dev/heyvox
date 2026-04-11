@@ -41,6 +41,7 @@ ONNX_VOICES_PATH = os.path.expanduser("~/.kokoro-tts/voices-v1.0.bin")
 MLX_MODEL_ID = "mlx-community/Kokoro-82M-bf16"
 
 last_activity = time.time()
+_daemon_start_time = time.time()
 shutdown_event = threading.Event()
 
 # Engine flag: "mlx" or "onnx"
@@ -266,6 +267,15 @@ def handle_client(conn, model):
                 continue
 
         if not raw:
+            return
+
+        action = request.get("action", "")
+
+        # Health check — lightweight ping, no TTS work
+        if action == "ping":
+            uptime = time.time() - _daemon_start_time
+            response = {"ok": True, "engine": ENGINE, "uptime": round(uptime, 1)}
+            conn.sendall(json.dumps(response).encode("utf-8"))
             return
 
         text = request.get("text", "")

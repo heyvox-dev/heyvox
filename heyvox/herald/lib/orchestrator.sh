@@ -48,13 +48,13 @@ duck_audio() {
   if [ -f "$ORIGINAL_VOL_FILE" ]; then
     ORIGINAL_VOL=$(cat "$ORIGINAL_VOL_FILE" 2>/dev/null)
   else
-    ORIGINAL_VOL=$(osascript -e 'output volume of (get volume settings)' 2>/dev/null)
+    ORIGINAL_VOL=$(timeout 3 osascript -e 'output volume of (get volume settings)' 2>/dev/null)
     if [ -n "$ORIGINAL_VOL" ]; then
       echo "$ORIGINAL_VOL" > "$ORIGINAL_VOL_FILE"
     fi
   fi
   if [ -n "$ORIGINAL_VOL" ]; then
-    osascript -e "set volume output volume $HERALD_DUCK_LEVEL" 2>/dev/null
+    timeout 3 osascript -e "set volume output volume $HERALD_DUCK_LEVEL" 2>/dev/null
     sleep 0.15
   fi
 }
@@ -62,7 +62,7 @@ duck_audio() {
 set_tts_volume() {
   [ "$HERALD_DUCK_ENABLED" != "true" ] && return
   if [ -n "$ORIGINAL_VOL" ]; then
-    osascript -e "set volume output volume $ORIGINAL_VOL" 2>/dev/null
+    timeout 3 osascript -e "set volume output volume $ORIGINAL_VOL" 2>/dev/null
   fi
 }
 
@@ -73,7 +73,7 @@ restore_audio() {
     ORIGINAL_VOL=$(cat "$ORIGINAL_VOL_FILE" 2>/dev/null)
   fi
   if [ -n "$ORIGINAL_VOL" ]; then
-    osascript -e "set volume output volume $ORIGINAL_VOL" 2>/dev/null
+    timeout 3 osascript -e "set volume output volume $ORIGINAL_VOL" 2>/dev/null
     ORIGINAL_VOL=""
     rm -f "$ORIGINAL_VOL_FILE"
   fi
@@ -82,9 +82,11 @@ restore_audio() {
 # WAV normalization — RMS-based loudness matching
 normalize_wav() {
   local wav="$1"
-  python3 -c "
+  # Pass path as argv[1] to avoid shell injection via filename interpolation (C9)
+  python3 - "$wav" <<'PYEOF' 2>/dev/null
 import wave, struct, sys, math
-with wave.open('$wav', 'rb') as w:
+wav = sys.argv[1]
+with wave.open(wav, 'rb') as w:
     params = w.getparams()
     frames = w.readframes(params.nframes)
 samples = list(struct.unpack('<%dh' % params.nframes, frames))
@@ -106,10 +108,10 @@ for s in scaled:
         s = -peak_limit + (s + peak_limit) * 0.2
     out.append(max(-32768, min(32767, int(s))))
 normalized = struct.pack('<%dh' % len(out), *out)
-with wave.open('$wav', 'wb') as w:
+with wave.open(wav, 'wb') as w:
     w.setparams(params)
     w.writeframes(normalized)
-" 2>/dev/null
+PYEOF
 }
 
 cleanup() {
@@ -209,6 +211,17 @@ play_wav() {
     set_tts_volume
   else
     rm -f "$workspace_file"
+    # Continuation part: re-pause media if it was resumed during the gap
+    # between parts (e.g. grace period hadn't been added, or media resumed
+    # for another reason).
+    if [ "$HERALD_MEDIA_PAUSE" = "true" ] && [ -x "${HERALD_HOME}/lib/media.sh" ]; then
+      if [ ! -f "/tmp/herald-media-paused-orch" ]; then
+        "${HERALD_HOME}/lib/media.sh" pause
+        if [ -f "/tmp/herald-media-paused-orch" ]; then
+          herald_log "ORCH: media RE-PAUSED for continuation ($(cat /tmp/herald-media-paused-orch 2>/dev/null))"
+        fi
+      fi
+    fi
   fi
 
   herald_log "ORCH: playing $wav_file size=$(stat -f%z "$wav_file" 2>/dev/null) cont=$is_continuation ws=$CURRENT_WORKSPACE"
@@ -288,9 +301,23 @@ play_wav() {
 
   if [ "$(find "$HERALD_QUEUE_DIR" -maxdepth 1 -name '*.wav' 2>/dev/null | wc -l)" -eq 0 ] \
      && [ "$(find "$HERALD_HOLD_DIR" -maxdepth 1 -name '*.wav' 2>/dev/null | wc -l)" -eq 0 ]; then
+    # Grace period: wait for more parts before resuming media.
+    # Multi-part TTS has gaps where queue is momentarily empty while
+    # the next sentence is still generating.
+    local grace_secs=5
+    herald_log "ORCH: queue empty, waiting ${grace_secs}s grace period before resuming media"
+    local waited=0
+    while [ "$waited" -lt "$grace_secs" ]; do
+      sleep 1
+      waited=$((waited + 1))
+      if [ "$(find "$HERALD_QUEUE_DIR" -maxdepth 1 -name '*.wav' 2>/dev/null | wc -l)" -gt 0 ]; then
+        herald_log "ORCH: new WAV arrived during grace period, skipping resume"
+        return
+      fi
+    done
     if [ "$HERALD_MEDIA_PAUSE" = "true" ] && [ -x "${HERALD_HOME}/lib/media.sh" ]; then
       "${HERALD_HOME}/lib/media.sh" play
-      herald_log "ORCH: media RESUMED"
+      herald_log "ORCH: media RESUMED (after grace period)"
     fi
     restore_audio
   fi

@@ -156,6 +156,14 @@ def speak(
     if filtered is None:
         return
 
+    # Register with echo suppression buffer before speaking so filter_tts_echo()
+    # has something to match against when the mic picks up speaker output.
+    try:
+        from heyvox.audio.echo import register_tts_text
+        register_tts_text(filtered)
+    except Exception:
+        pass  # Echo module not loaded or not initialised — skip silently
+
     _herald("speak", input_text=filtered)
 
 

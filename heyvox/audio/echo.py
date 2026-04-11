@@ -92,13 +92,17 @@ def filter_tts_echo(transcription: str) -> str:
         if trans_lower in tts_text:
             return ""
 
-        # Word overlap: check if most transcription words appear in TTS text
-        tts_words = set(tts_text.split())
-        matching = sum(1 for w in trans_words if w in tts_words)
-        overlap_ratio = matching / len(trans_words)
+        # Word overlap: check if most transcription words appear in TTS text.
+        # Skip this check for very short transcriptions (< 3 words) — a single
+        # word like "yes" matching TTS text containing "yes or no" is almost
+        # certainly intentional user input, not an echo (C5 false-positive fix).
+        if len(trans_words) >= 3:
+            tts_words = set(tts_text.split())
+            matching = sum(1 for w in trans_words if w in tts_words)
+            overlap_ratio = matching / len(trans_words)
 
-        if overlap_ratio > 0.6:
-            return ""
+            if overlap_ratio > 0.6:
+                return ""
 
     return transcription
 

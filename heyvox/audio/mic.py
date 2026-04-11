@@ -8,6 +8,7 @@ Uses CoreAudio to filter out paired-but-disconnected Bluetooth devices.
 
 import ctypes
 import ctypes.util
+import time
 
 import numpy as np
 import pyaudio
@@ -15,7 +16,17 @@ import pyaudio
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 
 # Re-export for use by hotplug scan in main.py
-__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names"]
+__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "add_device_cooldown", "is_device_cooled_down"]
+
+# ---------------------------------------------------------------------------
+# Device cooldown — prevents re-selecting a dead Bluetooth device every cycle
+# ---------------------------------------------------------------------------
+
+# Maps lowercase device name → timestamp of last failure (time.time()).
+_device_cooldowns: dict[str, float] = {}
+
+# How long to skip a device after it produces zero audio (seconds).
+_DEVICE_COOLDOWN_SECS = 120
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +248,8 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
     # Matches the silent-mic health check threshold in main.py.
     MIN_AUDIO_LEVEL = 10
 
-    def test_mic(index, name, frames=15):
+    def test_mic(index, name, frames=15) -> int:
+        """Open a test stream and return the peak audio level (0 on error)."""
         test_stream = None
         try:
             test_stream = pa.open(
@@ -251,12 +263,12 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                     test_stream.read(chunk_size, exception_on_overflow=False),
                     dtype=np.int16,
                 )
-                max_level = max(max_level, np.abs(data).max())
+                max_level = max(max_level, int(np.abs(data).max()))
             _log(f"  [{index}] {name}: max_level={max_level}")
-            return max_level >= MIN_AUDIO_LEVEL
+            return max_level
         except Exception as e:
             _log(f"  [{index}] {name}: error - {e}")
-            return False
+            return 0
         finally:
             if test_stream is not None:
                 try:
@@ -264,28 +276,63 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                 except Exception:
                     pass
 
+    now = time.time()
+
     for rank, prio_name in enumerate(mic_priority):
         for index, dev_name in devices_by_priority[prio_name]:
+            dev_key = dev_name.lower()
+            # Skip devices that failed recently — prevents tight infinite loop
+            # when a dead Bluetooth device (e.g. Jabra) stays highest-priority.
+            cooldown_ts = _device_cooldowns.get(dev_key)
+            if cooldown_ts is not None and now - cooldown_ts < _DEVICE_COOLDOWN_SECS:
+                remaining = int(_DEVICE_COOLDOWN_SECS - (now - cooldown_ts))
+                _log(f"  [{index}] {dev_name}: skipping (cooldown, {remaining}s remaining)")
+                continue
+
             _log(f"Testing {dev_name}...")
-            if test_mic(index, dev_name):
+            max_level = test_mic(index, dev_name)
+
+            if max_level >= MIN_AUDIO_LEVEL:
+                # Device is producing real audio — clear any prior cooldown.
+                _device_cooldowns.pop(dev_key, None)
                 return index
+
+            if max_level == 0:
+                # Silent device — put it in cooldown so we don't hammer it.
+                _device_cooldowns[dev_key] = now
+                _log(f"  [{index}] {dev_name}: zero audio, adding to cooldown for {_DEVICE_COOLDOWN_SECS}s")
+
             # First-priority device: accept even at zero level if stream opened OK.
             # This supports virtual devices (BlackHole) that have no ambient audio.
             # Skip this fallback during dead-mic recovery (require_audio=True).
-            if rank == 0 and not require_audio:
+            if rank == 0 and not require_audio and max_level == 0:
                 try:
                     s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
                                 input=True, input_device_index=index, frames_per_buffer=chunk_size)
                     s.close()
                     _log(f"  [{index}] {dev_name}: no audio but stream OK (first priority), accepting")
+                    # Don't penalise virtual/first-priority devices with a cooldown.
+                    _device_cooldowns.pop(dev_key, None)
                     return index
                 except Exception:
                     pass
 
     for index, dev_name in other_devices:
+        dev_key = dev_name.lower()
+        cooldown_ts = _device_cooldowns.get(dev_key)
+        if cooldown_ts is not None and now - cooldown_ts < _DEVICE_COOLDOWN_SECS:
+            remaining = int(_DEVICE_COOLDOWN_SECS - (now - cooldown_ts))
+            _log(f"  [{index}] {dev_name}: skipping (cooldown, {remaining}s remaining)")
+            continue
+
         _log(f"Testing fallback {dev_name}...")
-        if test_mic(index, dev_name):
+        max_level = test_mic(index, dev_name)
+        if max_level >= MIN_AUDIO_LEVEL:
+            _device_cooldowns.pop(dev_key, None)
             return index
+        if max_level == 0:
+            _device_cooldowns[dev_key] = now
+            _log(f"  [{index}] {dev_name}: zero audio, adding to cooldown for {_DEVICE_COOLDOWN_SECS}s")
 
     try:
         default = pa.get_default_input_device_info()['index']
@@ -360,8 +407,45 @@ def detect_headset(pa, selected_input_index: int) -> bool:
     return False
 
 
+def add_device_cooldown(device_name: str) -> None:
+    """Add a device to cooldown after it was detected as silent/dead.
+
+    Call this from the silent mic recovery path so that the hotplug scanner
+    doesn't immediately re-select the dead device.
+    """
+    key = device_name.lower()
+    _device_cooldowns[key] = time.time()
+    _log(f"Device '{device_name}' added to cooldown for {_DEVICE_COOLDOWN_SECS}s")
+
+
+def is_device_cooled_down(device_name: str) -> bool:
+    """Check if a device is currently in cooldown (recently failed)."""
+    key = device_name.lower()
+    ts = _device_cooldowns.get(key)
+    if ts is None:
+        return False
+    return (time.time() - ts) < _DEVICE_COOLDOWN_SECS
+
+
+def clear_device_cooldowns() -> None:
+    """Clear all device cooldowns.
+
+    Call this when Bluetooth state changes (connect/disconnect event) so that
+    newly-connected devices are tested immediately rather than waiting for the
+    cooldown window to expire.
+
+    Example usage in main.py Bluetooth event handler::
+
+        from heyvox.audio.mic import clear_device_cooldowns
+        clear_device_cooldowns()
+    """
+    count = len(_device_cooldowns)
+    _device_cooldowns.clear()
+    if count:
+        _log(f"Device cooldowns cleared ({count} device(s) released)")
+
+
 def _log(msg: str) -> None:
     """Minimal log helper — avoids circular import with heyvox.main."""
-    import time
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)

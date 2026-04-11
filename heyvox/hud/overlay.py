@@ -660,12 +660,23 @@ def _make_menu_action_class():
             except FileNotFoundError:
                 pass
 
-            # Relaunch main process — it will spawn its own overlay
-            subprocess.Popen(
+            # Relaunch main process — it will spawn its own overlay.
+            # Log stderr so startup failures are diagnosable.
+            restart_log = open("/tmp/heyvox-restart.log", "w")
+            proc = subprocess.Popen(
                 [sys.executable, "-m", "heyvox.main"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=restart_log,
                 start_new_session=True,  # Detach so our exit doesn't kill it
             )
+
+            # Wait briefly and verify the new process is alive before quitting
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                # New process already exited — don't quit overlay so user
+                # still has the menu bar icon and can see something went wrong.
+                restart_log.close()
+                return
+
             # Quit this overlay — the new main process launches a fresh one
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)

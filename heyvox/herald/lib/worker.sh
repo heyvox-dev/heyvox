@@ -207,9 +207,45 @@ generate_piper() {
   fi
 }
 
+ping_daemon() {
+  # Send a lightweight ping to verify the daemon is responsive, not just alive
+  local response
+  response=$(python3 -c "
+import socket, json, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(3)
+try:
+    s.connect('$KOKORO_DAEMON_SOCK')
+    s.sendall(json.dumps({'action': 'ping'}).encode())
+    s.shutdown(socket.SHUT_WR)
+    data = s.recv(4096)
+    resp = json.loads(data)
+    if resp.get('ok'):
+        print('ok')
+    else:
+        print('fail')
+except Exception:
+    print('fail')
+finally:
+    s.close()
+" 2>/dev/null)
+  [ "$response" = "ok" ]
+}
+
 ensure_daemon() {
   if [ -S "$KOKORO_DAEMON_SOCK" ] && kill -0 "$(cat "$KOKORO_DAEMON_PID" 2>/dev/null)" 2>/dev/null; then
-    return 0
+    # Socket exists and process is alive — verify it's actually responsive
+    if ping_daemon; then
+      return 0
+    fi
+    # Daemon is hung — kill and restart
+    local stale_pid
+    stale_pid=$(cat "$KOKORO_DAEMON_PID" 2>/dev/null)
+    herald_log "WORKER: daemon unresponsive (pid=$stale_pid), killing and restarting"
+    kill "$stale_pid" 2>/dev/null
+    sleep 1
+    kill -9 "$stale_pid" 2>/dev/null
+    rm -f "$KOKORO_DAEMON_SOCK" "$KOKORO_DAEMON_PID"
   fi
   herald_log "WORKER: starting kokoro daemon"
   nohup "$KOKORO_DAEMON_PYTHON" "$KOKORO_DAEMON_SCRIPT" </dev/null >>"$HERALD_DEBUG_LOG" 2>&1 &

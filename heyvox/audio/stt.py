@@ -209,14 +209,14 @@ def transcribe_audio(
     samples = audio.astype(np.float32) / 32768.0
 
     if engine == "mlx":
-        # Ensure model is loaded (blocks if preload hasn't finished yet)
+        # Ensure model is loaded (blocks if preload hasn't finished yet).
+        # B1: Always go through _mlx_loaded.wait() so the total block is
+        # bounded by _LOAD_TIMEOUT, regardless of whether a background
+        # preload thread is already running or we trigger the load here.
         if not _mlx_loaded.is_set():
-            _load_mlx_model()
-        else:
-            _mlx_loaded.wait(timeout=_LOAD_TIMEOUT)
-
-        if not _mlx_loaded.is_set():
-            _log("ERROR: MLX model failed to load within timeout")
+            threading.Thread(target=_load_mlx_model, daemon=True).start()
+        if not _mlx_loaded.wait(timeout=_LOAD_TIMEOUT):
+            _log(f"ERROR: MLX model failed to load within {_LOAD_TIMEOUT}s")
             return ""
 
         try:
@@ -228,35 +228,59 @@ def transcribe_audio(
         if _mlx_language or language:
             kwargs["language"] = _mlx_language or language
 
-        # Run transcription with timeout to prevent hangs
+        # Run transcription with timeout to prevent hangs.
+        # B3: On timeout, shut the executor down without waiting so the
+        # orphaned thread does not accumulate as a zombie.
+        executor = ThreadPoolExecutor(max_workers=1)
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(mlx_whisper.transcribe, samples, **kwargs)
-                result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+            future = executor.submit(mlx_whisper.transcribe, samples, **kwargs)
+            result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
         except FuturesTimeout:
             _log(f"ERROR: MLX transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
+            executor.shutdown(wait=False, cancel_futures=True)
             return ""
         except Exception as e:
             _log(f"ERROR: MLX transcription failed: {e}")
+            executor.shutdown(wait=False, cancel_futures=True)
             return ""
+        else:
+            executor.shutdown(wait=False)
 
         with _mlx_lock:
             _mlx_last_use = time.time()
             _schedule_unload()  # Reset the idle timer
         return result["text"].strip()
     else:
-        # sherpa-onnx: split into <=30s segments (Whisper's input limit)
-        max_samples = 30 * sample_rate
-        parts = []
-        for i in range(0, len(samples), max_samples):
-            chunk = samples[i:i + max_samples]
-            stream = _recognizer.create_stream()
-            stream.accept_waveform(sample_rate, chunk)
-            _recognizer.decode_stream(stream)
-            text = stream.result.text.strip()
-            if text:
-                parts.append(text)
-        return " ".join(parts)
+        # sherpa-onnx: split into <=30s segments (Whisper's input limit).
+        # B2: Wrap the entire sherpa transcription loop in a thread with
+        # _TRANSCRIBE_TIMEOUT to match the protection the MLX path has.
+        def _sherpa_transcribe() -> str:
+            max_samples = 30 * sample_rate
+            parts = []
+            for i in range(0, len(samples), max_samples):
+                chunk = samples[i:i + max_samples]
+                stream = _recognizer.create_stream()
+                stream.accept_waveform(sample_rate, chunk)
+                _recognizer.decode_stream(stream)
+                text = stream.result.text.strip()
+                if text:
+                    parts.append(text)
+            return " ".join(parts)
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(_sherpa_transcribe)
+            return future.result(timeout=_TRANSCRIBE_TIMEOUT)
+        except FuturesTimeout:
+            _log(f"ERROR: Sherpa transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
+            executor.shutdown(wait=False, cancel_futures=True)
+            return ""
+        except Exception as e:
+            _log(f"ERROR: Sherpa transcription failed: {e}")
+            executor.shutdown(wait=False, cancel_futures=True)
+            return ""
+        else:
+            executor.shutdown(wait=False)
 
 
 def model_loaded() -> bool:
