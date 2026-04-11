@@ -30,12 +30,19 @@ from heyvox.constants import (
     ACTIVE_MIC_FILE,
     MIC_SWITCH_REQUEST_FILE,
 )
-from heyvox.audio.mic import find_best_mic, open_mic_stream, detect_headset, get_dead_input_device_names
+from heyvox.audio.mic import find_best_mic, open_mic_stream, detect_headset, get_dead_input_device_names, add_device_cooldown, is_device_cooled_down
 from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir, device_change_cue
 from heyvox.audio.stt import init_local_stt, transcribe_audio
 from heyvox.audio.tts import check_voice_command, execute_voice_command
 from heyvox.input.injection import type_text, save_frontmost_pid, restore_frontmost
 from heyvox.input.target import snapshot_target, restore_target
+
+# Backward-compat re-exports (tests import these; remove in Phase 9)
+from heyvox.text_processing import (
+    is_garbled as _is_garbled,
+    strip_wake_words as _strip_wake_words,
+    _WAKE_WORD_PHRASES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +74,14 @@ _zombie_mic_reinit = False  # Set True to force mic reinit on next main loop ite
 _ZOMBIE_FAIL_THRESHOLD = 2  # Force reinit after N consecutive failed recordings
 _busy_since: float = 0.0  # Timestamp when busy flag was set (watchdog)
 _BUSY_TIMEOUT = 60.0  # Force-reset busy after this many seconds
+
+# ---------------------------------------------------------------------------
+# Time-based dead mic detection (AUDIO-13)
+# Catches dead mic even during rapid PTT usage where idle health checks
+# never run.  Updated on every main-loop iteration that sees real audio.
+# ---------------------------------------------------------------------------
+_last_good_audio_time: float = 0.0  # Set on startup & whenever level >= 10
+_DEAD_MIC_TIMEOUT = 30.0  # Force reinit after this many seconds of silence
 
 # ---------------------------------------------------------------------------
 # HUD client state (Phase 5 — optional, never crashes main loop)
@@ -136,174 +151,8 @@ def _hud_ensure_connected() -> None:
 
 # ---------------------------------------------------------------------------
 # Wake word stripping from transcriptions
+# Moved to heyvox/text_processing.py — re-exported above for backward compat
 # ---------------------------------------------------------------------------
-
-# Common transcription variants of wake word model names.
-# Whisper may transcribe "hey_jarvis_v0.1" as "Hey Jarvis", "hey jarvis",
-# "Hey, Jarvis", "Hey Travis", "Hey Chavez", etc.
-_WAKE_WORD_PHRASES: dict[str, list[str]] = {
-    "hey_jarvis": [
-        "hey jarvis", "hey, jarvis",
-        "hey travis", "hey, travis",
-        "hey chavez", "hey, chavez",
-        "hey chavis", "hey, chavis",
-        "hey charmis", "hey, charmis",
-        "hey charvis", "hey, charvis",
-        "hey charles", "hey, charles",
-        "hey javis", "hey, javis",
-        "hey javi", "hey, javi",
-        "hey java", "hey, java",
-        "hey job is", "hey job",
-        "hey charisma",
-        "hey javas", "hey, javas",
-        "h-arvis", "h arvis",
-        "jarvis", "jarvis.",
-        "hrvs", "hrs", "hr",
-        "j.a.r.v.i.s", "jar",
-    ],
-    "hey_vox": [
-        "hey vox", "hey, vox",
-        "hey box", "hey, box",
-        "hey fox", "hey, fox",
-        "hey vocs", "hey, vocs",
-        "hey vokes", "hey, vokes",
-        "hey vos", "hey, vos",
-        "hey boks", "hey, boks",
-        "hey vaux", "hey, vaux",
-        "hey voxx", "hey, voxx",
-        "hey rocks", "hey, rocks",
-        "hey docs", "hey, docs",
-        "hey locks", "hey, locks",
-        "hey socks", "hey, socks",
-        "vox", "vox.",
-    ],
-}
-
-
-def _is_garbled(text: str) -> bool:
-    """Detect garbled/nonsensical STT output from accidental wake word triggers.
-
-    Catches common Whisper hallucination patterns:
-    - Excessive repeated words/phrases
-    - Mostly non-alphanumeric characters
-    - Known Whisper filler hallucinations
-    """
-    import re
-
-    cleaned = text.strip()
-    if not cleaned:
-        return False
-
-    # Too short to be useful (single word that isn't a command)
-    words = cleaned.split()
-    if len(words) <= 1 and len(cleaned) < 4:
-        return True
-
-    # High ratio of repeated words (e.g. "the the the the")
-    if len(words) >= 4:
-        unique = set(w.lower() for w in words)
-        if len(unique) / len(words) < 0.25:
-            return True
-
-    # Repeated phrases: split into bigrams and check repetition
-    if len(words) >= 6:
-        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
-        unique_bigrams = set(b.lower() for b in bigrams)
-        if len(unique_bigrams) / len(bigrams) < 0.3:
-            return True
-
-    # Mostly non-letter characters (Unicode garbage)
-    alpha_chars = sum(1 for c in cleaned if c.isalpha())
-    if len(cleaned) > 3 and alpha_chars / len(cleaned) < 0.4:
-        return True
-
-    # Known Whisper hallucination patterns
-    hallucination_patterns = [
-        r"^\.+$",                          # Just dots
-        r"^[\s.,:;!?]+$",                  # Just punctuation
-        r"(?i)^(thanks? for watching|subscribe)",  # YouTube artifacts
-        r"(?i)^(music|applause|laughter)\s*$",     # Sound descriptions
-        r"(?i)^you$",                       # Common short hallucination
-    ]
-    for pattern in hallucination_patterns:
-        if re.match(pattern, cleaned):
-            return True
-
-    return False
-
-
-def _strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
-    """Remove wake word phrases from the beginning and end of transcription.
-
-    Whisper transcribes the wake word along with the user's speech. Since the
-    wake word is just a trigger mechanism, it should not appear in the injected
-    text. Uses both an explicit phrase list AND a fuzzy regex fallback to catch
-    novel Whisper mistranscriptions (e.g. "Hey Chavis", "Hey Job is").
-
-    Args:
-        text: Raw transcription from STT.
-        start_model: Wake word model name for start trigger (e.g. "hey_jarvis_v0.1").
-        stop_model: Wake word model name for stop trigger.
-
-    Returns:
-        Cleaned text with wake word phrases removed from start/end.
-    """
-    import re
-
-    if not text:
-        return text
-
-    # Collect all known phrases for the configured wake word models
-    phrases = set()
-    for model in (start_model, stop_model):
-        # Strip version suffix: "hey_jarvis_v0.1" → "hey_jarvis"
-        base = model.rsplit("_v", 1)[0] if "_v" in model else model
-        if base in _WAKE_WORD_PHRASES:
-            phrases.update(_WAKE_WORD_PHRASES[base])
-        # Also add the raw model name as a phrase (underscores → spaces)
-        phrases.add(base.replace("_", " "))
-
-    # Sort longest first so "hey, jarvis" matches before "hey"
-    sorted_phrases = sorted(phrases, key=len, reverse=True)
-
-    cleaned = text.strip()
-
-    # --- Pass 1: Exact phrase matching (handles known variants) ---
-    stripped = False
-
-    # Strip from end first (stop wake word)
-    for phrase in sorted_phrases:
-        lower = cleaned.lower().rstrip(" .,!?")
-        if lower.endswith(phrase):
-            idx = len(cleaned.rstrip(" .,!?")) - len(phrase)
-            cleaned = cleaned[:idx].rstrip(" .,!?")
-            stripped = True
-            break
-
-    # Strip from start (start wake word — happens with toggle mode)
-    for phrase in sorted_phrases:
-        lower = cleaned.lower().lstrip(" .,!?")
-        if lower.startswith(phrase):
-            cleaned = cleaned[len(phrase):].lstrip(" .,!?")
-            stripped = True
-            break
-
-    # --- Pass 2: Fuzzy regex fallback (catches novel Whisper variants) ---
-    # Matches "Hey <1-2 words>" at start/end that look like wake word attempts.
-    # Only runs if the explicit list didn't already catch something.
-    if not stripped:
-        # Start: "Hey Jarvis/Chavis/Travis/etc." — 1-2 short words after "hey"
-        cleaned = re.sub(
-            r'^[Hh]ey[,.]?\s+\w{2,8}(\s+\w{2,5})?\s*[.,!?]*\s*',
-            '', cleaned, count=1
-        ).strip()
-        # End: same pattern at the end of the text
-        cleaned = re.sub(
-            r'\s*[.,!?]*\s*[Hh]ey[,.]?\s+\w{2,8}(\s+\w{2,5})?[.,!?]*\s*$',
-            '', cleaned, count=1
-        ).strip()
-
-    return cleaned.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +333,13 @@ def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None
         return
     if _shutdown.is_set():
         return  # Don't start recording during shutdown
+
+    # AUDIO-13: Don't start recording on a known-dead mic stream.
+    # The main loop will pick up the flag and reinit before we get here again.
+    if _zombie_mic_reinit:
+        log("start_recording blocked: zombie mic reinit pending, skipping")
+        _hud_send({"type": "error", "text": "Mic reinitializing…"})
+        return
 
     with _state_lock:
         if is_recording:
@@ -1017,17 +873,23 @@ def _acquire_singleton():
             with open(_PID_FILE) as _f:
                 old_pid = int(_f.read().strip())
             os.kill(old_pid, 0)  # Check if alive
-            # Verify the process is actually vox (not a recycled PID)
+            # Verify the process is actually heyvox (not a recycled PID).
+            # psutil is more reliable than a ps subprocess: it reads /proc (or
+            # the macOS equivalent) atomically, avoids a fork/exec race, and
+            # raises NoSuchProcess if the PID disappears between the os.kill(0)
+            # check above and this point.
             try:
-                result = subprocess.run(
-                    ["ps", "-p", str(old_pid), "-o", "command="],
-                    capture_output=True, text=True, timeout=2,
-                )
-                if "vox" not in result.stdout.lower():
-                    log(f"PID {old_pid} is not vox (cmd: {result.stdout.strip()}), removing stale PID file")
-                    raise ProcessLookupError("not vox")
-            except subprocess.TimeoutExpired:
-                pass  # Proceed with kill if ps hangs
+                import psutil as _psutil
+                _proc = _psutil.Process(old_pid)
+                _cmdline = " ".join(_proc.cmdline()).lower()
+                if "heyvox" not in _cmdline:
+                    log(
+                        f"PID {old_pid} is not heyvox "
+                        f"(cmd: {_cmdline!r}), removing stale PID file"
+                    )
+                    raise ProcessLookupError("not heyvox")
+            except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                raise ProcessLookupError("gone or inaccessible")
             log(f"Killing previous vox instance (PID {old_pid})")
             os.kill(old_pid, signal.SIGTERM)
             time.sleep(1)
@@ -1151,6 +1013,21 @@ def main() -> None:
         except OSError:
             pass
 
+    # B6: Clean up orphaned media-pause flags that were not removed by
+    # _acquire_singleton (e.g. left by a SIGKILL'd predecessor that used a
+    # workspace-specific suffix).  Only remove files older than 60 seconds so
+    # we don't disturb a flag written by a concurrent legitimate pause.
+    import glob as _glob_b6
+    for _mp_pattern in ("/tmp/herald-media-paused-*", "/tmp/heyvox-media-paused-*"):
+        for _mp_file in _glob_b6.glob(_mp_pattern):
+            try:
+                _mp_age = time.time() - os.path.getmtime(_mp_file)
+                if _mp_age > 60:
+                    os.unlink(_mp_file)
+                    log(f"Cleaned stale media-pause flag: {_mp_file} (age={_mp_age:.0f}s)")
+            except OSError:
+                pass
+
     # Start native TTS worker if enabled
     # Requirement: TTS-03
     from heyvox.audio.tts import start_worker as _start_tts, shutdown as _shutdown_tts
@@ -1241,7 +1118,7 @@ def main() -> None:
         start_word, stop_word, config.wake_words.models_dir,
         also_load=config.wake_words.also_load,
     )
-    _loaded_models = list(model.prediction_buffer.keys()) if hasattr(model, 'prediction_buffer') else []
+    _loaded_models = list(model.models.keys()) if hasattr(model, 'models') else []
     print(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}", file=sys.stderr, flush=True)
     log(f"Wake word models loaded: {_loaded_models}")
 
@@ -1313,6 +1190,10 @@ def main() -> None:
     HEALTH_CHECK_INTERVAL = 5.0  # Check every 5s for fast dead-mic recovery
     last_health_check = time.time()
 
+    # AUDIO-13: time-based dead mic detection (works even during recording)
+    global _last_good_audio_time
+    _last_good_audio_time = time.time()
+
     # Variance-based zombie stream detection (AUDIO-12)
     # Zombie streams from AUHAL error -50 produce noise with unnaturally stable
     # coefficient of variation (~0.577 = 1/sqrt(3) for uniform noise).
@@ -1380,6 +1261,11 @@ def main() -> None:
                     dtype=np.int16,
                 )
                 consecutive_errors = 0
+
+                # AUDIO-13: track last time we saw real audio (level >= 10)
+                if int(np.abs(audio).max()) >= 10:
+                    _last_good_audio_time = time.time()
+
             except IOError as e:
                 consecutive_errors += 1
                 if consecutive_errors <= 2:
@@ -1413,7 +1299,17 @@ def main() -> None:
                 consecutive_errors = 0
                 continue
 
+            # AUDIO-13: time-based dead mic detection — catches dead streams even
+            # during rapid PTT usage where the idle health check never runs.
+            if _last_good_audio_time and (time.time() - _last_good_audio_time > _DEAD_MIC_TIMEOUT):
+                if not _zombie_mic_reinit:
+                    _dead_secs = time.time() - _last_good_audio_time
+                    log(f"WARNING: No good audio for {_dead_secs:.0f}s, forcing mic reinit (AUDIO-13)")
+                    print(f"[mic] Dead mic timeout ({_dead_secs:.0f}s silence), forcing reinit...", file=sys.stderr, flush=True)
+                    _zombie_mic_reinit = True
+
             # Zombie stream reinit — triggered by consecutive failed recordings (AUDIO-12)
+            # or time-based dead mic timeout (AUDIO-13)
             if _zombie_mic_reinit:
                 _zombie_mic_reinit = False
                 log("Zombie stream reinit: forcing mic recovery after consecutive empty recordings")
@@ -1448,6 +1344,7 @@ def main() -> None:
                 _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
                 model.reset()
                 _health_cv_history.clear()
+                _last_good_audio_time = time.time()  # AUDIO-13: reset timeout
                 consecutive_errors = 0
                 continue
 
@@ -1529,6 +1426,8 @@ def main() -> None:
                             pa.terminate()
                             time.sleep(_backoff)
                             pa = pyaudio.PyAudio()
+                            # Mark the dead device in cooldown so hotplug scan won't re-select it
+                            add_device_cooldown(_dead_mic_name)
                             # Exclude the dead device to try alternatives first
                             _exclude_prio = [p for p in mic_priority if p.lower() not in _dead_mic_name.lower()]
                             dev_index = find_best_mic(pa, mic_priority=_exclude_prio or mic_priority,
@@ -1628,10 +1527,13 @@ def main() -> None:
 
                     # Check if a higher-priority device is available but not currently selected.
                     # Skip auto-switch if user manually pinned a mic via menu.
+                    # Skip devices in cooldown (recently failed silent mic detection).
                     # Use tracked dev_name (not pa.get_device_info which may have stale indices).
                     better_available = False
                     for prio_name in mic_priority if not _mic_pinned else []:
-                        matching = [n for n in current_names if prio_name.lower() in n.lower()]
+                        matching = [n for n in current_names
+                                    if prio_name.lower() in n.lower()
+                                    and not is_device_cooled_down(n)]
                         if matching:
                             if prio_name.lower() in dev_name.lower():
                                 break  # Already using this priority level or higher
@@ -1648,7 +1550,8 @@ def main() -> None:
                         pa.terminate()
                         pa = pyaudio.PyAudio()
                         dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                                  sample_rate=sample_rate, chunk_size=chunk_size)
+                                                  sample_rate=sample_rate, chunk_size=chunk_size,
+                                                  require_audio=True)
                         if dev_index is not None:
                             dev_name = pa.get_device_info_by_index(dev_index)['name']
                             log(f"Switched to: [{dev_index}] {dev_name}")
