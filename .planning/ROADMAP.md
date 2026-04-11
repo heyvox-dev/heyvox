@@ -45,7 +45,7 @@ Plans:
 - [x] 06-00-PLAN.md — Test scaffolds for extracted modules (Nyquist compliance)
 - [x] 06-01-PLAN.md — AppContext dataclass + text_processing.py extraction
 - [x] 06-02-PLAN.md — DeviceManager extraction
-- [ ] 06-03-PLAN.md — RecordingStateMachine extraction + main.py thinning
+- [x] 06-03-PLAN.md — RecordingStateMachine extraction + main.py thinning
 
 ### Phase 7: Herald Python Port
 **Goal**: The Herald TTS orchestrator runs entirely in Python — no bash/Python boundary crossings per TTS request
