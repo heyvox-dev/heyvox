@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
 status: executing
-stopped_at: Completed 07-herald-python-port/07-02-PLAN.md
-last_updated: "2026-04-11T15:17:24.146Z"
+stopped_at: "Checkpoint: 07-herald-python-port/07-04-PLAN.md Task 3 (human-verify)"
+last_updated: "2026-04-11T15:21:44.408Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 8
-  completed_plans: 6
+  completed_plans: 8
   percent: 50
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 07 (herald-python-port) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -55,6 +55,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 06-decomposition]: Bridge pattern for recording globals in Plan 02: ctx.is_recording = is_recording at loop top; removed in Plan 03 when recording state moves to AppContext
 - [Phase 06-decomposition]: HUD process lifecycle extracted to heyvox/hud/process.py as natural decomposition
 - [Phase 07-herald-python-port]: Add herald constants to constants.py for single source of truth; detect_mood/detect_language as module-level functions for testability
+- [Phase 07-herald-python-port]: Thin bash shims (D-03): 5-line hook shims retained for entry points, python3 -m heyvox.herald.worker handles all logic
 
 ### Pending Todos
 
@@ -69,6 +70,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T15:17:24.142Z
-Stopped at: Completed 07-herald-python-port/07-02-PLAN.md
+Last session: 2026-04-11T15:21:44.405Z
+Stopped at: Checkpoint: 07-herald-python-port/07-04-PLAN.md Task 3 (human-verify)
 Resume file: None
