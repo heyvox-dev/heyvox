@@ -1,3 +1,19 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: v1.0 MVP milestone shipped and archived
+stopped_at: Completed 07-herald-python-port/07-01-PLAN.md
+last_updated: "2026-04-11T15:01:32.842Z"
+last_activity: 2026-03-27 -- v1.0 milestone complete
+progress:
+  total_phases: 6
+  completed_phases: 5
+  total_plans: 9
+  completed_plans: 11
+  percent: 100
+---
+
 # Project State
 
 ## Project Reference
@@ -19,6 +35,7 @@ Progress: [##########] 100%
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 10
 - Average duration: 3.5 min
 - Total execution time: ~0.6 hours
@@ -32,12 +49,16 @@ Progress: [##########] 100%
 | 03-cli-tts-output | 2 | 8 min | 4 min |
 | 04-mcp-server | 2 | 6 min | 3 min |
 | 05-hud-overlay | 2 | 6 min | 3 min |
+| Phase 07-herald-python-port P07-01 | 5 | 4 tasks | 4 files |
 
 ## Accumulated Context
 
 ### Decisions
 
 Full decision log in PROJECT.md Key Decisions table.
+
+- [Phase 07-herald-python-port]: Keep afplay for WAV playback: reliable, easy to kill, handles all WAV formats
+- [Phase 07-herald-python-port]: CoreAudio ctypes with osascript fallback: defensive design, API changes won't break TTS
 
 ### Pending Todos
 
@@ -49,6 +70,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-27
-Stopped at: v1.0 milestone complete and archived
+Last session: 2026-04-11T15:01:19.345Z
+Stopped at: Completed 07-herald-python-port/07-01-PLAN.md
 Resume file: None
