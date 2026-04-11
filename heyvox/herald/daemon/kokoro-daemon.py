@@ -150,6 +150,34 @@ def split_sentences(text):
 
 # --- WAV writing ---
 
+def normalize_samples(samples, target_rms=3000, scale_cap=3.0, peak_limit=24000):
+    """RMS-normalize float32 samples before int16 conversion.
+
+    Operates on float32 array (range approx -1.0 to 1.0).
+    target_rms, scale_cap, peak_limit are in int16 scale (matching orchestrator constants).
+    Converts to int16 scale internally for RMS calculation, applies scale, converts back.
+
+    Requirement: HERALD-02 (WAV normalization at generation time)
+    """
+    if len(samples) < 1000:
+        return samples
+    # Work in int16 scale for RMS calculation (consistent with orchestrator values)
+    int16_view = samples * 32767.0
+    rms = np.sqrt(np.mean(int16_view ** 2))
+    if rms < 50:
+        return samples  # silence, skip
+    scale = min(target_rms / rms if rms > 0 else 1.0, scale_cap)
+    scaled = int16_view * scale
+    # Soft clip above peak_limit
+    above = scaled > peak_limit
+    below = scaled < -peak_limit
+    scaled[above] = peak_limit + (scaled[above] - peak_limit) * 0.2
+    scaled[below] = -peak_limit + (scaled[below] + peak_limit) * 0.2
+    # Clamp and convert back to float32
+    scaled = np.clip(scaled, -32768, 32767)
+    return scaled / 32767.0
+
+
 def write_wav(path, samples, sample_rate):
     samples_int16 = (samples * 32767).astype(np.int16)
     with wave.open(path, "wb") as wf:
@@ -170,6 +198,7 @@ def generate_mlx(model, text, voice, lang, speed, output_path):
     if len(sentences) <= 1:
         for result in model.generate(text, voice=voice, speed=speed, lang_code=lang_code):
             audio = np.array(result.audio)
+            audio = normalize_samples(audio)
             write_wav(output_path, audio, result.sample_rate)
             duration = time.time() - t0
             audio_len = len(audio) / result.sample_rate
@@ -182,6 +211,7 @@ def generate_mlx(model, text, voice, lang, speed, output_path):
     # Part 1 — first sentence (fast start)
     for result in model.generate(sentences[0], voice=voice, speed=speed, lang_code=lang_code):
         audio = np.array(result.audio)
+        audio = normalize_samples(audio)
         write_wav(output_path, audio, result.sample_rate)
         sample_rate = result.sample_rate
         part1_time = time.time() - t0
@@ -194,6 +224,7 @@ def generate_mlx(model, text, voice, lang, speed, output_path):
         part_path = f"{base}.part{i}.wav"
         for result in model.generate(sentence, voice=voice, speed=speed, lang_code=lang_code):
             audio = np.array(result.audio)
+            audio = normalize_samples(audio)
             write_wav(part_path, audio, result.sample_rate)
             part_audio = len(audio) / result.sample_rate
             total_audio_len += part_audio
@@ -211,6 +242,7 @@ def generate_onnx(model, text, voice, lang, speed, output_path):
 
     if len(sentences) <= 1:
         samples, sample_rate = model.create(text, voice=voice, speed=speed, lang=lang)
+        samples = normalize_samples(samples)
         write_wav(output_path, samples, sample_rate)
         duration = time.time() - t0
         audio_len = len(samples) / sample_rate
@@ -221,6 +253,7 @@ def generate_onnx(model, text, voice, lang, speed, output_path):
     base = output_path.replace(".wav", "")
 
     samples, sample_rate = model.create(sentences[0], voice=voice, speed=speed, lang=lang)
+    samples = normalize_samples(samples)
     write_wav(output_path, samples, sample_rate)
     part1_time = time.time() - t0
     part1_audio = len(samples) / sample_rate
@@ -230,6 +263,7 @@ def generate_onnx(model, text, voice, lang, speed, output_path):
     for i, sentence in enumerate(sentences[1:], start=2):
         part_path = f"{base}.part{i}.wav"
         samples, sample_rate = model.create(sentence, voice=voice, speed=speed, lang=lang)
+        samples = normalize_samples(samples)
         write_wav(part_path, samples, sample_rate)
         part_audio = len(samples) / sample_rate
         total_audio_len += part_audio

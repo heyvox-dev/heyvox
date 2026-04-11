@@ -126,19 +126,16 @@ def _herald_log(msg: str, debug_log: Path) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# WAV normalization (port of normalize_wav from orchestrator.sh)
-# ---------------------------------------------------------------------------
+# WAV normalization (legacy fallback — primary normalization is in kokoro-daemon.py)
 
 
 def normalize_wav(path: Path, target_rms: int = 3000, scale_cap: float = 3.0,
                   peak_limit: int = 24000) -> None:
     """Normalize WAV loudness in-place via RMS matching.
 
-    Equivalent to the Python inline in orchestrator.sh normalize_wav().
+    Legacy fallback for externally-generated WAVs. Primary normalization
+    happens in kokoro-daemon.py normalize_samples() at generation time (HERALD-02).
     Skips files with RMS < 50 (silence / already quiet).
-
-    Requirement: HERALD-02 (WAV normalization at generation time, also here)
     """
     try:
         with wave.open(str(path), "rb") as wf:
@@ -493,10 +490,6 @@ def _play_wav(
 
     # Violation check pre-play
     _violation_check(f"orchestrator:pre-play:{basename}", cfg)
-
-    # Normalize WAV
-    normalize_wav(wav_file, cfg.normalize_target_rms, cfg.normalize_scale_cap,
-                  cfg.normalize_peak_limit)
 
     # Play via afplay with watchdog thread
     proc = subprocess.Popen(["afplay", str(wav_file)])
