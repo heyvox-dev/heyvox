@@ -1,3 +1,19 @@
+---
+gsd_state_version: 1.0
+milestone: v1.1
+milestone_name: Architecture Hardening
+status: executing
+stopped_at: Completed 06-decomposition-00-PLAN.md
+last_updated: "2026-04-11T05:11:42.686Z"
+last_activity: 2026-04-11
+progress:
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 4
+  completed_plans: 1
+  percent: 50
+---
+
 # Project State
 
 ## Project Reference
@@ -5,20 +21,21 @@
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** v1.1 Architecture Hardening — Phase 6: Decomposition
+**Current focus:** Phase 06 — decomposition
 
 ## Current Position
 
-Phase: 6 of 9 (Decomposition)
-Plan: 0 of ? in current phase
-Status: Ready to plan
-Last activity: 2026-04-10 — v1.1 roadmap created (4 phases, 15 requirements mapped)
+Phase: 06 (decomposition) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
+Last activity: 2026-04-11
 
 Progress: [██████████          ] 50% (5/10 v1.0 phases complete; v1.1 starting)
 
 ## Performance Metrics
 
 **Velocity (v1.0):**
+
 - Total plans completed: 10
 - Average duration: 3.5 min
 - Total execution time: ~0.6 hours
@@ -30,6 +47,8 @@ Progress: [██████████          ] 50% (5/10 v1.0 phases compl
 ### Decisions
 
 Full decision log in PROJECT.md Key Decisions table.
+
+- [Phase 06-decomposition]: Module-level pytestmark skip allows Plans 01-03 to unskip tests with one line removal
 
 ### Pending Todos
 
@@ -44,6 +63,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-10
-Stopped at: Roadmap created for v1.1; ready to plan Phase 6
+Last session: 2026-04-11T05:11:42.683Z
+Stopped at: Completed 06-decomposition-00-PLAN.md
 Resume file: None
