@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
 status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-04-11T17:21:02.262Z"
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-04-11T17:32:02.920Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 12
-  completed_plans: 10
+  total_plans: 10
+  completed_plans: 11
   percent: 50
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 08 (ipc-consolidation) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -59,6 +59,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 07-herald-python-port]: Inline import of pause_media/resume_media in _media_pause/_media_resume to avoid circular imports
 - [Phase 07-herald-python-port]: normalize_samples operates in float32 space (pre-int16) matching orchestrator int16-scale constants
 - [Phase 08-ipc-consolidation]: Standalone daemons (watcher.py, kokoro-daemon.py, hush_host.py) annotated with source-of-truth comments instead of importing heyvox.constants
+- [Phase 08-ipc-consolidation]: Queue GC: claim_dir added to dir_thresholds (1h) replacing inline block; HERALD_WATCHER_HANDLED_DIR cleaned via separate loop to avoid dataclass change
 
 ### Pending Todos
 
@@ -73,6 +74,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T17:21:02.259Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-04-11T17:32:02.916Z
+Stopped at: Completed 08-03-PLAN.md
 Resume file: None
