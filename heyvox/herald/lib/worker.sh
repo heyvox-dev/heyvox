@@ -19,7 +19,8 @@ if ! kill -0 "$(cat "$HERALD_ORCH_PID" 2>/dev/null)" 2>/dev/null; then
   if mkdir /tmp/herald-orch-launch.lock 2>/dev/null; then
     # Double-check after acquiring lock
     if ! kill -0 "$(cat "$HERALD_ORCH_PID" 2>/dev/null)" 2>/dev/null; then
-      nohup bash "${HERALD_HOME}/lib/orchestrator.sh" </dev/null >/dev/null 2>&1 &
+      # Python orchestrator replaces orchestrator.sh (HERALD-01)
+      nohup "${KOKORO_DAEMON_PYTHON}" -m heyvox.herald.orchestrator </dev/null >>"$HERALD_DEBUG_LOG" 2>&1 &
     fi
     rm -rf /tmp/herald-orch-launch.lock
   fi
