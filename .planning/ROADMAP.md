@@ -73,12 +73,11 @@ Plans:
   1. Every socket, flag, PID, and queue path in the codebase is imported from heyvox/constants.py — no hardcoded /tmp strings elsewhere
   2. Cross-process state (recording, speaking, mute, active workspace) reads/writes /tmp/heyvox-state.json via atomic temp file + os.rename — no individual flag files
   3. A cleanup routine runs periodically and removes orphaned WAV, timing, and workspace sidecar files from queue directories
-**Plans:** 4 plans
+**Plans:** 3 plans
 Plans:
-- [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
-- [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
-- [x] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
-- [x] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
+- [ ] 08-01-PLAN.md — Constants consolidation + caller migration (IPC-01)
+- [ ] 08-02-PLAN.md — Atomic state file module + dual-write wiring (IPC-02)
+- [ ] 08-03-PLAN.md — Queue garbage collection in orchestrator (IPC-03)
 
 ### Phase 9: Test Suite
 **Goal**: A pytest suite exists that validates pure functions, state machine transitions, IPC round-trips, and device selection logic without requiring real hardware
@@ -89,12 +88,7 @@ Plans:
   2. RecordingStateMachine transition tests cover start, stop, busy, and cancel flows with all edge cases verified
   3. HUD Unix socket tests verify client/server round-trips, reconnection after server restart, and message loss behavior
   4. Device selection tests with mocked PyAudio verify priority ordering, cooldown enforcement, and fallback behavior
-**Plans:** 4 plans
-Plans:
-- [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
-- [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
-- [ ] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
-- [ ] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
+**Plans:** [To be planned]
 
 ## Progress
 
@@ -107,5 +101,5 @@ Plans:
 | 5. HUD Overlay | v1.0 | 2/2 | Complete | 2026-03-27 |
 | 6. Decomposition | v1.1 | 3/4 | In Progress|  |
 | 7. Herald Python Port | v1.1 | 4/5 | In Progress|  |
-| 8. IPC Consolidation | v1.1 | 0/? | Not started | — |
+| 8. IPC Consolidation | v1.1 | 0/3 | Not started | — |
 | 9. Test Suite | v1.1 | 0/? | Not started | — |
