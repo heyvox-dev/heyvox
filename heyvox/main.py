@@ -584,10 +584,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _preroll_buffer: deque = deque(maxlen=_PREROLL_CHUNKS)
 
     # Memory watchdog
-    _MEM_WARN_MB = 1500
-    _MEM_CRITICAL_MB = 1000
+    _MEM_WARN_MB = 2000
+    _MEM_CRITICAL_MB = 2500
     _last_mem_check = time.time()
-    _MEM_CHECK_INTERVAL = 60.0
+    _MEM_CHECK_INTERVAL = 15.0
 
     # SIGKILL-proof heartbeat
     _HEARTBEAT_FILE = HEYVOX_HEARTBEAT_FILE
