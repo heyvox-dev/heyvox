@@ -445,7 +445,7 @@ def _play_wav(
                 else:
                     _herald_log("ORCH: skipping workspace switch (Conductor not frontmost)", debug_log)
                 workspace_file.unlink(missing_ok=True)
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
         if cfg.media_pause:
@@ -628,7 +628,7 @@ class HeraldOrchestrator:
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             try:
                 signal.signal(sig, _handle_signal)
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
         try:
@@ -668,7 +668,7 @@ class HeraldOrchestrator:
                     if workspace_file.exists():
                         try:
                             next_workspace = workspace_file.read_text().strip()
-                        except OSError:
+                        except (OSError, ValueError):
                             pass
 
                     if (
@@ -687,7 +687,7 @@ class HeraldOrchestrator:
                                     str(workspace_file),
                                     str(cfg.hold_dir / workspace_file.name),
                                 )
-                        except OSError:
+                        except (OSError, ValueError):
                             pass
                         _herald_log(
                             f"ORCH: held {basename} from {next_workspace} (user active on {current_workspace})",
@@ -741,7 +741,7 @@ class HeraldOrchestrator:
                             for claim_file in cfg.claim_dir.iterdir():
                                 if claim_file.is_file() and (now - claim_file.stat().st_mtime) > 3600:
                                     claim_file.unlink(missing_ok=True)
-                        except OSError:
+                        except (OSError, ValueError):
                             pass
 
         finally:
