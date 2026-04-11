@@ -7,15 +7,11 @@ media pause/resume, and workspace-aware playback.
 import os
 from pathlib import Path
 
-# Package root — used by bash scripts via HERALD_HOME env var
+# Package root — used by hook shims
 HERALD_HOME = Path(__file__).parent
 
-# Export for Python consumers
-HERALD_BIN = HERALD_HOME / "bin" / "herald"
-HERALD_LIB = HERALD_HOME / "lib"
-HERALD_DAEMON = HERALD_HOME / "daemon"
+# Subpackage paths (kept for backward compat, used by setup/hooks.py)
 HERALD_HOOKS = HERALD_HOME / "hooks"
-HERALD_MODES = HERALD_HOME / "modes"
 
 
 def get_herald_home() -> str:
@@ -24,37 +20,30 @@ def get_herald_home() -> str:
 
 
 def run_herald(*args: str, env: dict | None = None) -> int:
-    """Run a Herald CLI command.
+    """Run a Herald command via the Python CLI.
 
     Example: run_herald("speak", "Hello world")
     """
-    import subprocess
+    from heyvox.herald.cli import dispatch
+    return dispatch(list(args))
 
-    cmd_env = os.environ.copy()
-    cmd_env["HERALD_HOME"] = str(HERALD_HOME)
-    if env:
-        cmd_env.update(env)
 
-    result = subprocess.run(
-        ["bash", str(HERALD_BIN), *args],
-        env=cmd_env,
-        capture_output=True,
-    )
-    return result.returncode
+def start_orchestrator() -> None:
+    """Start the Herald orchestrator daemon (blocking)."""
+    from heyvox.herald.orchestrator import HeraldOrchestrator
+    orch = HeraldOrchestrator()
+    orch.run()
 
 
 # Python orchestrator (pure Python replacement for orchestrator.sh)
-from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
+from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig  # noqa: E402
 
 __all__ = [
     "HERALD_HOME",
-    "HERALD_BIN",
-    "HERALD_LIB",
-    "HERALD_DAEMON",
     "HERALD_HOOKS",
-    "HERALD_MODES",
     "get_herald_home",
     "run_herald",
+    "start_orchestrator",
     "HeraldOrchestrator",
     "OrchestratorConfig",
 ]
