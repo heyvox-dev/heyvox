@@ -61,8 +61,8 @@ Plans:
 Plans:
 - [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
 - [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
-- [ ] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
-- [ ] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
+- [x] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
+- [x] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
 
 ### Phase 8: IPC Consolidation
 **Goal**: All IPC paths are declared in one place and cross-process coordination uses an atomic state file instead of a constellation of flag files
@@ -74,8 +74,8 @@ Plans:
   3. A cleanup routine runs periodically and removes orphaned WAV, timing, and workspace sidecar files from queue directories
 **Plans:** 4 plans
 Plans:
-- [ ] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
-- [ ] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
+- [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
+- [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
 - [ ] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
 - [ ] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
 
