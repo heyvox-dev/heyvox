@@ -57,12 +57,13 @@ Plans:
   3. System volume reads and writes use CoreAudio ctypes bindings, not osascript
   4. Mute/volume state is checked at most once every 5 seconds (cached), not on every 300ms loop tick
   5. TTS pipeline completes a full speak-to-audio cycle with the new Python orchestrator
-**Plans:** 2/4 plans executed
+**Plans:** 5 plans (4 executed + 1 gap closure)
 Plans:
 - [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
 - [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
 - [x] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
 - [x] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
+- [ ] 07-05-PLAN.md — Gap closure: daemon normalization + media pause/resume fix
 
 ### Phase 8: IPC Consolidation
 **Goal**: All IPC paths are declared in one place and cross-process coordination uses an atomic state file instead of a constellation of flag files
@@ -105,6 +106,6 @@ Plans:
 | 4. MCP Server | v1.0 | 2/2 | Complete | 2026-03-27 |
 | 5. HUD Overlay | v1.0 | 2/2 | Complete | 2026-03-27 |
 | 6. Decomposition | v1.1 | 3/4 | In Progress|  |
-| 7. Herald Python Port | v1.1 | 2/4 | In Progress|  |
+| 7. Herald Python Port | v1.1 | 4/5 | In Progress|  |
 | 8. IPC Consolidation | v1.1 | 0/? | Not started | — |
 | 9. Test Suite | v1.1 | 0/? | Not started | — |
