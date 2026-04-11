@@ -264,12 +264,21 @@ class HeraldWorker:
     # ------------------------------------------------------------------
 
     def _extract_tts_blocks(self, text: str) -> list[str]:
-        """Extract all <tts>...</tts> blocks (DOTALL, multiline)."""
+        """Extract all <tts>...</tts> blocks (DOTALL, multiline).
+
+        Ports from worker.sh lines 38-42 (multiline match with inline fallback).
+        """
         # Try anchored form first (at start of line, as Claude often emits)
         matches = re.findall(r"^<tts>(.*?)</tts>", text, re.DOTALL | re.MULTILINE)
         if not matches:
-            # Fallback: anywhere in text
+            # Fallback: anywhere in text (handles same-line and inline blocks)
             matches = re.findall(r"<tts>(.*?)</tts>", text, re.DOTALL)
+        else:
+            # Even if anchored matched some, also get any non-anchored ones
+            # to handle mixed content (like tests with both anchored and inline)
+            all_matches = re.findall(r"<tts>(.*?)</tts>", text, re.DOTALL)
+            if len(all_matches) > len(matches):
+                matches = all_matches
         return matches
 
     # ------------------------------------------------------------------
