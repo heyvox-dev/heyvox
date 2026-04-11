@@ -1,9 +1,6 @@
 """Tests for heyvox.device_manager — DeviceManager class."""
 import pytest
 
-pytestmark = pytest.mark.skip(reason="module not yet created — Plan 02 will unskip")
-
-
 def test_device_manager_import():
     from heyvox.device_manager import DeviceManager
 
