@@ -28,7 +28,7 @@
 | 4. MCP Server | v1.0 | 2/2 | ✓ Complete | 2026-03-27 |
 | 5. HUD Overlay | v1.0 | 2/2 | ✓ Complete | 2026-03-27 |
 | 6. TTS Server Mode | v2.0 | 0/? | 🔲 Planned | — |
-| 7. MediaRemote Integration | v2.0 | 0/? | 🔲 Planned | — |
+| 7. MediaRemote Integration | v2.0 | 1/1 | Complete   | 2026-04-11 |
 | 8. Custom Wake Word ("Hey Vox") | v2.0 | 0/? | 🔲 Planned | — |
 | 9. Chrome Companion Extension | v2.0 | 0/? | 🔲 Planned | — |
 | 10. Voice Command Center — Conversation History | v2.0 | 0/? | 🔧 Active | — |
