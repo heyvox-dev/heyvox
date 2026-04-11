@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
-status: completed
-stopped_at: Completed 07-05-PLAN.md
-last_updated: "2026-04-11T16:32:09.619Z"
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-04-11T17:21:02.262Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 9
-  completed_plans: 9
+  total_plans: 12
+  completed_plans: 10
   percent: 50
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 07 — herald-python-port
+**Current focus:** Phase 08 — ipc-consolidation
 
 ## Current Position
 
-Phase: 8
-Plan: Not started
-Status: Completed 07-05-PLAN.md
+Phase: 08 (ipc-consolidation) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [██████████          ] 50% (5/10 v1.0 phases complete; v1.1 starting)
@@ -58,6 +58,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 07-herald-python-port]: Thin bash shims (D-03): 5-line hook shims retained for entry points, python3 -m heyvox.herald.worker handles all logic
 - [Phase 07-herald-python-port]: Inline import of pause_media/resume_media in _media_pause/_media_resume to avoid circular imports
 - [Phase 07-herald-python-port]: normalize_samples operates in float32 space (pre-int16) matching orchestrator int16-scale constants
+- [Phase 08-ipc-consolidation]: Standalone daemons (watcher.py, kokoro-daemon.py, hush_host.py) annotated with source-of-truth comments instead of importing heyvox.constants
 
 ### Pending Todos
 
@@ -72,6 +73,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T16:27:32.702Z
-Stopped at: Completed 07-05-PLAN.md
+Last session: 2026-04-11T17:21:02.259Z
+Stopped at: Completed 08-01-PLAN.md
 Resume file: None
