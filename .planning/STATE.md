@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
 status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-04-11T05:14:54.898Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-04-11T05:31:04.550Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 4
-  completed_plans: 2
+  completed_plans: 3
   percent: 50
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 06 (decomposition) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -51,6 +51,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 06-decomposition]: Module-level pytestmark skip allows Plans 01-03 to unskip tests with one line removal
 - [Phase 06]: dataclasses.field(default_factory=...) for all mutable AppContext defaults to prevent shared state
 - [Phase 06]: Backward-compat re-exports in main.py preserve test API until Phase 9 cleanup
+- [Phase 06-decomposition]: Device-private state on DeviceManager (not AppContext): pa, stream, headset_mode, _mic_pinned, cv_history live on DeviceManager; AppContext holds cross-concern state only
+- [Phase 06-decomposition]: Bridge pattern for recording globals in Plan 02: ctx.is_recording = is_recording at loop top; removed in Plan 03 when recording state moves to AppContext
 
 ### Pending Todos
 
@@ -65,6 +67,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T05:14:54.894Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-04-11T05:31:04.547Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None

@@ -40,11 +40,11 @@
   3. WakeWordProcessor handles wake word stripping and garbled detection as a self-contained unit
   4. AppContext dataclass holds all shared state; no module-level globals remain in main.py
   5. HeyVox starts and responds to voice normally after the refactor (behavior unchanged)
-**Plans:** 2/4 plans executed
+**Plans:** 3/4 plans executed
 Plans:
 - [x] 06-00-PLAN.md — Test scaffolds for extracted modules (Nyquist compliance)
 - [x] 06-01-PLAN.md — AppContext dataclass + text_processing.py extraction
-- [ ] 06-02-PLAN.md — DeviceManager extraction
+- [x] 06-02-PLAN.md — DeviceManager extraction
 - [ ] 06-03-PLAN.md — RecordingStateMachine extraction + main.py thinning
 
 ### Phase 7: Herald Python Port
@@ -89,7 +89,7 @@ Plans:
 | 3. CLI + TTS Output | v1.0 | 2/2 | Complete | 2026-03-27 |
 | 4. MCP Server | v1.0 | 2/2 | Complete | 2026-03-27 |
 | 5. HUD Overlay | v1.0 | 2/2 | Complete | 2026-03-27 |
-| 6. Decomposition | v1.1 | 2/4 | In Progress|  |
+| 6. Decomposition | v1.1 | 3/4 | In Progress|  |
 | 7. Herald Python Port | v1.1 | 0/? | Not started | — |
 | 8. IPC Consolidation | v1.1 | 0/? | Not started | — |
 | 9. Test Suite | v1.1 | 0/? | Not started | — |
