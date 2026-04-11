@@ -45,7 +45,7 @@ from heyvox.constants import (  # noqa: E402 — after __future__ import
     HERALD_DEBUG_LOG, HERALD_VIOLATIONS_LOG,
     HERALD_ORCH_PID, HERALD_PLAYING_PID, HERALD_ORIGINAL_VOL_FILE,
     HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG, RECORDING_FLAG, HERALD_PLAY_NEXT,
-    HERALD_LAST_PLAY, VERBOSITY_FILE,
+    HERALD_LAST_PLAY, VERBOSITY_FILE, HERALD_WATCHER_HANDLED_DIR,
 )
 
 
@@ -133,6 +133,63 @@ def _herald_log(msg: str, debug_log: Path) -> None:
                 shutil.move(str(debug_log), str(rotated))
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Queue garbage collection
+# ---------------------------------------------------------------------------
+
+_GC_INTERVAL = 60  # seconds — run GC at most once per minute
+_last_gc: float = 0.0
+
+
+def _gc_queue_dirs(cfg: "OrchestratorConfig", debug_log: "Path") -> int:
+    """Remove orphaned WAV, timing, and workspace sidecar files.
+
+    Runs at most once per _GC_INTERVAL seconds (frequency gate).
+    Returns the count of files removed.
+    """
+    global _last_gc
+    now = time.time()
+    if now - _last_gc < _GC_INTERVAL:
+        return 0
+    _last_gc = now
+
+    removed = 0
+    # Directory -> max age threshold in seconds
+    dir_thresholds = [
+        (cfg.queue_dir, 3600),    # 1 hour
+        (cfg.hold_dir, 14400),    # 4 hours
+        (cfg.history_dir, 86400), # 24 hours
+        (cfg.claim_dir, 3600),    # 1 hour (replaces inline claim GC)
+    ]
+    patterns = ["*.wav", "*.txt", "*.workspace"]
+
+    for directory, max_age in dir_thresholds:
+        if not directory.exists():
+            continue
+        for pattern in patterns:
+            for f in directory.glob(pattern):
+                try:
+                    if (now - f.stat().st_mtime) > max_age:
+                        f.unlink(missing_ok=True)
+                        _herald_log(f"GC: removed orphaned {f.name}", debug_log)
+                        removed += 1
+                except OSError:
+                    pass
+
+    # Also clean watcher handled dir
+    handled_dir = Path(HERALD_WATCHER_HANDLED_DIR)
+    if handled_dir.exists():
+        for f in handled_dir.iterdir():
+            try:
+                if f.is_file() and (now - f.stat().st_mtime) > 3600:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                pass
+
+    return removed
 
 
 # WAV normalization (legacy fallback — primary normalization is in kokoro-daemon.py)
@@ -735,14 +792,7 @@ class HeraldOrchestrator:
                                 time.sleep(1.0)
                     else:
                         time.sleep(cfg.poll_interval)
-                        # Periodic cleanup: purge stale claim files (older than 1 hour)
-                        try:
-                            now = time.time()
-                            for claim_file in cfg.claim_dir.iterdir():
-                                if claim_file.is_file() and (now - claim_file.stat().st_mtime) > 3600:
-                                    claim_file.unlink(missing_ok=True)
-                        except (OSError, ValueError):
-                            pass
+                        _gc_queue_dirs(cfg, cfg.debug_log)
 
         finally:
             self._cleanup(original_vol)
