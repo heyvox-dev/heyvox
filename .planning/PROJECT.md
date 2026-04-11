@@ -34,6 +34,9 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 - ✓ Smart target detection (always-focused / pinned-app / last-agent) — v1.0
 - ✓ HUD state machine (idle/listening/processing/speaking) with colors — v1.0
 - ✓ Unix socket IPC between main process and HUD — v1.0
+- ✓ All IPC paths consolidated in heyvox/constants.py — v1.1 Phase 8
+- ✓ Atomic state file (/tmp/heyvox-state.json) for cross-process coordination — v1.1 Phase 8
+- ✓ Queue garbage collection for orphaned Herald files — v1.1 Phase 8
 
 ### Active
 
@@ -135,4 +138,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-10 — v1.1 Architecture Hardening milestone started*
+*Last updated: 2026-04-11 — Phase 8 (IPC Consolidation) complete, Phase 9 (Test Suite) next*
