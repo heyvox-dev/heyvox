@@ -1,8 +1,5 @@
 """Tests for heyvox.app_context — AppContext dataclass."""
-import pytest
 import threading
-
-pytestmark = pytest.mark.skip(reason="module not yet created — Plan 01 will unskip")
 
 
 def test_appcontext_creates_with_defaults():
