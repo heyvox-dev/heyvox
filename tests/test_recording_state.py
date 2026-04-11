@@ -1,7 +1,4 @@
 """Tests for heyvox.recording — RecordingStateMachine class."""
-import pytest
-
-pytestmark = pytest.mark.skip(reason="module not yet created — Plan 03 will unskip")
 
 
 def test_recording_state_machine_import():
