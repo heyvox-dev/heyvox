@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import unittest.mock
+
 from heyvox.herald.orchestrator import (
     HeraldOrchestrator,
     OrchestratorConfig,
@@ -32,6 +34,8 @@ from heyvox.herald.orchestrator import (
     _is_skip,
     _user_is_active,
     _violation_check,
+    _media_pause,
+    _media_resume,
 )
 
 
@@ -749,3 +753,38 @@ class TestCoreAudioModule:
             coreaudio._invalidate_volume_cache()
             coreaudio.get_system_volume_cached(ttl=10.0)
         assert call_count[0] == 2, "Invalidation should force re-read"
+
+
+# ---------------------------------------------------------------------------
+# Media pause/resume Python API tests
+# ---------------------------------------------------------------------------
+
+
+class TestMediaPauseResume:
+    def test_media_pause_calls_python_api(self, tmp_path):
+        """_media_pause delegates to heyvox.audio.media.pause_media."""
+        cfg = _cfg(tmp_path, media_pause=True)
+        with unittest.mock.patch("heyvox.audio.media.pause_media") as mock_pause:
+            _media_pause(cfg)
+            mock_pause.assert_called_once()
+
+    def test_media_resume_calls_python_api(self, tmp_path):
+        """_media_resume delegates to heyvox.audio.media.resume_media."""
+        cfg = _cfg(tmp_path, media_pause=True)
+        with unittest.mock.patch("heyvox.audio.media.resume_media") as mock_resume:
+            _media_resume(cfg)
+            mock_resume.assert_called_once()
+
+    def test_media_pause_skips_when_disabled(self, tmp_path):
+        """_media_pause should not call pause_media when media_pause=False."""
+        cfg = _cfg(tmp_path, media_pause=False)
+        with unittest.mock.patch("heyvox.audio.media.pause_media") as mock_pause:
+            _media_pause(cfg)
+            mock_pause.assert_not_called()
+
+    def test_media_resume_skips_when_disabled(self, tmp_path):
+        """_media_resume should not call resume_media when media_pause=False."""
+        cfg = _cfg(tmp_path, media_pause=False)
+        with unittest.mock.patch("heyvox.audio.media.resume_media") as mock_resume:
+            _media_resume(cfg)
+            mock_resume.assert_not_called()
