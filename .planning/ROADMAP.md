@@ -63,7 +63,7 @@ Plans:
 - [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
 - [x] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
 - [x] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
-- [ ] 07-05-PLAN.md — Gap closure: daemon normalization + media pause/resume fix
+- [x] 07-05-PLAN.md — Gap closure: daemon normalization + media pause/resume fix
 
 ### Phase 8: IPC Consolidation
 **Goal**: All IPC paths are declared in one place and cross-process coordination uses an atomic state file instead of a constellation of flag files
@@ -77,8 +77,8 @@ Plans:
 Plans:
 - [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
 - [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
-- [ ] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
-- [ ] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
+- [x] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
+- [x] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
 
 ### Phase 9: Test Suite
 **Goal**: A pytest suite exists that validates pure functions, state machine transitions, IPC round-trips, and device selection logic without requiring real hardware
@@ -91,8 +91,8 @@ Plans:
   4. Device selection tests with mocked PyAudio verify priority ordering, cooldown enforcement, and fallback behavior
 **Plans:** 4 plans
 Plans:
-- [ ] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
-- [ ] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
+- [x] 07-01-PLAN.md — Constants + CoreAudio volume + Kokoro WAV normalization
+- [x] 07-02-PLAN.md — HeraldWorker (TTS extraction, generation, multi-part streaming)
 - [ ] 07-03-PLAN.md — HeraldOrchestrator (playback loop, ducking, hold queue)
 - [ ] 07-04-PLAN.md — Wiring (hooks, CLI, __init__.py) + bash script cleanup
 

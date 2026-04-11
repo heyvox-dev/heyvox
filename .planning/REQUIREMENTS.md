@@ -16,8 +16,8 @@ Requirements for Architecture Hardening milestone. Each maps to roadmap phases.
 
 ### Herald Python Port
 
-- [ ] **HERALD-01**: orchestrator.sh ported to Python (heyvox/herald/orchestrator.py) with equivalent behavior
-- [ ] **HERALD-02**: WAV normalization moved from orchestrator to Kokoro daemon (normalize at generation time)
+- [x] **HERALD-01**: orchestrator.sh ported to Python (heyvox/herald/orchestrator.py) with equivalent behavior
+- [x] **HERALD-02**: WAV normalization moved from orchestrator to Kokoro daemon (normalize at generation time)
 - [ ] **HERALD-03**: osascript volume calls replaced with CoreAudio ctypes bindings
 - [ ] **HERALD-04**: Mute/volume detection cached (check every 5s, not every 300ms loop iteration)
 
@@ -64,8 +64,8 @@ Deferred to v2.0+. Tracked but not in current roadmap.
 | DECOMP-02 | Phase 6 | Complete |
 | DECOMP-03 | Phase 6 | Complete |
 | DECOMP-04 | Phase 6 | Complete |
-| HERALD-01 | Phase 7 | Pending |
-| HERALD-02 | Phase 7 | Pending |
+| HERALD-01 | Phase 7 | Complete |
+| HERALD-02 | Phase 7 | Complete |
 | HERALD-03 | Phase 7 | Pending |
 | HERALD-04 | Phase 7 | Pending |
 | IPC-01 | Phase 8 | Pending |
