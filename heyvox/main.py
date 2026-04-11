@@ -21,17 +21,16 @@ import numpy as np
 import pyaudio
 
 from heyvox.config import load_config, HeyvoxConfig
+from heyvox.app_context import AppContext
+from heyvox.device_manager import DeviceManager
 from heyvox.constants import (
     RECORDING_FLAG,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
     STT_DEBUG_DIR,
-    ACTIVE_MIC_FILE,
-    MIC_SWITCH_REQUEST_FILE,
 )
-from heyvox.audio.mic import find_best_mic, open_mic_stream, detect_headset, get_dead_input_device_names, add_device_cooldown, is_device_cooled_down
-from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir, device_change_cue
+from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from heyvox.audio.stt import init_local_stt, transcribe_audio
 from heyvox.audio.tts import check_voice_command, execute_voice_command
 from heyvox.input.injection import type_text, save_frontmost_pid, restore_frontmost
@@ -1128,31 +1127,18 @@ def main() -> None:
     _adapter = _build_adapter(config)
     log(f"Target mode: {config.target_mode} (adapter: {type(_adapter).__name__})")
 
-    # Open audio stream
-    log("Opening audio stream...")
-    pa = pyaudio.PyAudio()
-    dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                              sample_rate=sample_rate, chunk_size=chunk_size)
-    if dev_index is None:
-        log("FATAL: No microphone available, exiting")
-        sys.exit(1)
-
-    dev_name = pa.get_device_info_by_index(dev_index)['name']
-    log(f"Using input: [{dev_index}] {dev_name}")
-    stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-
-    # Write active mic name so HUD menu can display it
-    def _write_active_mic(name: str) -> None:
-        try:
-            with open(ACTIVE_MIC_FILE, "w") as f:
-                f.write(name)
-        except OSError:
-            pass
-
-    _write_active_mic(dev_name)
-
-    headset_mode = detect_headset(pa, dev_index)
-    log(f"Headset detected: {headset_mode} (echo suppression {'inactive' if headset_mode else 'active'})")
+    # Open audio stream — delegate to DeviceManager
+    # AppContext bridges recording state (still in module globals in Plan 02)
+    _ctx = AppContext()
+    _ctx.last_good_audio_time = time.time()
+    devices = DeviceManager(ctx=_ctx, config=config, log_fn=log, hud_send=_hud_send)
+    devices.init()
+    # Expose device attributes as local aliases (used by rest of main())
+    pa = devices.pa
+    stream = devices.stream
+    dev_index = devices.dev_index
+    dev_name = devices.dev_name
+    headset_mode = devices.headset_mode
 
     # ECHO-01: Track when TTS was last seen active (for post-TTS cooldown)
     _tts_last_seen = 0.0
@@ -1185,31 +1171,9 @@ def main() -> None:
     _PREROLL_CHUNKS = max(1, int(0.5 * sample_rate / chunk_size))  # ~500ms
     _preroll_buffer: deque = deque(maxlen=_PREROLL_CHUNKS)
 
-    # Silent-mic health check state (AUDIO-08 completion)
-    _zero_streak = 0
-    HEALTH_CHECK_INTERVAL = 5.0  # Check every 5s for fast dead-mic recovery
-    last_health_check = time.time()
-
-    # AUDIO-13: time-based dead mic detection (works even during recording)
-    global _last_good_audio_time
-    _last_good_audio_time = time.time()
-
-    # Variance-based zombie stream detection (AUDIO-12)
-    # Zombie streams from AUHAL error -50 produce noise with unnaturally stable
-    # coefficient of variation (~0.577 = 1/sqrt(3) for uniform noise).
-    _health_cv_history: deque = deque(maxlen=6)  # Last 30s of CV values
-
-    # Device hotplug detection — periodically check if a higher-priority mic appeared
-    # Also tracks output device changes for audio feedback. Requirement: AUDIO-11
-    _DEVICE_SCAN_INTERVAL = 3.0  # seconds — fast detection for USB/BT hotplug
-    _last_device_scan = time.time()
-    _last_output_device = ""
-    _mic_pinned = False  # True after manual mic switch — suppresses auto-switch back
-    try:
-        _default_out = pa.get_default_output_device_info()
-        _last_output_device = _default_out['name']
-    except Exception:
-        pass
+    # Device state variables removed — now managed by DeviceManager (Plan 02).
+    # _zero_streak, _health_cv_history, _mic_pinned, _last_device_scan,
+    # _last_output_device, HEALTH_CHECK_INTERVAL, last_health_check all moved.
 
     # Memory watchdog — warn if RSS exceeds threshold
     _MEM_WARN_MB = 1500
@@ -1225,6 +1189,12 @@ def main() -> None:
 
     try:
         while not _shutdown.is_set():
+            # Bridge recording state from module globals to AppContext (Plan 02 glue,
+            # removed in Plan 03 when recording state moves fully to AppContext).
+            _ctx.is_recording = is_recording
+            _ctx.busy = busy
+            _ctx.zombie_mic_reinit = _zombie_mic_reinit
+
             # Heartbeat: touch file periodically as proof of life
             _now_hb = time.time()
             if _now_hb - _last_heartbeat >= _HEARTBEAT_INTERVAL:
@@ -1264,7 +1234,8 @@ def main() -> None:
 
                 # AUDIO-13: track last time we saw real audio (level >= 10)
                 if int(np.abs(audio).max()) >= 10:
-                    _last_good_audio_time = time.time()
+                    _ctx.last_good_audio_time = time.time()
+                    _last_good_audio_time = _ctx.last_good_audio_time  # keep global in sync
 
             except IOError as e:
                 consecutive_errors += 1
@@ -1272,79 +1243,37 @@ def main() -> None:
                     log(f"Audio read error ({consecutive_errors}/2): {e}")
                     time.sleep(0.1)
                     continue
-                log("Mic appears disconnected, searching for new mic...")
-                _mic_pinned = False  # Pinned device gone — allow priority-based selection
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-                pa.terminate()
-                time.sleep(0.5)
-                pa = pyaudio.PyAudio()
-                dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                          sample_rate=sample_rate, chunk_size=chunk_size)
-                if dev_index is None:
-                    log("No mic found, retrying in 2s...")
-                    time.sleep(2)
+                if not devices.handle_io_error():
                     continue
-                dev_name = pa.get_device_info_by_index(dev_index)['name']
-                log(f"Switched to: [{dev_index}] {dev_name}")
-                stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                _write_active_mic(dev_name)
-                device_change_cue(dev_name, "input")
-                _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                # Update local aliases after device switch
+                pa = devices.pa
+                stream = devices.stream
+                dev_index = devices.dev_index
+                dev_name = devices.dev_name
+                headset_mode = devices.headset_mode
                 model.reset()  # Clear corrupted wake word state (AUDIO-12)
-                _health_cv_history.clear()
                 consecutive_errors = 0
                 continue
 
-            # AUDIO-13: time-based dead mic detection — catches dead streams even
-            # during rapid PTT usage where the idle health check never runs.
-            if _last_good_audio_time and (time.time() - _last_good_audio_time > _DEAD_MIC_TIMEOUT):
-                if not _zombie_mic_reinit:
-                    _dead_secs = time.time() - _last_good_audio_time
-                    log(f"WARNING: No good audio for {_dead_secs:.0f}s, forcing mic reinit (AUDIO-13)")
-                    print(f"[mic] Dead mic timeout ({_dead_secs:.0f}s silence), forcing reinit...", file=sys.stderr, flush=True)
-                    _zombie_mic_reinit = True
+            # AUDIO-13: time-based dead mic detection — delegates to DeviceManager
+            devices.check_dead_mic_timeout()
+            # Sync flag back to module global for start_recording() guard
+            _zombie_mic_reinit = _ctx.zombie_mic_reinit
 
             # Zombie stream reinit — triggered by consecutive failed recordings (AUDIO-12)
             # or time-based dead mic timeout (AUDIO-13)
-            if _zombie_mic_reinit:
+            if _ctx.zombie_mic_reinit:
+                _ctx.zombie_mic_reinit = False
                 _zombie_mic_reinit = False
-                log("Zombie stream reinit: forcing mic recovery after consecutive empty recordings")
-                print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
-                _hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
-                _mic_pinned = False
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-                pa.terminate()
-                time.sleep(0.5)
-                pa = pyaudio.PyAudio()
-                dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                          sample_rate=sample_rate, chunk_size=chunk_size,
-                                          require_audio=True)
-                if dev_index is None:
-                    dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                              sample_rate=sample_rate, chunk_size=chunk_size)
-                if dev_index is None:
-                    log("No mic found after zombie reinit, retrying in 2s...")
-                    time.sleep(2)
+                if not devices.reinit(require_audio=True):
                     continue
-                dev_name = pa.get_device_info_by_index(dev_index)['name']
-                log(f"Zombie reinit recovered: [{dev_index}] {dev_name}")
-                print(f"[mic] Zombie reinit recovered: [{dev_index}] {dev_name}", file=sys.stderr, flush=True)
-                stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                headset_mode = detect_headset(pa, dev_index)
-                _write_active_mic(dev_name)
-                device_change_cue(dev_name, "input")
-                _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
+                # Update local aliases after reinit
+                pa = devices.pa
+                stream = devices.stream
+                dev_index = devices.dev_index
+                dev_name = devices.dev_name
+                headset_mode = devices.headset_mode
                 model.reset()
-                _health_cv_history.clear()
-                _last_good_audio_time = time.time()  # AUDIO-13: reset timeout
                 consecutive_errors = 0
                 continue
 
@@ -1378,86 +1307,24 @@ def main() -> None:
                     _hud_send({"type": "audio_level", "level": round(level, 3)})
 
             # Proactive silent-mic health check (catches A2DP bad-state without IOError)
-            # Requirement: AUDIO-08
+            # Requirement: AUDIO-08 / AUDIO-12 — delegated to DeviceManager
             if not _is_rec and not _is_busy:
                 _hud_ensure_connected()
                 now = time.time()
-                if now - last_health_check >= HEALTH_CHECK_INTERVAL:
-                    last_health_check = now
-                    level = int(np.abs(audio).max())
-
-                    # Variance-based zombie stream detection (AUDIO-12)
-                    # Zombie streams return noise with unnaturally stable coefficient
-                    # of variation (~0.577 for uniform noise). Real mic audio varies widely.
-                    if level >= 10:
-                        abs_audio = np.abs(audio.astype(np.float32))
-                        _mean = float(abs_audio.mean())
-                        if _mean > 1e-6:
-                            _cv = float(abs_audio.std() / _mean)
-                            _health_cv_history.append(_cv)
-                            if len(_health_cv_history) >= 4:
-                                _cv_values = list(_health_cv_history)
-                                _cv_std = float(np.std(_cv_values))
-                                _cv_mean = float(np.mean(_cv_values))
-                                if _cv_std < 0.05 and 0.45 < _cv_mean < 0.70:
-                                    log(f"WARNING: Zombie stream detected (CV={_cv_mean:.3f}±{_cv_std:.3f}), forcing recovery")
-                                    print(f"[mic] Zombie stream (CV={_cv_mean:.3f}±{_cv_std:.3f})", file=sys.stderr, flush=True)
-                                    _zero_streak = 2  # Force the existing recovery path below
-
-                    if level < 10 or _zero_streak >= 2:  # Dead mic OR zombie stream
-                        if level < 10:
-                            _zero_streak += 1
-                        if _zero_streak >= 2:  # 2 × 5s = 10s to detect (or forced by zombie check)
-                            _dead_mic_name = pa.get_device_info_by_index(dev_index)['name']
-                            _silent_recover_count = getattr(main, '_silent_recover_count', 0) + 1
-                            main._silent_recover_count = _silent_recover_count
-                            # Exponential backoff: 1s, 5s, 15s, 30s, 60s, ... (cap 60s)
-                            _backoff = min(60, max(1, 5 * (2 ** (_silent_recover_count - 2))))
-                            log(f"WARNING: Silent mic detected ({_dead_mic_name}), re-scanning devices... (attempt {_silent_recover_count}, backoff {_backoff}s)")
-                            print(f"[mic] Silent mic detected ({_dead_mic_name}), re-scanning...", file=sys.stderr, flush=True)
-                            _hud_send({"type": "error", "text": f"Mic silent: {_dead_mic_name}"})
-                            _zero_streak = 0
-                            _mic_pinned = False  # Allow priority-based re-selection
-                            try:
-                                stream.stop_stream()
-                                stream.close()
-                            except Exception:
-                                pass
-                            pa.terminate()
-                            time.sleep(_backoff)
-                            pa = pyaudio.PyAudio()
-                            # Mark the dead device in cooldown so hotplug scan won't re-select it
-                            add_device_cooldown(_dead_mic_name)
-                            # Exclude the dead device to try alternatives first
-                            _exclude_prio = [p for p in mic_priority if p.lower() not in _dead_mic_name.lower()]
-                            dev_index = find_best_mic(pa, mic_priority=_exclude_prio or mic_priority,
-                                                      sample_rate=sample_rate, chunk_size=chunk_size,
-                                                      require_audio=True)
-                            if dev_index is None:
-                                # No alternative — try the original priority list as last resort
-                                dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                                          sample_rate=sample_rate, chunk_size=chunk_size,
-                                                          require_audio=True)
-                            if dev_index is None:
-                                log(f"No mic after reinit, retrying in {_backoff}s...")
-                                time.sleep(_backoff)
-                                continue
-                            dev_name = pa.get_device_info_by_index(dev_index)['name']
-                            log(f"Mic recovered: [{dev_index}] {dev_name}")
-                            print(f"[mic] Recovered: [{dev_index}] {dev_name}", file=sys.stderr, flush=True)
-                            if dev_name != _dead_mic_name:
-                                main._silent_recover_count = 0  # Reset backoff on successful switch
-                            stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                            headset_mode = detect_headset(pa, dev_index)
-                            _write_active_mic(dev_name)
-                            device_change_cue(dev_name, "input")
-                            _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
-                            model.reset()  # Clear corrupted wake word state (AUDIO-12)
-                            _health_cv_history.clear()
-                            consecutive_errors = 0
-                            continue
-                    else:
-                        _zero_streak = 0
+                _prev_stream = devices.stream
+                devices.health_check(audio)
+                # If health_check recovered to a new stream, update local aliases
+                if devices.stream is not _prev_stream and devices.stream is not None:
+                    pa = devices.pa
+                    stream = devices.stream
+                    dev_index = devices.dev_index
+                    dev_name = devices.dev_name
+                    headset_mode = devices.headset_mode
+                    model.reset()  # Clear corrupted wake word state (AUDIO-12)
+                    consecutive_errors = 0
+                # Sync zombie flag back (health_check may set it if no mic was found)
+                if _ctx.zombie_mic_reinit:
+                    _zombie_mic_reinit = True
 
                 # Memory watchdog — check RSS every 60s
                 _MEM_CRITICAL_MB = 1000
@@ -1489,7 +1356,8 @@ def main() -> None:
                         _hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
 
             # Overlay health: relaunch if dead, kill duplicates (piggyback on device scan interval)
-            if not _is_rec and not _is_busy and now - _last_device_scan >= _DEVICE_SCAN_INTERVAL:
+            _now_scan = time.time()
+            if not _is_rec and not _is_busy and _now_scan - devices._last_device_scan >= devices._DEVICE_SCAN_INTERVAL:
                 if _indicator_proc is not None:
                     if _indicator_proc.poll() is not None:
                         log(f"WARNING: HUD overlay exited (rc={_indicator_proc.returncode}), relaunching")
@@ -1498,131 +1366,16 @@ def main() -> None:
                     else:
                         _kill_duplicate_overlays(keep_pid=_indicator_proc.pid)
 
-            # Device hotplug — check if a higher-priority mic appeared (only when idle)
-            if not _is_rec and not _is_busy and now - _last_device_scan >= _DEVICE_SCAN_INTERVAL:
-                _last_device_scan = now
-                try:
-                    # PortAudio caches the device list — create a temporary instance
-                    # to discover newly connected devices (e.g. USB/Bluetooth hotplug).
-                    # Filter out dead devices (paired-but-disconnected Bluetooth).
-                    _dead_names = get_dead_input_device_names()
-                    _scan_pa = pyaudio.PyAudio()
-                    try:
-                        current_count = _scan_pa.get_device_count()
-                        current_names = set()
-                        for _di in range(current_count):
-                            try:
-                                _info = _scan_pa.get_device_info_by_index(_di)
-                                if _info['maxInputChannels'] > 0 and _info['name'].lower() not in _dead_names:
-                                    current_names.add(_info['name'])
-                            except Exception:
-                                pass
-                    finally:
-                        _scan_pa.terminate()
-
-                    # If mic is pinned but the pinned device disappeared, unpin
-                    if _mic_pinned and not any(dev_name.lower() in n.lower() or n.lower() in dev_name.lower() for n in current_names):
-                        log(f"Pinned mic '{dev_name}' disappeared — unpinning, reverting to priority list")
-                        _mic_pinned = False
-
-                    # Check if a higher-priority device is available but not currently selected.
-                    # Skip auto-switch if user manually pinned a mic via menu.
-                    # Skip devices in cooldown (recently failed silent mic detection).
-                    # Use tracked dev_name (not pa.get_device_info which may have stale indices).
-                    better_available = False
-                    for prio_name in mic_priority if not _mic_pinned else []:
-                        matching = [n for n in current_names
-                                    if prio_name.lower() in n.lower()
-                                    and not is_device_cooled_down(n)]
-                        if matching:
-                            if prio_name.lower() in dev_name.lower():
-                                break  # Already using this priority level or higher
-                            better_available = True
-                            log(f"Higher-priority mic detected: {matching[0]} (current: {dev_name})")
-                            break
-
-                    if better_available:
-                        try:
-                            stream.stop_stream()
-                            stream.close()
-                        except Exception:
-                            pass
-                        pa.terminate()
-                        pa = pyaudio.PyAudio()
-                        dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                                  sample_rate=sample_rate, chunk_size=chunk_size,
-                                                  require_audio=True)
-                        if dev_index is not None:
-                            dev_name = pa.get_device_info_by_index(dev_index)['name']
-                            log(f"Switched to: [{dev_index}] {dev_name}")
-                            stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                            headset_mode = detect_headset(pa, dev_index)
-                            log(f"Headset mode: {headset_mode}")
-                            _write_active_mic(dev_name)
-                            device_change_cue(dev_name, "input")
-                            _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
-                    # Check for manual mic switch request from HUD menu
-                    if os.path.exists(MIC_SWITCH_REQUEST_FILE):
-                        try:
-                            with open(MIC_SWITCH_REQUEST_FILE) as f:
-                                requested_name = f.read().strip()
-                            os.unlink(MIC_SWITCH_REQUEST_FILE)
-                            if requested_name:
-                                log(f"Mic switch requested from menu: {requested_name}")
-                                # Find the requested device in fresh scan results
-                                target_index = None
-                                for n in current_names:
-                                    if requested_name.lower() in n.lower():
-                                        # Get index from scan PA
-                                        _scan2 = pyaudio.PyAudio()
-                                        try:
-                                            for _di2 in range(_scan2.get_device_count()):
-                                                try:
-                                                    _d2 = _scan2.get_device_info_by_index(_di2)
-                                                    if _d2['name'] == n and _d2['maxInputChannels'] > 0:
-                                                        target_index = _di2
-                                                        break
-                                                except Exception:
-                                                    pass
-                                        finally:
-                                            _scan2.terminate()
-                                        break
-                                if target_index is not None:
-                                    try:
-                                        stream.stop_stream()
-                                        stream.close()
-                                    except Exception:
-                                        pass
-                                    pa.terminate()
-                                    pa = pyaudio.PyAudio()
-                                    dev_index = target_index
-                                    dev_name = pa.get_device_info_by_index(dev_index)['name']
-                                    log(f"Switched to: [{dev_index}] {dev_name} (pinned)")
-                                    stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                                    headset_mode = detect_headset(pa, dev_index)
-                                    _mic_pinned = True  # Suppress auto-switch back to priority mic
-                                    _write_active_mic(dev_name)
-                                    device_change_cue(dev_name, "input")
-                                    _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
-                                else:
-                                    log(f"Requested mic not found: {requested_name}")
-                        except Exception as e:
-                            log(f"Mic switch request error: {e}")
-
-                    # Also check if the default output device changed (AUDIO-11)
-                    try:
-                        _cur_out = pa.get_default_output_device_info()
-                        _cur_out_name = _cur_out['name']
-                        if _cur_out_name != _last_output_device and _last_output_device:
-                            log(f"Output device changed: {_last_output_device} → {_cur_out_name}")
-                            device_change_cue(_cur_out_name, "output")
-                            _hud_send({"type": "state", "text": f"Speaker: {_cur_out_name}"})
-                        _last_output_device = _cur_out_name
-                    except Exception:
-                        pass
-
-                except Exception:
-                    pass  # Don't crash the main loop on scan errors
+            # Device hotplug — delegated to DeviceManager (includes mic switch + output change)
+            _prev_stream_scan = devices.stream
+            devices.scan()
+            # Update local aliases if scan changed the device
+            if devices.stream is not _prev_stream_scan and devices.stream is not None:
+                pa = devices.pa
+                stream = devices.stream
+                dev_index = devices.dev_index
+                dev_name = devices.dev_name
+                headset_mode = devices.headset_mode
 
             # Silence watchdog — end recording after silence_timeout seconds of quiet
             # Only for wake-word triggered recordings (PTT has natural release)
@@ -1794,12 +1547,7 @@ def main() -> None:
         if config.tts.enabled:
             _shutdown_tts()
             log("TTS worker stopped")
-        try:
-            stream.stop_stream()
-            stream.close()
-        except Exception:
-            pass
-        pa.terminate()
+        devices.cleanup()
         # Keep ACTIVE_MIC_FILE across restarts so HUD shows last-known mic
         # instead of "None" during the brief startup window before mic detection.
         log("Shutdown complete.")
