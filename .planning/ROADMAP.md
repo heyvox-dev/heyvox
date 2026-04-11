@@ -26,7 +26,7 @@
 - [ ] **Phase 6: Decomposition** — Break main.py monolith into focused modules with shared context
 - [ ] **Phase 7: Herald Python Port** — Replace bash orchestrator with pure Python, eliminate shell boundary
 - [ ] **Phase 8: IPC Consolidation** — Replace 25+ /tmp flag files with atomic state file and clean constants
-- [ ] **Phase 9: Test Suite** — Add tests for pure functions, state machines, IPC, and device selection
+- [x] **Phase 9: Test Suite** — Add tests for pure functions, state machines, IPC, and device selection (completed 2026-04-11)
 
 ## Phase Details
 
@@ -88,10 +88,10 @@ Plans:
   2. RecordingStateMachine transition tests cover start, stop, busy, and cancel flows with all edge cases verified
   3. HUD Unix socket tests verify client/server round-trips, reconnection after server restart, and message loss behavior
   4. Device selection tests with mocked PyAudio verify priority ordering, cooldown enforcement, and fallback behavior
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
-- [ ] 09-01-PLAN.md — Pure function tests (TEST-01) + state machine tests (TEST-02) + adapter fix
-- [ ] 09-02-PLAN.md — HUD IPC tests (TEST-03) + device selection tests (TEST-04)
+- [x] 09-01-PLAN.md — Pure function tests (TEST-01) + state machine tests (TEST-02) + adapter fix
+- [x] 09-02-PLAN.md — HUD IPC tests (TEST-03) + device selection tests (TEST-04)
 
 ## Progress
 
@@ -105,4 +105,4 @@ Plans:
 | 6. Decomposition | v1.1 | 3/4 | In Progress|  |
 | 7. Herald Python Port | v1.1 | 4/5 | In Progress|  |
 | 8. IPC Consolidation | v1.1 | 2/3 | In Progress|  |
-| 9. Test Suite | v1.1 | 0/2 | Not started | — |
+| 9. Test Suite | v1.1 | 2/2 | Complete   | 2026-04-11 |

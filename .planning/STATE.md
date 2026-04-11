@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
 status: executing
-stopped_at: Completed 08-03-PLAN.md
-last_updated: "2026-04-11T17:42:25.309Z"
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-04-11T18:23:37.788Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
-  completed_phases: 3
-  total_plans: 12
-  completed_plans: 12
+  completed_phases: 4
+  total_plans: 14
+  completed_plans: 14
   percent: 50
 ---
 
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 08 — ipc-consolidation
+**Current focus:** Phase 09 — test-suite
 
 ## Current Position
 
-Phase: 9
-Plan: Not started
+Phase: 09 (test-suite) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -63,6 +63,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 08-ipc-consolidation]: TRANSIENT_FIELDS as a set constant makes reset_transient_state() self-documenting
 - [Phase 08-ipc-consolidation]: Inline try/except around all update_state() calls prevents IPC failure from crashing callers
 - [Phase 08-ipc-consolidation]: Queue GC: claim_dir added to dir_thresholds (1h) replacing inline block; HERALD_WATCHER_HANDLED_DIR cleaned via separate loop to avoid dataclass change
+- [Phase 09-test-suite]: Import from heyvox.text_processing directly (Phase 9 cleanup of backward-compat re-export from main.py)
 
 ### Pending Todos
 
@@ -77,6 +78,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T17:32:02.916Z
-Stopped at: Completed 08-03-PLAN.md
+Last session: 2026-04-11T18:23:37.785Z
+Stopped at: Completed 09-01-PLAN.md
 Resume file: None
