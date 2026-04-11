@@ -110,9 +110,11 @@ herald_is_paused() {
   local pause_flag=false heyvox_flag=false
   [ -f "$HERALD_PAUSE_FLAG" ] && pause_flag=true
   if [ -f "$HEYVOX_RECORDING_FLAG" ]; then
-    # Age-based staleness: recording flags older than 120s are stale (crash leftover)
+    # Age-based staleness: recording flags older than 300s are stale (crash leftover).
+    # 5 minutes covers long dictation sessions — typical recordings stay well under
+    # that ceiling while crash-left flags are detectable at any age above ~30s.
     local flag_age=$(( $(date +%s) - $(stat -f%m "$HEYVOX_RECORDING_FLAG" 2>/dev/null || echo 0) ))
-    if [ "$flag_age" -gt 120 ]; then
+    if [ "$flag_age" -gt 300 ]; then
       rm -f "$HEYVOX_RECORDING_FLAG"
       herald_log "PAUSED: removed stale recording flag (age=${flag_age}s)"
     else

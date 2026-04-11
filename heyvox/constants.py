@@ -120,3 +120,34 @@ ACTIVE_MIC_FILE = "/tmp/heyvox-active-mic"
 # Mic switch request file — written by HUD overlay menu action.
 # Contains the device name substring to switch to. Read and deleted by main.py.
 MIC_SWITCH_REQUEST_FILE = "/tmp/heyvox-mic-switch"
+
+# ---------------------------------------------------------------------------
+# Herald TTS orchestration constants (Phase 7)
+# ---------------------------------------------------------------------------
+
+# Herald queue/hold/history directories — WAV files pass through these.
+# Queue: ready to play. Hold: from inactive workspace, held until user idle.
+# History: last 50 played (for debugging).
+HERALD_QUEUE_DIR = "/tmp/herald-queue"
+HERALD_HOLD_DIR = "/tmp/herald-hold"
+HERALD_HISTORY_DIR = "/tmp/herald-history"
+HERALD_CLAIM_DIR = "/tmp/herald-claim"
+
+# Herald log files
+HERALD_DEBUG_LOG = "/tmp/herald-debug.log"
+HERALD_VIOLATIONS_LOG = "/tmp/herald-violations.log"
+
+# Herald PID files
+HERALD_ORCH_PID = "/tmp/herald-orchestrator.pid"
+HERALD_PLAYING_PID = "/tmp/herald-playing.pid"
+
+# Herald state flag files
+HERALD_PAUSE_FLAG = "/tmp/herald-pause"
+HERALD_MUTE_FLAG = "/tmp/herald-mute"
+HERALD_MODE_FILE = "/tmp/herald-mode"
+HERALD_LAST_PLAY = "/tmp/herald-last-play"
+HERALD_PLAY_NEXT = "/tmp/herald-play-next"
+
+# Kokoro TTS daemon IPC — Unix socket + PID file
+KOKORO_DAEMON_SOCK = "/tmp/kokoro-daemon.sock"
+KOKORO_DAEMON_PID = "/tmp/kokoro-daemon.pid"
