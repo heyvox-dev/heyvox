@@ -13,6 +13,7 @@ from heyvox.constants import (
     GRACE_AFTER_TTS,
     SPEAKER_MODE_THRESHOLD_MULT,
 )
+from heyvox.text_processing import is_garbled
 
 
 class TestTTSFlagSuppression:
@@ -47,8 +48,60 @@ class TestTTSFlagSuppression:
         # The main loop checks both flags in the echo suppression block
 
 
+class TestIsGarbled:
+    """Behavioral tests for is_garbled() — pure function for detecting nonsensical STT output."""
+
+    def test_garbled_repeated_words(self):
+        assert is_garbled("the the the the the") is True
+
+    def test_garbled_bigram_repetition(self):
+        assert is_garbled("please fix please fix please fix please fix") is True
+
+    def test_garbled_youtube_artifact(self):
+        assert is_garbled("Thanks for watching") is True
+
+    def test_garbled_music_artifact(self):
+        assert is_garbled("Music") is True
+
+    def test_garbled_dots(self):
+        assert is_garbled("...") is True
+
+    def test_garbled_short_nonsense(self):
+        # Single word with len < 4 is treated as too short to be useful
+        assert is_garbled("ok") is True
+
+    def test_garbled_punctuation_only(self):
+        assert is_garbled("...!!!???") is True
+
+    def test_not_garbled_normal_sentence(self):
+        assert is_garbled("Please fix the authentication bug in the login form") is False
+
+    def test_not_garbled_short_useful_word(self):
+        # Single short word — also too short (len < 4)
+        assert is_garbled("yes") is True
+
+    def test_not_garbled_single_long_word(self):
+        # Single word with len >= 4 — not considered garbled
+        assert is_garbled("deploy") is False
+
+    def test_not_garbled_empty(self):
+        assert is_garbled("") is False
+
+    def test_not_garbled_command(self):
+        assert is_garbled("run the tests") is False
+
+
 class TestEchoTextBuffer:
     """Test the text-level echo filtering that strips TTS output from transcription."""
+
+    @pytest.fixture(autouse=True)
+    def clear_echo_buffer(self):
+        import heyvox.audio.echo as echo_mod
+        with echo_mod._echo_buffer_lock:
+            echo_mod._echo_buffer.clear()
+        yield
+        with echo_mod._echo_buffer_lock:
+            echo_mod._echo_buffer.clear()
 
     def test_register_and_filter(self):
         """Registered TTS text should be filtered from transcription."""
