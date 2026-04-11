@@ -24,7 +24,7 @@ Requirements for Architecture Hardening milestone. Each maps to roadmap phases.
 ### IPC Consolidation
 
 - [x] **IPC-01**: All flag/socket/PID/queue paths consolidated into heyvox/constants.py (single source of truth)
-- [ ] **IPC-02**: Flag-file constellation replaced with atomic /tmp/heyvox-state.json (temp file + os.rename)
+- [x] **IPC-02**: Flag-file constellation replaced with atomic /tmp/heyvox-state.json (temp file + os.rename)
 - [ ] **IPC-03**: Periodic garbage collection added for orphaned WAV/timing/workspace files in queue directories
 
 ### Test Suite
@@ -69,7 +69,7 @@ Deferred to v2.0+. Tracked but not in current roadmap.
 | HERALD-03 | Phase 7 | Pending |
 | HERALD-04 | Phase 7 | Pending |
 | IPC-01 | Phase 8 | Complete |
-| IPC-02 | Phase 8 | Pending |
+| IPC-02 | Phase 8 | Complete |
 | IPC-03 | Phase 8 | Pending |
 | TEST-01 | Phase 9 | Pending |
 | TEST-02 | Phase 9 | Pending |
