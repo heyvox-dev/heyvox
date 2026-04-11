@@ -577,7 +577,7 @@ def _make_menu_action_class():
             import subprocess
             try:
                 from heyvox.constants import LOG_FILE_DEFAULT
-            subprocess.run(["open", "-a", "Console", LOG_FILE_DEFAULT])
+                subprocess.run(["open", "-a", "Console", LOG_FILE_DEFAULT])
             except Exception:
                 pass
 
@@ -690,7 +690,7 @@ def _make_menu_action_class():
             import signal as _sig
             try:
                 from heyvox.constants import HEYVOX_PID_FILE
-            with open(HEYVOX_PID_FILE) as f:
+                with open(HEYVOX_PID_FILE) as f:
                     pid = int(f.read().strip())
                 os.kill(pid, _sig.SIGTERM)
             except (FileNotFoundError, ValueError, ProcessLookupError):

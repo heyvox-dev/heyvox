@@ -209,6 +209,12 @@ def transcribe_audio(
     samples = audio.astype(np.float32) / 32768.0
 
     if engine == "mlx":
+        # Cap audio at 30s to prevent MLX Whisper memory ballooning on long recordings
+        max_samples = 30 * sample_rate
+        if len(samples) > max_samples:
+            _log(f"WARNING: Audio too long ({len(samples)/sample_rate:.1f}s), capping at 30s for MLX")
+            samples = samples[:max_samples]
+
         # Ensure model is loaded (blocks if preload hasn't finished yet).
         # B1: Always go through _mlx_loaded.wait() so the total block is
         # bounded by _LOAD_TIMEOUT, regardless of whether a background
@@ -229,22 +235,28 @@ def transcribe_audio(
             kwargs["language"] = _mlx_language or language
 
         # Run transcription with timeout to prevent hangs.
-        # B3: On timeout, shut the executor down without waiting so the
-        # orphaned thread does not accumulate as a zombie.
-        executor = ThreadPoolExecutor(max_workers=1)
+        # Use context manager so the executor waits for completion on success,
+        # ensuring MLX memory is released before we continue. On timeout,
+        # abandon the thread (it will finish eventually) but force-unload
+        # the model to reclaim memory.
+        _timed_out = False
         try:
-            future = executor.submit(mlx_whisper.transcribe, samples, **kwargs)
-            result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(mlx_whisper.transcribe, samples, **kwargs)
+                result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
         except FuturesTimeout:
+            _timed_out = True
             _log(f"ERROR: MLX transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
-            executor.shutdown(wait=False, cancel_futures=True)
+            # Force-unload model to reclaim memory from the orphaned thread
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except Exception:
+                pass
             return ""
         except Exception as e:
             _log(f"ERROR: MLX transcription failed: {e}")
-            executor.shutdown(wait=False, cancel_futures=True)
             return ""
-        else:
-            executor.shutdown(wait=False)
 
         with _mlx_lock:
             _mlx_last_use = time.time()
