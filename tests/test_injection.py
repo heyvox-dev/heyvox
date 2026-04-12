@@ -1,65 +1,89 @@
 """Tests for heyvox.input.injection — text injection via clipboard + osascript."""
 
-from unittest.mock import patch, MagicMock
+import sys
+from unittest.mock import patch, MagicMock, call
 
 from heyvox.input.injection import (
     type_text, press_enter, focus_app, focus_input,
     clipboard_is_image, get_clipboard_text,
+    _settle_delay_for,
 )
+
+
+def _make_mock_appkit(clipboard_text: str = "hello"):
+    """Create a mock AppKit module with a fully functional NSPasteboard mock."""
+    mock_pb = MagicMock()
+    mock_pb.clearContents.return_value = None
+    mock_pb.setString_forType_.return_value = True
+    mock_pb.changeCount.return_value = 42
+    mock_pb.stringForType_.return_value = clipboard_text
+
+    mock_appkit = MagicMock()
+    mock_appkit.NSPasteboard.generalPasteboard.return_value = mock_pb
+    mock_appkit.NSPasteboardTypeString = "public.utf8-plain-text"
+    return mock_appkit, mock_pb
 
 
 class TestTypeText:
     """type_text() — clipboard-based text injection."""
 
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
-    def test_basic_paste(self, mock_clip, mock_sleep, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        type_text("hello")
-        # pbcopy (set) + osascript (Cmd-V) = 2 subprocess calls
-        assert mock_run.call_count == 2
+    def test_basic_paste(self):
+        """NSPasteboard.setString_forType_ is called with the text (no pbcopy subprocess)."""
+        mock_appkit, mock_pb = _make_mock_appkit("hello")
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            with patch("heyvox.input.injection.subprocess.run") as mock_run:
+                with patch("heyvox.input.injection.time.sleep"):
+                    mock_run.return_value = MagicMock(returncode=0)
+                    type_text("hello")
+        # NSPasteboard write was called
+        mock_pb.setString_forType_.assert_called_once_with("hello", "public.utf8-plain-text")
+        # osascript Cmd-V call was made
+        assert mock_run.call_count >= 1
 
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
-    def test_no_clipboard_restore(self, mock_clip, mock_sleep, mock_run):
+    def test_no_clipboard_restore(self):
         """Clipboard is NOT restored after paste — prevents Electron race condition."""
-        mock_run.return_value = MagicMock(returncode=0)
-        type_text("hello")
-        # Only 2 calls: pbcopy + Cmd-V. No third call to restore.
-        assert mock_run.call_count == 2
-
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="wrong")
-    def test_aborts_on_verify_mismatch(self, mock_clip, mock_sleep, mock_run):
-        """If clipboard doesn't match after pbcopy, abort without pasting."""
-        mock_run.return_value = MagicMock(returncode=0)
-        type_text("hello")
-        # Only pbcopy call — Cmd-V should NOT be sent
+        mock_appkit, mock_pb = _make_mock_appkit("hello")
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            with patch("heyvox.input.injection.subprocess.run") as mock_run:
+                with patch("heyvox.input.injection.time.sleep"):
+                    mock_run.return_value = MagicMock(returncode=0)
+                    type_text("hello")
+        # Only 1 subprocess call: Cmd-V. No second call to restore clipboard.
         assert mock_run.call_count == 1
 
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
-    def test_aborts_on_pbcopy_failure(self, mock_clip, mock_sleep, mock_run):
-        """If pbcopy fails (non-zero exit), abort without pasting."""
-        mock_run.return_value = MagicMock(returncode=1)
-        type_text("hello")
-        # pbcopy called once but failed — no Cmd-V
-        assert mock_run.call_count == 1
+    def test_aborts_on_verify_mismatch(self):
+        """If clipboard read returns wrong text, abort without pasting."""
+        mock_appkit, mock_pb = _make_mock_appkit("wrong")
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            with patch("heyvox.input.injection.subprocess.run") as mock_run:
+                with patch("heyvox.input.injection.time.sleep"):
+                    mock_run.return_value = MagicMock(returncode=0)
+                    type_text("hello")
+        # Cmd-V should NOT be sent when clipboard verify fails
+        assert mock_run.call_count == 0
 
-    @patch("heyvox.input.injection.subprocess.run")
-    @patch("heyvox.input.injection.time.sleep")
-    @patch("heyvox.input.injection.get_clipboard_text", return_value='say "hello"')
-    def test_handles_special_chars(self, mock_clip, mock_sleep, mock_run):
-        """pbcopy handles quotes/unicode via stdin — no escaping needed."""
-        mock_run.return_value = MagicMock(returncode=0)
-        type_text('say "hello"')
-        # pbcopy receives raw bytes via stdin
-        pbcopy_call = mock_run.call_args_list[0]
-        assert pbcopy_call[1].get("input") == b'say "hello"'
+    def test_aborts_on_clipboard_write_failure(self):
+        """If NSPasteboard.setString_forType_ returns False, abort without pasting."""
+        mock_appkit, mock_pb = _make_mock_appkit("hello")
+        mock_pb.setString_forType_.return_value = False
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            with patch("heyvox.input.injection.subprocess.run") as mock_run:
+                with patch("heyvox.input.injection.time.sleep"):
+                    mock_run.return_value = MagicMock(returncode=0)
+                    type_text("hello")
+        # No osascript paste call on clipboard write failure
+        assert mock_run.call_count == 0
+
+    def test_handles_special_chars(self):
+        """NSPasteboard receives special chars string directly (no escaping)."""
+        text = 'say "hello"'
+        mock_appkit, mock_pb = _make_mock_appkit(text)
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            with patch("heyvox.input.injection.subprocess.run") as mock_run:
+                with patch("heyvox.input.injection.time.sleep"):
+                    mock_run.return_value = MagicMock(returncode=0)
+                    type_text(text)
+        mock_pb.setString_forType_.assert_called_once_with(text, "public.utf8-plain-text")
 
 
 class TestPressEnter:
@@ -131,14 +155,38 @@ class TestClipboardIsImage:
 
 
 class TestGetClipboardText:
-    """get_clipboard_text() — read text from clipboard."""
+    """get_clipboard_text() — read text from clipboard via NSPasteboard."""
 
-    @patch("heyvox.input.injection.subprocess.run")
-    def test_returns_text(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="hello world\n")
-        assert get_clipboard_text() == "hello world"
+    def test_returns_text(self):
+        mock_appkit, mock_pb = _make_mock_appkit("hello world")
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            result = get_clipboard_text()
+        assert result == "hello world"
 
-    @patch("heyvox.input.injection.subprocess.run")
-    def test_returns_empty_on_error(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="\n")
-        assert get_clipboard_text() == ""
+    def test_returns_empty_when_no_text(self):
+        mock_appkit, mock_pb = _make_mock_appkit("")
+        mock_pb.stringForType_.return_value = None
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            result = get_clipboard_text()
+        assert result == ""
+
+
+class TestSettleDelay:
+    """_settle_delay_for() — per-app focus settle delay resolution."""
+
+    DELAYS: dict[str, float] = {"conductor": 0.3, "cursor": 0.15, "iterm2": 0.03}
+
+    def test_exact_match(self):
+        assert _settle_delay_for("cursor", self.DELAYS, 0.1) == 0.15
+
+    def test_substring_match(self):
+        assert _settle_delay_for("Cursor Editor", self.DELAYS, 0.1) == 0.15
+
+    def test_case_insensitive(self):
+        assert _settle_delay_for("CONDUCTOR", self.DELAYS, 0.1) == 0.3
+
+    def test_default_delay(self):
+        assert _settle_delay_for("UnknownApp", self.DELAYS, 0.1) == 0.1
+
+    def test_none_app(self):
+        assert _settle_delay_for(None, self.DELAYS, 0.1) == 0.1
