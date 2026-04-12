@@ -67,7 +67,10 @@ Plans:
   2. tts_playing state is written to the atomic state file in both the Python TTS path and Herald orchestrator — old flag file is a parallel write, not the primary
   3. Starting HeyVox produces zero deprecation warnings in the log (no websockets asyncio warning)
   4. All tests still pass after shim removal (no regressions from AppContext migration)
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 11-01-PLAN.md — Migrate test_flag_coordination.py to AppContext API and remove shim vars from main.py
+- [ ] 11-02-PLAN.md — Fix websockets deprecation and add tts_playing dual-write to atomic state
 
 ### Phase 12: Paste Injection Reliability
 **Goal**: Users can dictate into any AI coding agent and their text appears correctly without losing clipboard contents
@@ -108,7 +111,7 @@ Plans:
 | 7. Herald Python Port | v1.1 | 5/5 | Complete | 2026-04-11 |
 | 8. IPC Consolidation | v1.1 | 3/3 | Complete | 2026-04-11 |
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
-| 10. Test Stability | v1.2 | 3/3 | Complete   | 2026-04-12 |
-| 11. Tech Debt Cleanup | v1.2 | 0/? | Not started | - |
+| 10. Test Stability | v1.2 | 3/3 | Complete    | 2026-04-12 |
+| 11. Tech Debt Cleanup | v1.2 | 0/2 | Not started | - |
 | 12. Paste Injection Reliability | v1.2 | 0/? | Not started | - |
 | 13. Distribution & UX Polish | v1.2 | 0/? | Not started | - |
