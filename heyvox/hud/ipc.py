@@ -27,7 +27,7 @@ import socket
 import threading
 from collections.abc import Callable
 
-DEFAULT_SOCKET_PATH = "/tmp/heyvox-hud.sock"
+from heyvox.constants import HUD_SOCKET_PATH as DEFAULT_SOCKET_PATH
 
 # Backward-compatibility alias (some callers may use SOCKET_PATH)
 SOCKET_PATH = DEFAULT_SOCKET_PATH

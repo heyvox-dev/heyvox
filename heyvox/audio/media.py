@@ -30,10 +30,11 @@ import time
 
 def _log(msg: str) -> None:
     """Write to main vox log file (same as main.py's log())."""
+    from heyvox.constants import LOG_FILE_DEFAULT
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [media] {msg}\n"
     try:
-        with open(os.environ.get("HEYVOX_LOG_FILE", "/tmp/heyvox.log"), "a") as f:
+        with open(os.environ.get("HEYVOX_LOG_FILE", LOG_FILE_DEFAULT), "a") as f:
             f.write(line)
     except OSError:
         pass
@@ -46,7 +47,7 @@ _MR_PAUSE = 1
 # The TTS orchestrator uses /tmp/heyvox-media-paused-orch separately.
 # Contents: "hush" (Hush extension), "mr" (MediaRemote), "chrome-js" (Chrome JS),
 #           "media-key" (media key toggle)
-_PAUSE_FLAG = "/tmp/heyvox-media-paused-rec"
+from heyvox.constants import HEYVOX_MEDIA_PAUSED_REC as _PAUSE_FLAG
 
 # Lazy-loaded framework handle (guarded by _mr_lock for thread-safe init)
 _mr_lib = None
@@ -74,7 +75,7 @@ _MEDIA_SELECTOR = "video, audio"
 # Hush (Chrome extension) integration
 # ---------------------------------------------------------------------------
 
-_HUSH_SOCK = "/tmp/hush.sock"
+from heyvox.constants import HUSH_SOCK as _HUSH_SOCK
 
 
 def _hush_command(action: str, **kwargs) -> dict | None:
@@ -515,8 +516,9 @@ def resume_media() -> bool:
     # Don't actually resume if another caller (orchestrator) still has it paused.
     # Check both heyvox and herald namespaces — Herald's TTS orchestrator uses
     # /tmp/herald-media-paused-* for the same purpose.
+    from heyvox.constants import HEYVOX_MEDIA_PAUSED_PREFIX, HERALD_MEDIA_PAUSED_PREFIX
     other_flags = [
-        f for f in glob.glob("/tmp/heyvox-media-paused-*") + glob.glob("/tmp/herald-media-paused-*")
+        f for f in glob.glob(HEYVOX_MEDIA_PAUSED_PREFIX + "*") + glob.glob(HERALD_MEDIA_PAUSED_PREFIX + "*")
         if f != _PAUSE_FLAG
     ]
     if other_flags:

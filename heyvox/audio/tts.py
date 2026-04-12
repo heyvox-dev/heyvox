@@ -70,7 +70,7 @@ _tts_lock = threading.Lock()
 _muted: bool = False
 _verbosity: Verbosity = Verbosity.FULL
 _style: str = "detailed"
-_STYLE_FILE = "/tmp/heyvox-tts-style"
+from heyvox.constants import TTS_STYLE_FILE as _STYLE_FILE
 
 # Style descriptions — returned to Claude via MCP so it knows how to write TTS
 TTS_STYLE_PROMPTS = {
@@ -156,6 +156,14 @@ def speak(
     if filtered is None:
         return
 
+    # Register with echo suppression buffer before speaking so filter_tts_echo()
+    # has something to match against when the mic picks up speaker output.
+    try:
+        from heyvox.audio.echo import register_tts_text
+        register_tts_text(filtered)
+    except Exception:
+        pass  # Echo module not loaded or not initialised — skip silently
+
     _herald("speak", input_text=filtered)
 
 
@@ -196,7 +204,8 @@ def set_muted(muted: bool) -> None:
     global _muted
     with _tts_lock:
         _muted = muted
-        _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+        from heyvox.constants import CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG
+        _MUTE_FLAGS = [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]
         if muted:
             for flag in _MUTE_FLAGS:
                 try:
@@ -228,7 +237,8 @@ def _is_system_muted() -> bool:
 
 def is_muted() -> bool:
     """Return current mute state (in-memory flag, file flag, or macOS system mute)."""
-    return _muted or os.path.exists("/tmp/claude-tts-mute") or _is_system_muted()
+    from heyvox.constants import CLAUDE_TTS_MUTE_FLAG
+    return _muted or os.path.exists(CLAUDE_TTS_MUTE_FLAG) or _is_system_muted()
 
 
 def set_verbosity(level: str) -> None:
@@ -255,7 +265,8 @@ def set_verbosity(level: str) -> None:
         except OSError as e:
             log.warning(f"Failed to write verbosity file: {e}")
         # Sync legacy mute flags and in-memory state
-        _MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+        from heyvox.constants import CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG
+        _MUTE_FLAGS = [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]
         if level == "skip":
             _muted = True
             for flag in _MUTE_FLAGS:
