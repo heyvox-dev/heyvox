@@ -138,52 +138,74 @@ class TestTypeText:
     """Verify clipboard-based text injection."""
 
     def test_type_text_sets_clipboard(self, monkeypatch):
-        """type_text() must set clipboard before Cmd-V."""
-        from heyvox.input import injection
+        """type_text() must set clipboard via NSPasteboard before Cmd-V.
 
-        commands_run = []
+        NSPasteboard replaced pbcopy in Plan 01 (PASTE-01). The mock patches
+        AppKit.NSPasteboard and verifies the write call was made, then the
+        osascript Cmd-V is also invoked.
+        """
+        from heyvox.input import injection
+        import sys
+
         text_to_paste = "hello world"
 
+        mock_pb = MagicMock()
+        mock_pb.clearContents.return_value = None
+        mock_pb.setString_forType_.return_value = True
+        mock_pb.changeCount.return_value = 42
+        mock_pb.stringForType_.return_value = text_to_paste
+
+        mock_appkit = MagicMock()
+        mock_appkit.NSPasteboard.generalPasteboard.return_value = mock_pb
+        mock_appkit.NSPasteboardTypeString = "public.utf8-plain-text"
+
+        osascript_calls = []
+
         def mock_run(cmd, **kwargs):
-            commands_run.append(" ".join(cmd[:3]) if len(cmd) >= 3 else " ".join(cmd))
-            return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "osascript":
+                osascript_calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr=b"")
 
         monkeypatch.setattr("subprocess.run", mock_run)
-        # Stub out clipboard verify so type_text doesn't abort early.
-        # The real get_clipboard_text() calls osascript; in tests pbcopy is
-        # mocked so the clipboard is never actually set.
-        monkeypatch.setattr(injection, "get_clipboard_text", lambda: text_to_paste)
+        monkeypatch.setattr(injection, "time", MagicMock(sleep=lambda s: None))
 
-        injection.type_text(text_to_paste)
+        with __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+            sys.modules, {"AppKit": mock_appkit}
+        ):
+            injection.type_text(text_to_paste)
 
-        # Should have at minimum: pbcopy (set clipboard) + osascript (Cmd-V paste)
-        pbcopy_calls = [c for c in commands_run if "pbcopy" in c]
-        osascript_calls = [c for c in commands_run if "osascript" in c]
-        assert len(pbcopy_calls) >= 1, f"Expected pbcopy call, got: {commands_run}"
-        assert len(osascript_calls) >= 1, f"Expected osascript paste call, got: {commands_run}"
+        # NSPasteboard write must have been called
+        mock_pb.setString_forType_.assert_called_once_with(text_to_paste, "public.utf8-plain-text")
+        # osascript Cmd-V must have been called
+        assert len(osascript_calls) >= 1, f"Expected osascript paste call, got: {osascript_calls}"
 
-    def test_type_text_escapes_quotes(self, monkeypatch):
-        """type_text() uses pbcopy for clipboard — special chars including quotes are safe."""
+    def test_type_text_special_chars(self, monkeypatch):
+        """type_text() via NSPasteboard handles special chars including quotes safely."""
         from heyvox.input import injection
+        import sys
 
         text_to_paste = 'He said "hello"'
-        pbcopy_inputs = []
 
-        _original_run = __import__("subprocess").run
+        mock_pb = MagicMock()
+        mock_pb.clearContents.return_value = None
+        mock_pb.setString_forType_.return_value = True
+        mock_pb.changeCount.return_value = 42
+        mock_pb.stringForType_.return_value = text_to_paste
+
+        mock_appkit = MagicMock()
+        mock_appkit.NSPasteboard.generalPasteboard.return_value = mock_pb
+        mock_appkit.NSPasteboardTypeString = "public.utf8-plain-text"
 
         def mock_run(cmd, **kwargs):
-            if cmd[0] == "pbcopy":
-                # Capture the raw bytes sent to pbcopy
-                pbcopy_inputs.append(kwargs.get("input", b""))
-            return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr=b"")
 
         monkeypatch.setattr("subprocess.run", mock_run)
-        # Stub clipboard verify to return the exact text so paste proceeds
-        monkeypatch.setattr(injection, "get_clipboard_text", lambda: text_to_paste)
+        monkeypatch.setattr(injection, "time", MagicMock(sleep=lambda s: None))
 
-        injection.type_text(text_to_paste)
+        with __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+            sys.modules, {"AppKit": mock_appkit}
+        ):
+            injection.type_text(text_to_paste)
 
-        # pbcopy receives raw UTF-8 bytes — no escaping needed (unlike osascript)
-        assert len(pbcopy_inputs) >= 1, "pbcopy must be called to set clipboard"
-        assert text_to_paste.encode("utf-8") in pbcopy_inputs, \
-            f"pbcopy must receive the verbatim text bytes, got: {pbcopy_inputs}"
+        # NSPasteboard receives the raw string — no escaping needed
+        mock_pb.setString_forType_.assert_called_once_with(text_to_paste, "public.utf8-plain-text")
