@@ -38,6 +38,7 @@ from pathlib import Path
 from heyvox.constants import (
     HERALD_DEBUG_LOG,
     HERALD_QUEUE_DIR,
+    HERALD_ORCH_PID,
     KOKORO_DAEMON_PID,
     KOKORO_DAEMON_SOCK,
     VERBOSITY_FILE,
@@ -195,6 +196,37 @@ def detect_language(text: str) -> tuple[str, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# Orchestrator auto-start
+# ---------------------------------------------------------------------------
+
+def _ensure_orchestrator() -> None:
+    """Start the Herald orchestrator if it isn't already running.
+
+    Called after each successful WAV generation so the queue is always drained.
+    Uses a PID file check to avoid spawning duplicates.
+    """
+    if os.path.exists(HERALD_ORCH_PID):
+        try:
+            pid = int(open(HERALD_ORCH_PID).read().strip())
+            os.kill(pid, 0)
+            return  # Already running
+        except (OSError, ValueError):
+            pass  # Stale PID file — start a new one
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "heyvox.herald.cli", "orchestrator"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        log.info("Auto-started Herald orchestrator")
+    except Exception as exc:
+        log.warning("Failed to auto-start orchestrator: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # HeraldWorker class
 # ---------------------------------------------------------------------------
 
@@ -258,7 +290,10 @@ class HeraldWorker:
 
         # Generate WAV
         log.info("Generating TTS: mood=%s lang=%s voice=%s len=%d", mood, lang, voice, len(speech))
-        return self._generate(speech, voice, lang, DEFAULT_SPEED)
+        ok = self._generate(speech, voice, lang, DEFAULT_SPEED)
+        if ok:
+            _ensure_orchestrator()
+        return ok
 
     # ------------------------------------------------------------------
     # Private: text extraction

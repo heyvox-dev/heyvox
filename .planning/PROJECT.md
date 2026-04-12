@@ -45,13 +45,21 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 
 ### Active
 
-(No active milestone — run `/gsd:new-milestone` to define v2.0)
+## Current Milestone: v1.2 Polish & Reliability
+
+**Goal:** Clean up accumulated rough edges and make HeyVox reliable enough for public release.
+
+**Target features:**
+- Tech debt cleanup (shim vars, tts_playing dual-write, stale code)
+- Paste/injection reliability & speed (#1 UX pain point)
+- UI/UX polish
+- Distribution prep (package name resolution, Homebrew formula)
+- Test stability (fix 6 stale test failures)
 
 ## Current State
 
 **Shipped v1.1** on 2026-04-11 (Architecture Hardening). All 15 requirements satisfied.
-
-**Next milestone:** v2.0 Cross-Platform & Polish (not yet defined)
+**v1.2** in progress (Polish & Reliability). Phase 10 (test-stability) complete — CI test suite stable with intent-based assertions, proper dev deps, and audio marker for CI skipping.
 
 ### Out of Scope
 
@@ -145,4 +153,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-11 after v1.1 milestone*
+*Last updated: 2026-04-12 after Phase 10 (test-stability) complete*

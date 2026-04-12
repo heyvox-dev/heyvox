@@ -1,69 +1,200 @@
-# Features Research: Vox — macOS Voice Layer
+# Feature Research
 
-## Table Stakes (must have or users leave)
+**Domain:** macOS voice automation tool — polish & reliability milestone (v1.2)
+**Researched:** 2026-04-12
+**Confidence:** MEDIUM-HIGH (paste injection: HIGH via competitor analysis; distribution: HIGH via official docs; UX polish: MEDIUM via HIG + community; test stability: HIGH via pytest docs)
 
-| Feature | Complexity | Dependencies | Notes |
-|---------|-----------|--------------|-------|
-| **Local STT** — speech-to-text that runs on-device | Medium | mlx-whisper, pyaudio | Core functionality; every competitor has this |
-| **Push-to-talk** — hotkey to start/stop recording | Low | Quartz event tap | Expected by all voice tool users |
-| **Text injection** — transcribed text appears in focused app | Low | osascript | Without this, STT output goes nowhere |
-| **Silence detection** — auto-stop recording after silence | Low | pyaudio RMS | Users expect recording to stop automatically |
-| **Visual recording indicator** — know when mic is hot | Low | AppKit | Critical for trust — users must know when they're being recorded |
-| **CLI control** — start/stop/status from terminal | Low | argparse/click | Developer audience expects CLI |
-| **Configuration file** — customize behavior without code | Low | PyYAML | Developers want to tweak settings |
-| **Auto-start on login** — runs as background service | Low | launchd | Users won't remember to start it manually |
-| **Cancellation** — abort recording without sending | Low | ESC key handler | Must be able to bail out |
-| **Audio feedback** — sound cues for state changes | Low | afplay | Users need confirmation mic started/stopped |
+---
 
-## Differentiators (competitive advantage)
+## Context
 
-| Feature | Complexity | Dependencies | Notes |
-|---------|-----------|--------------|-------|
-| **Wake word detection** — hands-free activation | Medium | openwakeword | Only VS Code Speech has this ("Hey Code"), but VS Code-only. Our key differentiator |
-| **Custom wake words** — train your own trigger phrase | High | Training pipeline | No competitor offers this. Creates user investment |
-| **MCP voice server** — agents can trigger voice I/O | Medium | mcp SDK | Spokenly has basic MCP; ours is bidirectional with TTS |
-| **Local TTS output** — agent speaks responses aloud | Medium | Kokoro/sherpa-onnx | Agent Voice has cloud TTS; we're fully local |
-| **HUD overlay** — beautiful visual status across all spaces | High | AppKit, Unix socket | Nobody else has this. Demo video star |
-| **Multi-agent targeting** — voice to specific agent/app | Medium | Adapter protocol | Nobody else targets multiple AI agents |
-| **TTS coordination** — pause TTS when user speaks | Medium | IPC flag, audio ducking | Full-duplex coordination is unique |
-| **TTS queue management** — skip, pause, mute | Medium | Queue + IPC | Multi-message queue with controls |
-| **Adapter protocol** — extensible agent integrations | Medium | Protocol class | Structured way to add new agent targets |
-| **Guided setup** — `vox setup` walks through permissions | Medium | Interactive CLI | Reduces 15-min setup to 3 minutes |
+This is a subsequent-milestone research file. v1.0 and v1.1 are fully shipped. All primary features exist. v1.2 targets four specific problem areas in an already-working product:
 
-## Anti-Features (deliberately NOT building)
+1. **Paste/injection UX** — #1 UX pain point; clipboard gets destroyed, Electron apps unreliable
+2. **Distribution** — package name unresolved, no Homebrew formula
+3. **UX polish** — menu bar status text, HUD visual QA
+4. **Test stability** — 6 stale test failures blocking clean CI
 
-| Feature | Reason | Risk if built |
-|---------|--------|---------------|
-| Cloud STT/TTS | Core differentiator is "fully local" | Destroys trust, privacy story |
-| Meeting transcription | Different product category, feature bloat (OpenWhispr went here) | Scope creep, unfocused product |
-| Full IDE control (Talon-style) | Massive complexity, different audience | Years of work, alienates casual users |
-| Cross-platform v1 | macOS-first for quality; Linux/Win abstractions dilute UX | Slower shipping, worse on all platforms |
-| Voice-to-code (syntax dictation) | AI agents handle code generation; we handle conversation | Competing with Talon, wrong abstraction |
-| Always-on recording/logging | Privacy nightmare | User trust destroyed |
-| Native macOS app in v1 | SwiftUI app adds months of work | Delays launch, solo maintainer burnout |
-| Custom voice models | Users don't want to manage ML models | Support burden, confusion |
+Features already shipped (do not re-plan): wake word, PTT, STT, HUD overlay, Herald TTS, Hush, MCP server, CLI, launchd, YAML config, adapter protocol.
+
+---
+
+## Feature Landscape
+
+### Table Stakes (Users Expect These)
+
+Features that v1.2 must address for the product to feel finished. These are gaps relative to the current shipped state.
+
+| Feature | Why Expected | Complexity | Notes |
+|---------|--------------|------------|-------|
+| Paste does not destroy clipboard | Users copy code before speaking; losing clipboard contents is jarring regression | LOW | Save NSPasteboard contents before write, restore after Cmd+V is processed. Use PyObjC NSPasteboard directly (no subprocess). Restore timing: after CGEvent flush, not immediately after issuing keystroke |
+| Paste works reliably in Electron apps | Primary target apps (Claude Code, Cursor, VS Code) are all Electron | LOW-MEDIUM | AXUIElement setValue silently fails in Electron — confirmed Electron bug. Clipboard + Cmd+V is the only reliable path. Add 50-100ms settle delay between clipboard write and Cmd+V event |
+| Paste works in terminal apps | Secondary use case; iTerm2, Warp, Ghostty users expect it | LOW | Cmd+V works in most terminals. Bracketed paste mode can interfere in tmux; test and document |
+| Package installable via `pipx install <name>` | Already works but blocked on name finalization | LOW | Confirm `heyvox` available on PyPI. If taken, evaluate: voxcode, hotmic, murmur, hark — check PyPI AND Homebrew availability simultaneously. Name must be finalized before any distribution work |
+| Package installable via `brew install heyvox` | macOS power users expect Homebrew for CLI tools | HIGH | Third-party tap required (not homebrew-core eligible). Formula generated by homebrew-pypi-poet in clean venv. All Python deps must have sdists on PyPI (not wheels-only). Hosting: github.com/heyvox/homebrew-heyvox |
+| Menu bar icon reflects current state | Users glance at menu bar to confirm HeyVox is alive and what it's doing | LOW | NSStatusItem template image already present. Add dynamic title string: "" at idle, "Recording..." while listening, "Transcribing..." during STT, empty during speaking. variableLength mode required |
+| Menu shows status as first item | Clicking menu bar → top menu item confirms current state | LOW | Disabled NSMenuItem label at top of NSMenu. Pattern used by Silenz, Bartender extras, Hand Mirror, countless utilities. Already expected by macOS power users |
+| Tests pass reliably on GitHub Actions | Broken CI blocks PRs, erodes confidence | MEDIUM | macos-14 runners have no audio device. pyaudio/sounddevice fail at init or device query. Fix: mock at module level in conftest.py before import. Add @pytest.mark.requires_audio marker; skip in CI via pyproject.toml addopts |
+
+### Differentiators (Competitive Advantage)
+
+| Feature | Value Proposition | Complexity | Notes |
+|---------|-------------------|------------|-------|
+| AXUIElement fast-path for native AppKit apps | Paste feels instant (~0.72ms) in TextEdit, Notes, Mail vs ~150ms for clipboard round-trip | MEDIUM | Detection: probe kAXValueAttribute settable on focused element. Skip for Electron apps (hard-code known bundle IDs: com.microsoft.VSCode, com.todesktop.*, com.anthropic.*). Fallback to clipboard if AX fails. Layer on top of working clipboard path |
+| "Open Config" menu item | Replaces need for preferences window; YAML opens in default editor with one click | LOW | NSWorkspace.openFile() on config path. Replaces complex AppKit preferences window with zero new UI code |
+| Status text in menu bar label | Visible at a glance without clicking — differentiates from simpler tools with icon-only | LOW | Already described in table stakes. Counts as differentiator vs competitors (VocaMac, STTInput show icon-only) |
+| Homebrew tap as first-class install path | `brew tap heyvox/tap && brew install heyvox` — zero Python knowledge required | MEDIUM | Expands addressable audience beyond Python users. homebrew-pypi-poet automates formula. Formula pins Python version, bundles all deps |
+
+### Anti-Features (Commonly Requested, Often Problematic)
+
+| Feature | Why Requested | Why Problematic | Alternative |
+|---------|---------------|-----------------|-------------|
+| Full preferences window (AppKit/SwiftUI) | "Real apps have Preferences" | Significant PyObjC work; YAML config already solves the need; v1.2 is polish not rewrite | "Open Config" menu item opens YAML in default editor. Document config keys in README |
+| Auto-update mechanism (Sparkle) | Users want to stay current without manual steps | Sparkle is Objective-C framework; complex to integrate from Python; risk of silent failures | `heyvox update` CLI command that delegates to `pipx upgrade heyvox` or `brew upgrade heyvox`. One command the user runs explicitly |
+| Per-app paste method configuration UI | Some apps need different injection | UI adds surface area; auto-detection handles 95% of cases | Auto-detect: probe AXUIElement capability; hard-code Electron bundle IDs to skip AX path. Log which path was chosen at DEBUG level |
+| homebrew-core submission | Maximum discoverability | homebrew-core has strict requirements: significant install count, active maintenance history, non-niche scope — will be rejected | Third-party tap is indistinguishable in UX. Users find via README, heyvox.dev. Promote tap URL, not homebrew-core |
+| Retry toast on paste failure | Shows users when injection failed | Complex notification system; UX unclear (retry how? when?); adds code path to maintain | Fallback to clipboard-left-ready + audio cue (error beep). User sees text in clipboard, pastes manually. Log failure with context at WARN level |
+
+---
 
 ## Feature Dependencies
 
 ```
-pyaudio (mic) ──> openwakeword (wake word) ──> mlx-whisper (STT) ──> osascript (inject)
-                                                                        │
-                                                                   adapter protocol
-                                                                        │
-                                                              ┌─────────┼─────────┐
-                                                           generic   conductor   cursor
+[Package name finalization]
+    └──required by──> [PyPI publish / pipx install]
+                          └──required by──> [Homebrew formula generation (homebrew-pypi-poet)]
+                                                └──required by──> [brew tap install works]
 
-afplay (cues) ──> standalone, no deps
+[Paste: clipboard save/restore]
+    └──must be working first──> [Paste: AXUIElement fast-path]
+                                    (fast-path falls back to clipboard; fallback must be solid)
 
-AppKit (HUD) <── Unix socket <── main loop + TTS engine
+[CI: audio mock in conftest.py]
+    └──required by──> [Test stability fixes (6 stale failures)]
+                          └──enables──> [Green CI gate on every PR]
 
-MCP server ──> wraps existing functions as tools
+[HUD visual QA] ──independent of all above──> [Can be done in parallel]
+["Open Config" menu item] ──independent──> [Low-effort, parallel work]
 ```
 
-## v1 vs v2 Feature Split
+### Dependency Notes
 
-**v1 (OSS, "It Works for Anyone"):**
-All table stakes + wake word + guided setup + adapter protocol + MCP server basics
+- **Name finalization blocks all distribution work.** Do this in Phase 1 of the milestone before any packaging work starts.
+- **Clipboard save/restore must work before layering AX fast-path.** If AX attempt fails mid-inject, the clipboard fallback must already be solid. Implement and test clipboard path in isolation first.
+- **Audio mock in conftest.py is likely a single change that fixes all 6 stale failures.** The root cause is almost certainly the same: audio init fails on CI runner. One fixture change may close all 6 at once.
 
-**v2 (Pro):**
-TTS output + HUD overlay + multi-agent orchestration + TTS queue + voice command extensions + native app
+---
+
+## MVP Definition (v1.2 scope)
+
+### Launch With (v1.2)
+
+- [ ] Package name finalized — verified available on PyPI and Homebrew
+- [ ] `pipx install <name>` works end-to-end on a fresh macOS machine
+- [ ] Paste: clipboard contents preserved across injection (save/restore)
+- [ ] Paste: 50-100ms settle delay before Cmd+V for Electron apps
+- [ ] Menu bar: status text label reflecting current state
+- [ ] Menu bar: first menu item = current status string (disabled)
+- [ ] CI: 6 stale test failures fixed (audio mock in conftest.py)
+- [ ] Homebrew tap formula created and installable
+- [ ] HUD visual QA pass (Retina, dark mode, external monitor)
+- [ ] 7 backward-compat shim vars in main.py removed
+- [ ] tts_playing dual-write consolidated to single state file source
+
+### Add After Validation (v1.x patch)
+
+- [ ] AXUIElement fast-path for native apps — add when paste complaint volume continues after v1.2
+- [ ] `heyvox update` CLI command — after distribution confirmed stable
+- [ ] "Open Config" menu item — low effort, add if config discoverability issues surface
+
+### Future Consideration (v2+)
+
+- [ ] Preferences window (AppKit/SwiftUI) — v2 Pro, native .app only
+- [ ] Auto-update via Sparkle — v2 Pro, bundled .app
+- [ ] homebrew-core submission — after significant install count is established
+- [ ] Per-app injection method configuration — if user feedback surfaces specific broken app patterns
+
+---
+
+## Feature Prioritization Matrix
+
+| Feature | User Value | Implementation Cost | Priority |
+|---------|------------|---------------------|----------|
+| Package name finalization | HIGH (blocks everything) | LOW (research + rename) | P1 |
+| Clipboard save/restore on paste | HIGH (#1 UX complaint) | LOW | P1 |
+| Paste timing fix (Electron settle delay) | HIGH (#1 UX complaint) | LOW | P1 |
+| CI test stability (audio mock) | HIGH (unblocks PR workflow) | LOW-MEDIUM | P1 |
+| Menu bar status text | MEDIUM (polish) | LOW | P1 |
+| Homebrew tap formula | MEDIUM (distribution) | MEDIUM | P2 |
+| HUD visual QA pass | MEDIUM (public release quality) | LOW (testing, minimal code) | P2 |
+| AXUIElement fast-path for native apps | MEDIUM (speed improvement) | MEDIUM | P2 |
+| shim var / tech debt cleanup | LOW-MEDIUM (maintainability) | LOW | P2 |
+| "Open Config" menu item | LOW (discoverability) | LOW | P3 |
+| `heyvox update` CLI | LOW (convenience) | LOW | P3 |
+
+**Priority key:**
+- P1: Must ship in v1.2
+- P2: Target v1.2, defer to v1.3 if timeline tight
+- P3: Nice to have, v1.x patch
+
+---
+
+## Competitor Feature Analysis
+
+| Feature | Whisper tools (VocaMac, STTInput, koe) | SuperWhisper | EdgeWhisper | Our v1.2 approach |
+|---------|----------------------------------------|--------------|-------------|-------------------|
+| Text injection method | Clipboard save/restore + Cmd+V (universal) | Clipboard + Cmd+V | AXUIElement primary, NSPasteboard+CGEvent fallback | Same pattern: clipboard save/restore + Cmd+V + AX fast-path for native apps |
+| Injection in Electron | Clipboard-only (AX skipped) | Clipboard-only | Clipboard fallback | Clipboard + timing delay; skip AX for Electron bundle IDs |
+| Distribution | GitHub releases / DMG | App Store + direct | Direct download | pipx + Homebrew tap (right choice for CLI-first developer tool) |
+| Menu bar state display | Icon change only (most tools) | Rich icon set | Icon only | Add text label — differentiator vs icon-only competitors |
+| Preferences | Full in-app window | Full settings screen | Minimal | YAML + "Open Config" menu item — acceptable for CLI tool |
+| CI/testing | Most have no test suite | Unknown | Unknown | pytest with hardware mocking — above average for this category |
+| Package naming | N/A (mostly .app bundles) | Trademarked | N/A | Short, memorable, verify availability before committing |
+
+---
+
+## Research Findings by Area
+
+### Paste/Injection Reliability (HIGH confidence)
+
+Industry pattern across all comparable macOS voice-to-text tools: clipboard save/restore + Cmd+V is the universal reliable injection method. AXUIElement setValue is fast but fails silently in Electron apps — this is a confirmed, unfixed Electron bug (electron/electron#36337). Auto-detection by probing kAXValueAttribute settability is the standard approach for choosing between methods at runtime.
+
+Key timing constraint: a settle delay of 50-150ms between writing to NSPasteboard and issuing the Cmd+V CGEvent is required for Electron apps. Without it, the target app may paste stale clipboard contents. Clipboard restore must happen after the paste event is processed (use CGEventFlush or a short sleep after CGEventPost), not immediately after issuing the keystroke.
+
+### Distribution (HIGH confidence)
+
+Third-party Homebrew taps are the correct distribution mechanism for niche tools. homebrew-core submission is premature and likely to be rejected. The workflow: publish to PyPI with sdist → generate formula with homebrew-pypi-poet in clean venv → host on github.com/heyvox/homebrew-heyvox. All Python dependencies must have sdists on PyPI; wheels-only deps cannot be bundled in Homebrew formulas.
+
+Package name must be verified for availability on both PyPI and Homebrew simultaneously before finalizing. The name used on PyPI becomes the Homebrew formula name by convention — changing it later is painful for users.
+
+### UX Polish (MEDIUM confidence)
+
+NSStatusItem with variableLength mode and button.title is the standard AppKit pattern for dynamic menu bar text. This is PyObjC-accessible. The "first menu item = disabled status label" pattern is universal in macOS menu bar utilities. No significant code complexity — the PyObjC APIs are straightforward.
+
+HUD visual QA is primarily a human-testing exercise, not a code exercise. Known risks: NSVisualEffectView frosted glass on external monitors (can wash out), click-through hit testing edge cases, window level during full-screen app transitions.
+
+### Test Stability (HIGH confidence)
+
+GitHub Actions macos-14 runners have no audio input device. pyaudio and sounddevice raise errors on initialization or return empty device lists. The root fix is mocking these modules at import time in conftest.py, before any test module imports heyvox audio code. A custom @pytest.mark.requires_audio marker allows hardware-dependent tests to be explicitly skipped in CI. Fixed delays in IPC tests should be replaced with event-based synchronization (file existence checks, socket response waiting).
+
+---
+
+## Sources
+
+- [Simon Willison — Packaging a Python CLI tool for Homebrew](https://til.simonwillison.net/homebrew/packaging-python-cli-for-homebrew)
+- [Homebrew — Python for Formula Authors](https://docs.brew.sh/Python-for-Formula-Authors)
+- [Homebrew — Python docs](https://docs.brew.sh/Homebrew-and-Python)
+- [PyPI name taken advice — Python Discourse](https://discuss.python.org/t/pypi-name-taken-advice/3446)
+- [EdgeWhisper — AXUIElement primary + NSPasteboard fallback](https://edgewhisper.com/)
+- [STTInput — clipboard simulation + virtual keypress fallback architecture](https://yuta-san.medium.com/building-sttinput-universal-voice-to-text-for-macos-080ca40cb9de)
+- [koe — Cmd+V clipboard paste, Accessibility required](https://github.com/missuo/koe)
+- [Electron AX text selection bug — confirms AXUIElement unreliable in Electron](https://github.com/electron/electron/issues/36337)
+- [Apple Developer Forums — paste text via AXUIElement discussion](https://developer.apple.com/forums/thread/45330)
+- [Apple NSStatusItem documentation](https://developer.apple.com/documentation/appkit/nsstatusitem)
+- [Apple Human Interface Guidelines — the menu bar](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar)
+- [pytest flaky test explanation](https://docs.pytest.org/en/stable/explanation/flaky.html)
+- [daktilo issue — simulate audio device for GitHub Actions tests](https://github.com/orhun/daktilo/issues/12)
+
+---
+*Feature research for: HeyVox v1.2 Polish & Reliability*
+*Researched: 2026-04-12*

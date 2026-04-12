@@ -284,10 +284,13 @@ class DeviceManager:
                             f"WARNING: Zombie stream detected "
                             f"(CV={_cv_mean:.3f}±{_cv_std:.3f}), forcing recovery"
                         )
-                        print(
-                            f"[mic] Zombie stream (CV={_cv_mean:.3f}±{_cv_std:.3f})",
-                            file=sys.stderr, flush=True,
-                        )
+                        try:
+                            print(
+                                f"[mic] Zombie stream (CV={_cv_mean:.3f}±{_cv_std:.3f})",
+                                file=sys.stderr, flush=True,
+                            )
+                        except BrokenPipeError:
+                            pass
                         self._zero_streak = 2  # Force recovery path below
 
         if level < 10 or self._zero_streak >= 2:  # Dead mic OR zombie stream
@@ -303,10 +306,13 @@ class DeviceManager:
                     f"WARNING: Silent mic detected ({_dead_mic_name}), re-scanning devices... "
                     f"(attempt {self._silent_recover_count}, backoff {_backoff}s)"
                 )
-                print(
-                    f"[mic] Silent mic detected ({_dead_mic_name}), re-scanning...",
-                    file=sys.stderr, flush=True,
-                )
+                try:
+                    print(
+                        f"[mic] Silent mic detected ({_dead_mic_name}), re-scanning...",
+                        file=sys.stderr, flush=True,
+                    )
+                except BrokenPipeError:
+                    pass  # stderr closed (e.g. launchd pipe gone)
                 self._hud_send({"type": "error", "text": f"Mic silent: {_dead_mic_name}"})
                 self._zero_streak = 0
                 self._mic_pinned = False  # Allow priority-based re-selection
@@ -408,10 +414,13 @@ class DeviceManager:
                 f"WARNING: No good audio for {dead_secs:.0f}s, "
                 f"forcing mic reinit (AUDIO-13)"
             )
-            print(
-                f"[mic] Dead mic timeout ({dead_secs:.0f}s silence), forcing reinit...",
-                file=sys.stderr, flush=True,
-            )
+            try:
+                print(
+                    f"[mic] Dead mic timeout ({dead_secs:.0f}s silence), forcing reinit...",
+                    file=sys.stderr, flush=True,
+                )
+            except BrokenPipeError:
+                pass
             self.ctx.zombie_mic_reinit = True
 
     # -------------------------------------------------------------------------
