@@ -15,45 +15,52 @@ import threading
 class TestRecordingFlagLifecycle:
     """Verify the recording flag is created and removed at the right times."""
 
-    def test_flag_created_on_start(self, isolate_flags, mock_config):
-        """start_recording() must create the recording flag immediately."""
-        from heyvox import main as m
+    def test_flag_created_on_start(self, isolate_flags, mock_config, monkeypatch):
+        """RecordingStateMachine.start() must create the recording flag immediately."""
+        from heyvox.app_context import AppContext
+        from heyvox.recording import RecordingStateMachine
 
         flag = isolate_flags["recording_flag"]
         assert not os.path.exists(flag)
 
-        # Minimal setup so start_recording doesn't crash
-        m.is_recording = False
-        m.recording_start_time = 0
-        m._audio_buffer = []
-        m._triggered_by_ptt = False
+        # Suppress side effects
+        monkeypatch.setattr("heyvox.audio.cues.play_cue", lambda *a, **kw: None, raising=False)
+        monkeypatch.setattr("heyvox.audio.tts.set_recording", lambda *a, **kw: None, raising=False)
+        monkeypatch.setattr("heyvox.recording.RECORDING_FLAG", flag)
 
-        m.start_recording(config=mock_config)
+        ctx = AppContext()
+        rsm = RecordingStateMachine(ctx=ctx, config=mock_config, log_fn=print, hud_send=lambda m: None)
 
-        assert os.path.exists(flag), "Recording flag must exist after start_recording()"
-        assert m.is_recording is True
+        rsm.start()
+
+        assert os.path.exists(flag), "Recording flag must exist after start()"
+        assert ctx.is_recording is True
 
         # Cleanup
-        m.is_recording = False
+        ctx.is_recording = False
         try:
             os.remove(flag)
         except FileNotFoundError:
             pass
 
-    def test_flag_file_is_empty(self, isolate_flags, mock_config):
+    def test_flag_file_is_empty(self, isolate_flags, mock_config, monkeypatch):
         """Recording flag should be an empty file (presence-only sentinel)."""
-        from heyvox import main as m
+        from heyvox.app_context import AppContext
+        from heyvox.recording import RecordingStateMachine
 
         flag = isolate_flags["recording_flag"]
-        m.is_recording = False
-        m.recording_start_time = 0
-        m._audio_buffer = []
-        m._triggered_by_ptt = False
 
-        m.start_recording(config=mock_config)
+        monkeypatch.setattr("heyvox.audio.cues.play_cue", lambda *a, **kw: None, raising=False)
+        monkeypatch.setattr("heyvox.audio.tts.set_recording", lambda *a, **kw: None, raising=False)
+        monkeypatch.setattr("heyvox.recording.RECORDING_FLAG", flag)
+
+        ctx = AppContext()
+        rsm = RecordingStateMachine(ctx=ctx, config=mock_config, log_fn=print, hud_send=lambda m: None)
+
+        rsm.start()
 
         assert os.path.getsize(flag) == 0
-        m.is_recording = False
+        ctx.is_recording = False
         try:
             os.remove(flag)
         except FileNotFoundError:
@@ -61,24 +68,24 @@ class TestRecordingFlagLifecycle:
 
     def test_release_recording_guard_removes_flag(self, isolate_flags):
         """_release_recording_guard() must remove the flag and clear the event."""
-        from heyvox import main as m
+        from heyvox.recording import _release_recording_guard
 
         flag = isolate_flags["recording_flag"]
         open(flag, "w").close()
 
-        m._release_recording_guard()
+        _release_recording_guard()
 
         assert not os.path.exists(flag), "Flag must be removed after release"
 
     def test_release_recording_guard_idempotent(self, isolate_flags):
         """Calling _release_recording_guard() when flag doesn't exist must not crash."""
-        from heyvox import main as m
+        from heyvox.recording import _release_recording_guard
 
         flag = isolate_flags["recording_flag"]
         assert not os.path.exists(flag)
 
         # Should not raise
-        m._release_recording_guard()
+        _release_recording_guard()
 
 
 class TestTTSRecordingEvent:
@@ -142,18 +149,22 @@ class TestTTSRecordingEvent:
 class TestExternalFlagCoordination:
     """Verify that external processes (Conductor TTS hooks) can detect recording state."""
 
-    def test_flag_visible_to_external_check(self, isolate_flags, mock_config):
+    def test_flag_visible_to_external_check(self, isolate_flags, mock_config, monkeypatch):
         """An external shell check for the flag file must succeed during recording."""
         import subprocess
-        from heyvox import main as m
+        from heyvox.app_context import AppContext
+        from heyvox.recording import RecordingStateMachine
 
         flag = isolate_flags["recording_flag"]
-        m.is_recording = False
-        m.recording_start_time = 0
-        m._audio_buffer = []
-        m._triggered_by_ptt = False
 
-        m.start_recording(config=mock_config)
+        monkeypatch.setattr("heyvox.audio.cues.play_cue", lambda *a, **kw: None, raising=False)
+        monkeypatch.setattr("heyvox.audio.tts.set_recording", lambda *a, **kw: None, raising=False)
+        monkeypatch.setattr("heyvox.recording.RECORDING_FLAG", flag)
+
+        ctx = AppContext()
+        rsm = RecordingStateMachine(ctx=ctx, config=mock_config, log_fn=print, hud_send=lambda m: None)
+
+        rsm.start()
 
         # Simulate what Conductor's tts-speak.sh does
         result = subprocess.run(
@@ -162,7 +173,7 @@ class TestExternalFlagCoordination:
         )
         assert result.returncode == 0, "External shell must see the recording flag"
 
-        m.is_recording = False
+        ctx.is_recording = False
         try:
             os.remove(flag)
         except FileNotFoundError:

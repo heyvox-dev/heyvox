@@ -185,7 +185,10 @@ class DeviceManager:
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
         self._log("Zombie stream reinit: forcing mic recovery after consecutive empty recordings")
-        print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
+        try:
+            print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
+        except (BrokenPipeError, OSError):
+            pass
         self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
         self._mic_pinned = False
 
@@ -220,7 +223,10 @@ class DeviceManager:
         self.dev_index = dev_index
         self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
         self._log(f"Zombie reinit recovered: [{dev_index}] {self.dev_name}")
-        print(f"[mic] Zombie reinit recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
+        try:
+            print(f"[mic] Zombie reinit recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
+        except (BrokenPipeError, OSError):
+            pass
         self.stream = open_mic_stream(
             self.pa, dev_index,
             sample_rate=sample_rate,
@@ -290,8 +296,9 @@ class DeviceManager:
             if self._zero_streak >= 2:  # 2 × 5s = 10s to detect (or forced by zombie check)
                 self._silent_recover_count += 1
                 _dead_mic_name = self.pa.get_device_info_by_index(self.dev_index)['name']
-                # Exponential backoff: 1s, 5s, 15s, 30s, 60s, ... (cap 60s)
-                _backoff = min(60, max(1, 5 * (2 ** (self._silent_recover_count - 2))))
+                # Exponential backoff: 1s, 2.5s, 5s (cap 5s — runs on main thread,
+                # longer sleeps freeze wake word + PTT)
+                _backoff = min(5, max(1, 5 * (2 ** (self._silent_recover_count - 2))))
                 self._log(
                     f"WARNING: Silent mic detected ({_dead_mic_name}), re-scanning devices... "
                     f"(attempt {self._silent_recover_count}, backoff {_backoff}s)"
@@ -306,6 +313,10 @@ class DeviceManager:
                 self._recover_silent_mic(_dead_mic_name, _backoff)
         else:
             self._zero_streak = 0
+            # Reset recovery backoff when we see real audio — proves the mic
+            # is working, so next silence detection should start fresh.
+            if self._silent_recover_count > 0:
+                self._silent_recover_count = 0
 
     def _recover_silent_mic(self, dead_mic_name: str, backoff: float) -> None:
         """Internal: close stream, sleep backoff, try to re-open a working mic.
@@ -351,17 +362,19 @@ class DeviceManager:
                 require_audio=True,
             )
         if dev_index is None:
-            self._log(f"No mic after reinit, retrying in {backoff}s...")
-            time.sleep(backoff)
+            self._log(f"No mic after reinit, retrying in 2s...")
+            time.sleep(2)
             self.ctx.zombie_mic_reinit = True
             return
 
         self.dev_index = dev_index
         self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
         self._log(f"Mic recovered: [{dev_index}] {self.dev_name}")
-        print(f"[mic] Recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
-        if self.dev_name != dead_mic_name:
-            self._silent_recover_count = 0  # Reset backoff on successful switch
+        try:
+            print(f"[mic] Recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
+        except (BrokenPipeError, OSError):
+            pass
+        self._silent_recover_count = 0  # Reset backoff on any successful recovery
         self.stream = open_mic_stream(
             self.pa, dev_index,
             sample_rate=sample_rate,
@@ -372,6 +385,7 @@ class DeviceManager:
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
         self._health_cv_history.clear()
+        self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
 
     # -------------------------------------------------------------------------
     # Dead mic timeout (AUDIO-13)

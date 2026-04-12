@@ -34,6 +34,30 @@ vox_running = pytest.mark.skipif(
 )
 
 
+def _audio_device_available() -> bool:
+    """Return True if a real audio input device is accessible."""
+    try:
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        try:
+            count = pa.get_device_count()
+            for i in range(count):
+                info = pa.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0:
+                    return True
+            return False
+        finally:
+            pa.terminate()
+    except Exception:
+        return False
+
+
+requires_audio = pytest.mark.skipif(
+    not _audio_device_available(),
+    reason="No physical audio input device (skip in CI)",
+)
+
+
 @pytest.fixture(autouse=True)
 def isolate_flags(tmp_path, monkeypatch):
     """Redirect all flag files to a temp directory so tests never interfere

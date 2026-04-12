@@ -10,9 +10,11 @@ Requirements:
   - Vox running with BlackHole as mic: set mic_priority to ["BlackHole 2ch"] in config
   - macOS (uses afplay, osascript, etc.)
 
-Run with: pytest tests/test_e2e.py -v --timeout=60
+Run with: pytest tests/test_e2e.py -v -m integration
 
 The tests are skipped automatically if BlackHole is not installed or heyvox is not running.
+Marked as `integration` so they are excluded from the default test run (pytest addopts in
+pyproject.toml: -m 'not integration').
 """
 
 import os
@@ -24,6 +26,10 @@ import numpy as np
 import pytest
 
 from tests.conftest import blackhole_installed, vox_running
+
+# Mark the entire module as integration so it's excluded from default pytest runs.
+# Run integration tests explicitly: pytest -m integration
+pytestmark = pytest.mark.integration
 
 
 # --- Audio generation helpers ---

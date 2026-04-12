@@ -1,36 +1,36 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: Architecture Hardening
-status: completed
-stopped_at: Milestone v1.1 archived
-last_updated: "2026-04-11T21:00:00Z"
-last_activity: 2026-04-11
+milestone: v1.2
+milestone_name: Polish & Reliability
+status: executing
+stopped_at: Completed 11-tech-debt-cleanup-01-PLAN.md
+last_updated: "2026-04-12T09:51:46.648Z"
+last_activity: 2026-04-12
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 14
-  completed_plans: 14
-  percent: 100
+  total_phases: 11
+  completed_phases: 9
+  total_plans: 27
+  completed_plans: 28
+  percent: 25
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-11)
+See: .planning/PROJECT.md (updated 2026-04-12)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Planning next milestone (v2.0)
+**Current focus:** Phase 11 — tech-debt-cleanup
 
 ## Current Position
 
-Phase: —
-Plan: —
-Status: Milestone v1.1 complete. Run `/gsd:new-milestone` for v2.0.
-Last activity: 2026-04-11
+Phase: 11 (tech-debt-cleanup) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
+Last activity: 2026-04-12
 
-Progress: [████████████████████] 100% (v1.1 shipped)
+Progress: [██░░░░░░░░░░░░░░░░░░] 25% (1/4 phases complete)
 
 ## Performance Metrics
 
@@ -46,22 +46,44 @@ Progress: [████████████████████] 100% (v
 - Commits: 83
 - Timeline: 2 days (2026-04-10 → 2026-04-11)
 
+**Velocity (v1.2 — in progress):**
+
+- Total plans completed: 2
+- Average duration: ~3 min
+- Phase 10 complete (2026-04-12)
+
 ## Accumulated Context
 
 ### Decisions
 
-Full decision log in PROJECT.md Key Decisions table.
+- Use `--ignore` path flags instead of `-k` keyword filter in CI pytest command — path-based is explicit and matches pyproject.toml addopts
+- Use pytestmark + addopts rather than conftest skipif to exclude integration tests — marks are composable and explicit
+- Patch `_get_frontmost_app` in injection tests to isolate call counts — added after tests were written, patching is cleaner than updating expected counts
+
+Key decisions for v1.2:
+
+- Do NOT restore clipboard after paste — Electron reads clipboard async, a restore causes double-paste. test_no_clipboard_restore must not be changed.
+- tts_playing dual-write: complete Python side only in v1.2, bash scripts keep reading old flag file. Full bash cutover deferred to v1.3.
+- Shim removal: migrate test_flag_coordination.py to AppContext API BEFORE deleting shims (never same commit).
+- PyPI name: verify heyvox ownership before any distribution work. If squatted, rename cascades everywhere.
+- Paste timing: 50-100ms Electron settle delay is from competitor patterns, not measured. Validate empirically with Claude Code and Cursor in Phase 12 before adding per-app config overhead.
+- [Phase 10-test-stability]: Use pytestmark + addopts to exclude integration tests from default run — composable and explicit
+- [Phase 10-test-stability]: Intent-based subprocess assertions (filter by command name) instead of call_count for injection tests — decoupled from implementation details
+- [Phase 11-tech-debt-cleanup]: Migrate tests before deleting shims (separate commits) ensures tests never reference deleted code
 
 ### Pending Todos
 
-None.
+- Verify heyvox PyPI name ownership (first task of Phase 13) — check pypi.org + pip install heyvox --dry-run
+- Validate paste timing empirically on Claude Code + Cursor in Phase 12
+- Evaluate homebrew-pypi-poet output before committing to Homebrew formula (formula size may be impractical for ML deps)
 
 ### Blockers/Concerns
 
-None — milestone complete.
+- PyPI name "heyvox" shows placeholder registration — ownership unconfirmed. Blocking decision for Phase 13.
+- Homebrew formula: MLX Whisper + openwakeword + sherpa-onnx collectively hundreds of MB — may exceed practical formula limits. Fallback: pipx-only for v1.2, Homebrew deferred to v1.3.
 
 ## Session Continuity
 
-Last session: 2026-04-11
-Stopped at: Milestone v1.1 archived
-Resume file: None
+Last session: 2026-04-12T09:51:46.645Z
+Stopped at: Completed 11-tech-debt-cleanup-01-PLAN.md
+Resume with: `/gsd:plan-phase 11`

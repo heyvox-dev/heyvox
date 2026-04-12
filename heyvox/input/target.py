@@ -23,7 +23,10 @@ from typing import Any
 
 def _log(msg: str) -> None:
     """Log to stderr with [target] prefix."""
-    print(f"[target] {msg}", file=sys.stderr, flush=True)
+    try:
+        print(f"[target] {msg}", file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError):
+        pass
 
 # AX roles that accept text input
 _TEXT_ROLES = frozenset({"AXTextField", "AXTextArea", "AXWebArea", "AXComboBox"})
