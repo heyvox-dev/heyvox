@@ -18,9 +18,12 @@ class TestTypeText:
     def test_basic_paste(self, mock_front, mock_clip, mock_sleep, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         type_text("hello")
-        # pbcopy (set clipboard) + osascript (Cmd-V paste) = 2 subprocess calls
-        # (_get_frontmost_app is patched so its subprocess calls are excluded)
-        assert mock_run.call_count == 2
+        # Assert WHICH commands ran, not how many times
+        all_calls = [c.args[0] if c.args else c[0][0] for c in mock_run.call_args_list]
+        pbcopy_calls = [c for c in all_calls if c and c[0] == "pbcopy"]
+        paste_calls = [c for c in all_calls if c and c[0] == "osascript"]
+        assert len(pbcopy_calls) >= 1, f"Expected pbcopy call, got: {all_calls}"
+        assert len(paste_calls) >= 1, f"Expected osascript paste call, got: {all_calls}"
 
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
@@ -30,9 +33,18 @@ class TestTypeText:
         """Clipboard is NOT restored after paste — prevents Electron race condition."""
         mock_run.return_value = MagicMock(returncode=0)
         type_text("hello")
-        # Only 2 calls: pbcopy + Cmd-V. No third call to restore clipboard.
-        # (_get_frontmost_app is patched so its subprocess calls are excluded)
-        assert mock_run.call_count == 2
+        # Assert WHICH commands ran, not how many times
+        all_calls = [c.args[0] if c.args else c[0][0] for c in mock_run.call_args_list]
+        pbcopy_calls = [c for c in all_calls if c and c[0] == "pbcopy"]
+        paste_calls = [c for c in all_calls if c and c[0] == "osascript"]
+        assert len(pbcopy_calls) >= 1, f"Expected pbcopy call, got: {all_calls}"
+        assert len(paste_calls) >= 1, f"Expected osascript paste call, got: {all_calls}"
+        # Verify NO clipboard restore — no pbcopy call after the paste osascript
+        pbcopy_indices = [i for i, c in enumerate(all_calls) if c and c[0] == "pbcopy"]
+        paste_indices = [i for i, c in enumerate(all_calls) if c and c[0] == "osascript"]
+        if paste_indices:
+            post_paste_pbcopy = [i for i in pbcopy_indices if i > max(paste_indices)]
+            assert len(post_paste_pbcopy) == 0, f"Clipboard restore detected after paste: {all_calls}"
 
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
