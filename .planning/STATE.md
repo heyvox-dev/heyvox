@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Polish & Reliability
 status: executing
-stopped_at: Completed 10-test-stability-03-PLAN.md
-last_updated: "2026-04-12T07:46:41.631Z"
+stopped_at: Completed 11-tech-debt-cleanup-01-PLAN.md
+last_updated: "2026-04-12T09:51:46.648Z"
 last_activity: 2026-04-12
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 9
-  total_plans: 25
-  completed_plans: 27
+  total_plans: 27
+  completed_plans: 28
   percent: 25
 ---
 
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-12)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 10 — test-stability
+**Current focus:** Phase 11 — tech-debt-cleanup
 
 ## Current Position
 
-Phase: 10 (test-stability) — EXECUTING
-Plan: 2 of 3
+Phase: 11 (tech-debt-cleanup) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
 Last activity: 2026-04-12
 
@@ -69,6 +69,7 @@ Key decisions for v1.2:
 - Paste timing: 50-100ms Electron settle delay is from competitor patterns, not measured. Validate empirically with Claude Code and Cursor in Phase 12 before adding per-app config overhead.
 - [Phase 10-test-stability]: Use pytestmark + addopts to exclude integration tests from default run — composable and explicit
 - [Phase 10-test-stability]: Intent-based subprocess assertions (filter by command name) instead of call_count for injection tests — decoupled from implementation details
+- [Phase 11-tech-debt-cleanup]: Migrate tests before deleting shims (separate commits) ensures tests never reference deleted code
 
 ### Pending Todos
 
@@ -83,6 +84,6 @@ Key decisions for v1.2:
 
 ## Session Continuity
 
-Last session: 2026-04-12T07:46:41.628Z
-Stopped at: Completed 10-test-stability-03-PLAN.md
+Last session: 2026-04-12T09:51:46.645Z
+Stopped at: Completed 11-tech-debt-cleanup-01-PLAN.md
 Resume with: `/gsd:plan-phase 11`
