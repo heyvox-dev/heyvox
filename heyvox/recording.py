@@ -239,11 +239,14 @@ class RecordingStateMachine:
         audio_cue("listening", cues_dir)
         self._hud_send({"type": "state", "state": "listening"})
         self._log("Recording started. Waiting for stop wake word.")
-        print(
-            f"[recording] Started, target="
-            f"{self.ctx.recording_target.app_name if self.ctx.recording_target else 'None'}",
-            file=sys.stderr,
-        )
+        try:
+            print(
+                f"[recording] Started, target="
+                f"{self.ctx.recording_target.app_name if self.ctx.recording_target else 'None'}",
+                file=sys.stderr,
+            )
+        except (BrokenPipeError, OSError):
+            pass
 
     def stop(self) -> None:
         """End a recording session and dispatch transcription.
@@ -428,7 +431,10 @@ class RecordingStateMachine:
                 return
 
             self._log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
-            print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
+            try:
+                print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
+            except (BrokenPipeError, OSError):
+                pass
             t0 = time.time()
             text = transcribe_audio(
                 audio_chunks,
@@ -589,11 +595,14 @@ class RecordingStateMachine:
                 f"mode={'PTT' if ptt else 'wake word'}, "
                 f"text={len(paste_text)} chars: {paste_text[:60]!r}"
             )
-            print(
-                f"[recording] Injecting -> {target_app or 'frontmost'} "
-                f"(window={target_window!r})",
-                file=sys.stderr,
-            )
+            try:
+                print(
+                    f"[recording] Injecting -> {target_app or 'frontmost'} "
+                    f"(window={target_window!r})",
+                    file=sys.stderr,
+                )
+            except (BrokenPipeError, OSError):
+                pass
 
             # Save the user's current focus so we can restore it if injection
             # steals focus from the SAME app they're already in.

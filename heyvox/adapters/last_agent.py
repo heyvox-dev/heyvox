@@ -13,6 +13,13 @@ import threading
 import time
 
 
+def _safe_stderr(msg: str) -> None:
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError):
+        pass
+
+
 class LastAgentAdapter:
     """Track the most recently focused AI agent for auto-send decisions.
 
@@ -48,7 +55,7 @@ class LastAgentAdapter:
                 import AppKit
                 workspace = AppKit.NSWorkspace.sharedWorkspace()
             except Exception as e:
-                print(f"[last-agent] AppKit unavailable: {e}", file=sys.stderr)
+                _safe_stderr(f"[last-agent] AppKit unavailable: {e}")
                 return
 
             _first_match = True
@@ -64,11 +71,11 @@ class LastAgentAdapter:
                                     changed = self._last_agent_name != name
                                     self._last_agent_name = name
                                 if changed or _first_match:
-                                    print(f"[last-agent] Tracked: {name}", file=sys.stderr)
+                                    _safe_stderr(f"[last-agent] Tracked: {name}")
                                     _first_match = False
                                 break
                 except Exception as e:
-                    print(f"[last-agent] Poll error: {e}", file=sys.stderr)
+                    _safe_stderr(f"[last-agent] Poll error: {e}")
                 time.sleep(1.0)
 
         t = threading.Thread(target=_poll, daemon=True, name="vox-last-agent-observer")
@@ -86,19 +93,19 @@ class LastAgentAdapter:
         try:
             from heyvox.input.conductor import is_available, inject_message, find_active_session
             if not is_available():
-                print("[last-agent] Conductor socket not available, falling back to paste", file=sys.stderr)
+                _safe_stderr("[last-agent] Conductor socket not available, falling back to paste")
                 return False
 
             result = find_active_session()
             if result is None:
-                print("[last-agent] No active Conductor session found", file=sys.stderr)
+                _safe_stderr("[last-agent] No active Conductor session found")
                 return False
 
             session_id, cwd = result
-            print(f"[last-agent] Conductor socket: session={session_id[:8]}... cwd={cwd}", file=sys.stderr)
+            _safe_stderr(f"[last-agent] Conductor socket: session={session_id[:8]}... cwd={cwd}")
             return inject_message(session_id, text, cwd)
         except Exception as e:
-            print(f"[last-agent] Conductor injection error: {e}", file=sys.stderr)
+            _safe_stderr(f"[last-agent] Conductor injection error: {e}")
             return False
 
     def inject_text(self, text: str) -> None:
@@ -109,15 +116,15 @@ class LastAgentAdapter:
         """
         from heyvox.input.injection import focus_app, type_text
         self._last_injected_via_conductor = False
-        print(f"[last-agent] inject_text: _last_agent_name={self._last_agent_name!r}", file=sys.stderr)
+        _safe_stderr(f"[last-agent] inject_text: _last_agent_name={self._last_agent_name!r}")
 
         # Try Conductor socket injection first (no focus switch needed)
         if self._is_conductor_target():
             if self._try_conductor_injection(text):
                 self._last_injected_via_conductor = True
-                print("[last-agent] Injected via Conductor socket (no focus switch)", file=sys.stderr)
+                _safe_stderr("[last-agent] Injected via Conductor socket (no focus switch)")
                 return
-            print("[last-agent] Conductor socket failed, falling back to paste", file=sys.stderr)
+            _safe_stderr("[last-agent] Conductor socket failed, falling back to paste")
 
         # Fallback: focus app + clipboard + Cmd-V
         if self._last_agent_name:
@@ -133,7 +140,7 @@ class LastAgentAdapter:
         message is delivered directly to the session.
         """
         if self._last_injected_via_conductor:
-            print(f"[last-agent] should_auto_send=False (Conductor socket)", file=sys.stderr, flush=True)
+            _safe_stderr("[last-agent] should_auto_send=False (Conductor socket)")
             return False
-        print(f"[last-agent] should_auto_send=True, last_agent={self._last_agent_name}", file=sys.stderr, flush=True)
+        _safe_stderr(f"[last-agent] should_auto_send=True, last_agent={self._last_agent_name}")
         return True
