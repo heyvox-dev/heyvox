@@ -60,20 +60,20 @@ class ChromeBridge:
         """Start the WebSocket server."""
         # Import here to keep the module importable without websockets installed
         try:
-            import websockets  # noqa: F401
+            from websockets.asyncio.server import serve as _ws_serve
         except ImportError:
             logger.error(
                 "websockets package required: pip install websockets"
             )
             raise
 
-        import websockets.server
-
-        self._server = await websockets.server.serve(
+        # websockets 13+ uses websockets.asyncio.server.serve (the legacy
+        # websockets.server.serve API is deprecated and raises DeprecationWarning).
+        self._server = await _ws_serve(
             self._handler,
             self.host,
             self.port,
-        )
+        ).__aenter__()
         logger.info("Chrome bridge listening on ws://%s:%d", self.host, self.port)
 
     async def stop(self) -> None:
