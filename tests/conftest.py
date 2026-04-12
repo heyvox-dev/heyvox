@@ -68,6 +68,11 @@ def isolate_flags(tmp_path, monkeypatch):
     except AttributeError:
         pass
 
+    try:
+        monkeypatch.setattr("heyvox.recording.RECORDING_FLAG", rec_flag)
+    except AttributeError:
+        pass
+
     yield {
         "recording_flag": rec_flag,
         "tts_flag": tts_flag,

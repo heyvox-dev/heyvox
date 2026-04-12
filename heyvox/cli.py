@@ -78,9 +78,13 @@ def _cmd_status(args):
     print(f"  Verbosity:  {get_verbosity()}")
     print(f"  Muted:      {mute_str}")
 
+    from heyvox.constants import (
+        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_ORCH_PID,
+        KOKORO_DAEMON_SOCK, KOKORO_DAEMON_PID, HUD_SOCKET_PATH,
+    )
     # Queue
-    queue_files = glob.glob("/tmp/herald-queue/*.wav")
-    hold_files = glob.glob("/tmp/herald-hold/*.wav")
+    queue_files = glob.glob(HERALD_QUEUE_DIR + "/*.wav")
+    hold_files = glob.glob(HERALD_HOLD_DIR + "/*.wav")
     print(f"  Queue:      {len(queue_files)} queued, {len(hold_files)} held")
 
     # Daemons
@@ -93,9 +97,9 @@ def _cmd_status(args):
         except Exception:
             return False
 
-    orch = "running" if _pid_alive("/tmp/herald-orchestrator.pid") else "stopped"
-    kokoro = "running" if (os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")) else "stopped"
-    hud = "running" if os.path.exists("/tmp/heyvox-hud.sock") else "stopped"
+    orch = "running" if _pid_alive(HERALD_ORCH_PID) else "stopped"
+    kokoro = "running" if (os.path.exists(KOKORO_DAEMON_SOCK) and _pid_alive(KOKORO_DAEMON_PID)) else "stopped"
+    hud = "running" if os.path.exists(HUD_SOCKET_PATH) else "stopped"
     print(f"  Orchestrator: {orch}")
     print(f"  Kokoro TTS:   {kokoro}")
     print(f"  HUD:          {hud}")
@@ -402,6 +406,46 @@ def _cmd_bugreport(args):
         print(report)
 
 
+def _cmd_conductor_inject(args):
+    """Inject text into a Conductor session via sidecar socket.
+
+    Used for testing the direct-injection path that bypasses clipboard + focus.
+    """
+    from heyvox.input.conductor import (
+        is_available, inject_message, find_active_session,
+        find_session_for_workspace,
+    )
+
+    if not is_available():
+        print("ERROR: Conductor sidecar not available", file=sys.stderr)
+        sys.exit(1)
+
+    text = args.text
+    workspace = getattr(args, "workspace", None)
+
+    if workspace:
+        result = find_session_for_workspace(workspace)
+        if result is None:
+            print(f"ERROR: No session found for workspace '{workspace}'", file=sys.stderr)
+            sys.exit(1)
+        session_id, cwd = result
+    else:
+        result = find_active_session()
+        if result is None:
+            print("ERROR: No active Conductor session found", file=sys.stderr)
+            sys.exit(1)
+        session_id, cwd = result
+
+    print(f"Session: {session_id[:8]}...")
+    print(f"CWD: {cwd}")
+    print(f"Text: {text[:80]}{'...' if len(text) > 80 else ''}")
+
+    if inject_message(session_id, text, cwd):
+        print("OK: Message injected via Conductor socket")
+    else:
+        print("FAILED: Socket injection failed", file=sys.stderr)
+        sys.exit(1)
+
 def _cmd_register(args):
     """Register (or re-register) HeyVox MCP server with AI coding agents."""
     from heyvox.setup.wizard import _detect_mcp_agents, _register_mcp_agent
@@ -608,6 +652,18 @@ def main():
     )
     sub_bugreport.set_defaults(func=_cmd_bugreport)
 
+
+    # conductor-inject — test direct socket injection into Conductor
+    sub_inject = subparsers.add_parser(
+        "conductor-inject",
+        help="Inject text into a Conductor session via sidecar socket (test)",
+    )
+    sub_inject.add_argument("text", help="Text to inject as a user message")
+    sub_inject.add_argument(
+        "--workspace", "-w",
+        help="Target workspace directory name (default: most recently active)",
+    )
+    sub_inject.set_defaults(func=_cmd_conductor_inject)
     # register — register MCP server with AI agents
     sub_register = subparsers.add_parser("register", help="Register HeyVox MCP server with AI coding agents")
     sub_register.add_argument(

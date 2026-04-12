@@ -36,7 +36,7 @@ def _get_frontmost_app() -> str:
         return "?"
 
 # Hush native messaging host socket
-HUSH_SOCKET = "/tmp/hush.sock"
+from heyvox.constants import HUSH_SOCK as HUSH_SOCKET
 HUSH_TIMEOUT = 2.0  # seconds
 
 

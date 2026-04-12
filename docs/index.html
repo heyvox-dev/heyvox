@@ -205,7 +205,7 @@
 
     .hero-install {
       display: inline-flex;
-      align-items: flex-start;
+      align-items: center;
       gap: 12px;
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -216,8 +216,6 @@
       color: #a5b4fc;
       margin-bottom: 36px;
       letter-spacing: 0.01em;
-      position: relative;
-      text-align: left;
     }
 
     .hero-install .prompt {
@@ -912,6 +910,7 @@
       <li><a href="#conversation">The conversation</a></li>
       <li><a href="#how-it-works">How it works</a></li>
       <li><a href="#features">Features</a></li>
+      <li><a href="#install">Install</a></li>
       <li><a href="#privacy">Privacy</a></li>
       <li><a href="https://github.com/heyvox-dev/heyvox" class="nav-cta">GitHub</a></li>
     </ul>
@@ -933,16 +932,9 @@
           Voice layer runs fully local. Open source. Zero cloud fees.
         </p>
 
-        <div class="hero-install" style="flex-direction:column;gap:4px;align-items:flex-start;">
-          <div><span class="prompt">$</span> git clone https://github.com/heyvox-dev/heyvox.git</div>
-          <div><span class="prompt">$</span> cd heyvox &amp;&amp; pip install -e ".[apple-silicon]"</div>
-          <div><span class="prompt">$</span> heyvox setup</div>
-          <button class="copy-btn" id="hero-copy" title="Copy" style="position:absolute;right:16px;top:16px;">Copy</button>
-        </div>
-
         <div class="hero-actions">
-          <a href="https://github.com/heyvox-dev/heyvox#install" class="btn btn-primary">
-            Get Started
+          <a href="#early-access" class="btn btn-primary">
+            Request Early Access
           </a>
           <a href="https://github.com/heyvox-dev/heyvox" class="btn btn-secondary">
             View on GitHub
@@ -1162,6 +1154,36 @@
     </div>
   </section>
 
+  <!-- ── INSTALL ── -->
+  <section id="install">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-label">Install (beta testers)</div>
+        <h2>Up and running in minutes</h2>
+        <p class="section-sub">For early access testers. Requires macOS 14+, Python 3.12+, and Apple Silicon (Intel supported via sherpa-onnx).</p>
+      </div>
+
+      <div class="install-box reveal">
+        <pre><span class="line-comment"># 1. Install system dependency</span>
+<span class="line-cmd">brew install portaudio</span>
+
+<span class="line-comment"># 2. Clone and install</span>
+<span class="line-cmd">git clone https://github.com/heyvox-dev/heyvox.git</span>
+<span class="line-cmd">cd heyvox</span>
+<span class="line-cmd">pip install -e ".[apple-silicon,chrome]"</span>
+
+<span class="line-comment"># 3. Run setup wizard</span>
+<span class="line-cmd">heyvox setup</span></pre>
+      </div>
+
+      <p class="install-note reveal">
+        The <strong>setup wizard</strong> walks you through permissions (Microphone, Accessibility),
+        model download, mic test, config generation, launchd service, Herald TTS hooks for Claude Code,
+        and MCP server registration &mdash; all in one guided flow.
+      </p>
+    </div>
+  </section>
+
   <!-- ── PRIVACY ── -->
   <section id="privacy">
     <div class="container">
@@ -1252,18 +1274,19 @@
     </div>
   </section>
 
-  <!-- ── GET STARTED CTA ── -->
+  <!-- ── EARLY ACCESS CTA ── -->
   <section id="early-access">
     <div class="container">
       <div class="ea-box reveal">
-        <div class="section-label">Open source</div>
-        <h2>Get started in 2 minutes</h2>
+        <div class="section-label">Early access</div>
+        <h2>Join the beta</h2>
         <p>
-          HeyVox is open source and free. Clone, install, run the setup wizard &mdash;
-          you&rsquo;ll be voice coding before your coffee gets cold.
+          HeyVox is in early access. We&rsquo;re onboarding testers who use
+          AI coding agents daily and want a real voice workflow.
+          Tell us what agent you use and we&rsquo;ll get you set up.
         </p>
-        <a href="https://github.com/heyvox-dev/heyvox#install" class="btn btn-primary">
-          Install from GitHub
+        <a href="mailto:hello@heyvox.dev?subject=HeyVox%20Early%20Access&body=Agent%20I%20use%3A%20%0AMac%20chip%3A%20Apple%20Silicon%20%2F%20Intel%0AWhy%20I%20want%20voice%20coding%3A%20" class="btn btn-primary">
+          Request Access
         </a>
       </div>
     </div>
@@ -1307,16 +1330,6 @@
 
     document.querySelectorAll(".reveal:not(.visible)").forEach(el => {
       observer.observe(el);
-    });
-
-    // ── Copy install command ──
-    document.getElementById("hero-copy").addEventListener("click", function() {
-      var cmd = "git clone https://github.com/heyvox-dev/heyvox.git && cd heyvox && pip install -e '.[apple-silicon]' && heyvox setup";
-      var btn = this;
-      navigator.clipboard.writeText(cmd).then(function() {
-        btn.textContent = "Copied!";
-        setTimeout(function() { btn.textContent = "Copy"; }, 1500);
-      });
     });
 
   </script>

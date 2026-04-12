@@ -120,3 +120,94 @@ ACTIVE_MIC_FILE = "/tmp/heyvox-active-mic"
 # Mic switch request file — written by HUD overlay menu action.
 # Contains the device name substring to switch to. Read and deleted by main.py.
 MIC_SWITCH_REQUEST_FILE = "/tmp/heyvox-mic-switch"
+
+# ---------------------------------------------------------------------------
+# Herald TTS orchestration constants (Phase 7)
+# ---------------------------------------------------------------------------
+
+# Herald queue/hold/history directories — WAV files pass through these.
+# Queue: ready to play. Hold: from inactive workspace, held until user idle.
+# History: last 50 played (for debugging).
+HERALD_QUEUE_DIR = "/tmp/herald-queue"
+HERALD_HOLD_DIR = "/tmp/herald-hold"
+HERALD_HISTORY_DIR = "/tmp/herald-history"
+HERALD_CLAIM_DIR = "/tmp/herald-claim"
+
+# Herald log files
+HERALD_DEBUG_LOG = "/tmp/herald-debug.log"
+HERALD_VIOLATIONS_LOG = "/tmp/herald-violations.log"
+
+# Herald PID files
+HERALD_ORCH_PID = "/tmp/herald-orchestrator.pid"
+HERALD_PLAYING_PID = "/tmp/herald-playing.pid"
+
+# Herald state flag files
+HERALD_PAUSE_FLAG = "/tmp/herald-pause"
+HERALD_MUTE_FLAG = "/tmp/herald-mute"
+HERALD_MODE_FILE = "/tmp/herald-mode"
+HERALD_LAST_PLAY = "/tmp/herald-last-play"
+HERALD_PLAY_NEXT = "/tmp/herald-play-next"
+
+# Kokoro TTS daemon IPC — Unix socket + PID file
+KOKORO_DAEMON_SOCK = "/tmp/kokoro-daemon.sock"
+KOKORO_DAEMON_PID = "/tmp/kokoro-daemon.pid"
+
+# ---------------------------------------------------------------------------
+# Core process files (IPC-01)
+# ---------------------------------------------------------------------------
+
+HEYVOX_PID_FILE = "/tmp/heyvox.pid"
+HEYVOX_HEARTBEAT_FILE = "/tmp/heyvox-heartbeat"
+HEYVOX_RESTART_LOG = "/tmp/heyvox-restart.log"
+
+# ---------------------------------------------------------------------------
+# Legacy compatibility (v1.0 claude-tts paths)
+# ---------------------------------------------------------------------------
+
+CLAUDE_TTS_MUTE_FLAG = "/tmp/claude-tts-mute"
+CLAUDE_TTS_PLAYING_PID = "/tmp/claude-tts-playing.pid"
+
+# ---------------------------------------------------------------------------
+# Herald workspace/ambient (IPC-01)
+# ---------------------------------------------------------------------------
+
+HERALD_AMBIENT_FLAG = "/tmp/herald-ambient"
+HERALD_WORKSPACE_FILE = "/tmp/herald-workspace"
+HERALD_ORIGINAL_VOL_FILE = "/tmp/herald-original-vol"
+HERALD_GENERATING_WAV_PREFIX = "/tmp/herald-generating-"
+HERALD_WATCHER_PID = "/tmp/herald-watcher.pid"
+HERALD_WATCHER_HANDLED_DIR = "/tmp/herald-watcher-handled"
+HERALD_MEDIA_PAUSED_PREFIX = "/tmp/herald-media-paused-"
+
+# ---------------------------------------------------------------------------
+# HUD files (IPC-01)
+# ---------------------------------------------------------------------------
+
+HUD_POSITION_FILE = "/tmp/heyvox-hud-position.json"
+HUD_STDERR_LOG = "/tmp/heyvox-hud-stderr.log"
+
+# ---------------------------------------------------------------------------
+# TTS style (IPC-01)
+# ---------------------------------------------------------------------------
+
+TTS_STYLE_FILE = "/tmp/heyvox-tts-style"
+
+# ---------------------------------------------------------------------------
+# Media pause coordination (IPC-01)
+# ---------------------------------------------------------------------------
+
+HEYVOX_MEDIA_PAUSED_REC = "/tmp/heyvox-media-paused-rec"
+HEYVOX_MEDIA_PAUSED_PREFIX = "/tmp/heyvox-media-paused-"
+
+# ---------------------------------------------------------------------------
+# Hush (browser media control) (IPC-01)
+# ---------------------------------------------------------------------------
+
+HUSH_SOCK = "/tmp/hush.sock"
+HUSH_LOG = "/tmp/hush.log"
+
+# ---------------------------------------------------------------------------
+# Atomic state file (IPC-02)
+# ---------------------------------------------------------------------------
+
+HEYVOX_STATE_FILE = "/tmp/heyvox-state.json"

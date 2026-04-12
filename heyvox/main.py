@@ -15,302 +15,73 @@ import sys
 import time
 import signal
 import threading
-import subprocess
-
 import numpy as np
-import pyaudio
 
 from heyvox.config import load_config, HeyvoxConfig
+from heyvox.app_context import AppContext
+from heyvox.device_manager import DeviceManager
+from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
     STT_DEBUG_DIR,
-    ACTIVE_MIC_FILE,
-    MIC_SWITCH_REQUEST_FILE,
+    LOG_FILE_DEFAULT,
+    HEYVOX_PID_FILE,
+    HEYVOX_HEARTBEAT_FILE,
+    HEYVOX_MEDIA_PAUSED_REC,
+    HEYVOX_MEDIA_PAUSED_PREFIX,
+    HERALD_MEDIA_PAUSED_PREFIX,
+    HERALD_PAUSE_FLAG,
+    HERALD_MUTE_FLAG,
+    HERALD_AMBIENT_FLAG,
+    HERALD_MODE_FILE,
+    HERALD_LAST_PLAY,
+    HERALD_WORKSPACE_FILE,
+    HERALD_GENERATING_WAV_PREFIX,
+    CLAUDE_TTS_MUTE_FLAG,
+    CLAUDE_TTS_PLAYING_PID,
+    HERALD_PLAYING_PID,
+    VERBOSITY_FILE,
 )
-from heyvox.audio.mic import find_best_mic, open_mic_stream, detect_headset, get_dead_input_device_names
-from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir, device_change_cue
-from heyvox.audio.stt import init_local_stt, transcribe_audio
-from heyvox.audio.tts import check_voice_command, execute_voice_command
-from heyvox.input.injection import type_text, save_frontmost_pid, restore_frontmost
-from heyvox.input.target import snapshot_target, restore_target
+from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
+from heyvox.audio.stt import init_local_stt
+from heyvox.hud.process import (
+    launch_hud_overlay,
+    stop_hud_overlay,
+    kill_orphan_indicators,
+    kill_duplicate_overlays,
+    get_indicator_proc,
+)
+
+# Backward-compat re-exports (tests import these; remove in Phase 9)
+from heyvox.text_processing import (
+    is_garbled as _is_garbled,
+    strip_wake_words as _strip_wake_words,
+    _WAKE_WORD_PHRASES,
+)
+from heyvox.recording import _audio_rms, _save_debug_audio, _release_recording_guard
+_MIN_AUDIO_DBFS = -60.0  # Re-exported for test_wakeword_trim.py
 
 
 # ---------------------------------------------------------------------------
-# State (protected by _state_lock)
+# Constants (non-global; kept at module level as read-only configuration)
 # ---------------------------------------------------------------------------
 
-_state_lock = threading.Lock()
-is_recording = False
-recording_start_time = 0.0
-busy = False
-_audio_buffer = []
-_triggered_by_ptt = False
-_recording_target = None  # TargetSnapshot: app + text field at recording start
-_cancel_transcription = threading.Event()
-_shutdown = threading.Event()
-_cancel_requested = threading.Event()  # Set by SIGUSR1 signal, checked in main loop
-_adapter = None  # Initialized in main() via _build_adapter(config)
-_last_inject_time = 0.0
-_inject_lock = threading.Lock()
-_INJECT_DEDUP_SECS = 2.0  # Suppress duplicate injections within this window
-
-# ---------------------------------------------------------------------------
-# Zombie stream detection (AUDIO-12)
-# Tracks consecutive failed recordings to detect corrupted audio streams
-# that pass the level-based health check but produce unusable audio.
-# ---------------------------------------------------------------------------
-_consecutive_failed_recordings = 0
-_zombie_mic_reinit = False  # Set True to force mic reinit on next main loop iteration
+_INJECT_DEDUP_SECS = 2.0    # Suppress duplicate injections within this window
 _ZOMBIE_FAIL_THRESHOLD = 2  # Force reinit after N consecutive failed recordings
-_busy_since: float = 0.0  # Timestamp when busy flag was set (watchdog)
-_BUSY_TIMEOUT = 60.0  # Force-reset busy after this many seconds
-
-# ---------------------------------------------------------------------------
-# HUD client state (Phase 5 — optional, never crashes main loop)
-# ---------------------------------------------------------------------------
-
-_hud_client = None
-_hud_last_reconnect = 0.0
+_BUSY_TIMEOUT = 60.0        # Force-reset busy after this many seconds
+_DEAD_MIC_TIMEOUT = 30.0    # Force reinit after this many seconds of silence
 _HUD_RECONNECT_INTERVAL = 1.0  # Retry every 1s (fast reconnect after overlay startup)
-_HUD_LEVEL_INTERVAL = 0.05  # 20fps throttle for audio_level messages
-_hud_last_level_send = 0.0
-
-
-def _hud_send(msg: dict) -> None:
-    """Send a message to the HUD overlay. No-op if not connected.
-
-    All HUD sends are wrapped here so the rest of the code never has to
-    guard against HUD failures — the HUD is strictly optional.
-    Auto-reconnects if socket is disconnected (handles overlay startup delay).
-    """
-    global _hud_client, _hud_last_reconnect
-    if _hud_client is None:
-        log(f"[HUD-DBG] _hud_client is None, skipping {msg.get('type')}")
-        return
-    # Auto-reconnect if socket dropped (e.g. overlay just started)
-    if _hud_client._sock is None:
-        now = time.time()
-        if now - _hud_last_reconnect < _HUD_RECONNECT_INTERVAL:
-            return
-        _hud_last_reconnect = now
-        log(f"[HUD-DBG] Attempting reconnect for {msg.get('type')}...")
-        try:
-            _hud_client.reconnect()
-        except Exception as e:
-            log(f"[HUD-DBG] Reconnect failed: {e}")
-            return
-        if _hud_client._sock is None:
-            log("[HUD-DBG] Reconnect succeeded but sock still None")
-            return
-        log("[HUD-DBG] Reconnected!")
-    try:
-        _hud_client.send(msg)
-        log(f"[HUD-DBG] Sent {msg.get('type')}: {msg.get('state', '')}")
-    except Exception as e:
-        log(f"[HUD-DBG] Send failed: {e}")
-
-
-def _hud_ensure_connected() -> None:
-    """Attempt periodic reconnect if the HUD connection was lost.
-
-    Called in the idle section of the main loop to recover after
-    HUD restart without requiring a full heyvox restart.
-    """
-    global _hud_client, _hud_last_reconnect
-    if _hud_client is None:
-        return
-    # Already connected — nothing to do
-    if _hud_client._sock is not None:
-        return
-    now = time.time()
-    if now - _hud_last_reconnect >= _HUD_RECONNECT_INTERVAL:
-        _hud_last_reconnect = now
-        try:
-            _hud_client.reconnect()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Wake word stripping from transcriptions
-# ---------------------------------------------------------------------------
-
-# Common transcription variants of wake word model names.
-# Whisper may transcribe "hey_jarvis_v0.1" as "Hey Jarvis", "hey jarvis",
-# "Hey, Jarvis", "Hey Travis", "Hey Chavez", etc.
-_WAKE_WORD_PHRASES: dict[str, list[str]] = {
-    "hey_jarvis": [
-        "hey jarvis", "hey, jarvis",
-        "hey travis", "hey, travis",
-        "hey chavez", "hey, chavez",
-        "hey chavis", "hey, chavis",
-        "hey charmis", "hey, charmis",
-        "hey charvis", "hey, charvis",
-        "hey charles", "hey, charles",
-        "hey javis", "hey, javis",
-        "hey javi", "hey, javi",
-        "hey java", "hey, java",
-        "hey job is", "hey job",
-        "hey charisma",
-        "hey javas", "hey, javas",
-        "h-arvis", "h arvis",
-        "jarvis", "jarvis.",
-        "hrvs", "hrs", "hr",
-        "j.a.r.v.i.s", "jar",
-    ],
-    "hey_vox": [
-        "hey vox", "hey, vox",
-        "hey box", "hey, box",
-        "hey fox", "hey, fox",
-        "hey vocs", "hey, vocs",
-        "hey vokes", "hey, vokes",
-        "hey vos", "hey, vos",
-        "hey boks", "hey, boks",
-        "hey vaux", "hey, vaux",
-        "hey voxx", "hey, voxx",
-        "hey rocks", "hey, rocks",
-        "hey docs", "hey, docs",
-        "hey locks", "hey, locks",
-        "hey socks", "hey, socks",
-        "vox", "vox.",
-    ],
-}
-
-
-def _is_garbled(text: str) -> bool:
-    """Detect garbled/nonsensical STT output from accidental wake word triggers.
-
-    Catches common Whisper hallucination patterns:
-    - Excessive repeated words/phrases
-    - Mostly non-alphanumeric characters
-    - Known Whisper filler hallucinations
-    """
-    import re
-
-    cleaned = text.strip()
-    if not cleaned:
-        return False
-
-    # Too short to be useful (single word that isn't a command)
-    words = cleaned.split()
-    if len(words) <= 1 and len(cleaned) < 4:
-        return True
-
-    # High ratio of repeated words (e.g. "the the the the")
-    if len(words) >= 4:
-        unique = set(w.lower() for w in words)
-        if len(unique) / len(words) < 0.25:
-            return True
-
-    # Repeated phrases: split into bigrams and check repetition
-    if len(words) >= 6:
-        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
-        unique_bigrams = set(b.lower() for b in bigrams)
-        if len(unique_bigrams) / len(bigrams) < 0.3:
-            return True
-
-    # Mostly non-letter characters (Unicode garbage)
-    alpha_chars = sum(1 for c in cleaned if c.isalpha())
-    if len(cleaned) > 3 and alpha_chars / len(cleaned) < 0.4:
-        return True
-
-    # Known Whisper hallucination patterns
-    hallucination_patterns = [
-        r"^\.+$",                          # Just dots
-        r"^[\s.,:;!?]+$",                  # Just punctuation
-        r"(?i)^(thanks? for watching|subscribe)",  # YouTube artifacts
-        r"(?i)^(music|applause|laughter)\s*$",     # Sound descriptions
-        r"(?i)^you$",                       # Common short hallucination
-    ]
-    for pattern in hallucination_patterns:
-        if re.match(pattern, cleaned):
-            return True
-
-    return False
-
-
-def _strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
-    """Remove wake word phrases from the beginning and end of transcription.
-
-    Whisper transcribes the wake word along with the user's speech. Since the
-    wake word is just a trigger mechanism, it should not appear in the injected
-    text. Uses both an explicit phrase list AND a fuzzy regex fallback to catch
-    novel Whisper mistranscriptions (e.g. "Hey Chavis", "Hey Job is").
-
-    Args:
-        text: Raw transcription from STT.
-        start_model: Wake word model name for start trigger (e.g. "hey_jarvis_v0.1").
-        stop_model: Wake word model name for stop trigger.
-
-    Returns:
-        Cleaned text with wake word phrases removed from start/end.
-    """
-    import re
-
-    if not text:
-        return text
-
-    # Collect all known phrases for the configured wake word models
-    phrases = set()
-    for model in (start_model, stop_model):
-        # Strip version suffix: "hey_jarvis_v0.1" → "hey_jarvis"
-        base = model.rsplit("_v", 1)[0] if "_v" in model else model
-        if base in _WAKE_WORD_PHRASES:
-            phrases.update(_WAKE_WORD_PHRASES[base])
-        # Also add the raw model name as a phrase (underscores → spaces)
-        phrases.add(base.replace("_", " "))
-
-    # Sort longest first so "hey, jarvis" matches before "hey"
-    sorted_phrases = sorted(phrases, key=len, reverse=True)
-
-    cleaned = text.strip()
-
-    # --- Pass 1: Exact phrase matching (handles known variants) ---
-    stripped = False
-
-    # Strip from end first (stop wake word)
-    for phrase in sorted_phrases:
-        lower = cleaned.lower().rstrip(" .,!?")
-        if lower.endswith(phrase):
-            idx = len(cleaned.rstrip(" .,!?")) - len(phrase)
-            cleaned = cleaned[:idx].rstrip(" .,!?")
-            stripped = True
-            break
-
-    # Strip from start (start wake word — happens with toggle mode)
-    for phrase in sorted_phrases:
-        lower = cleaned.lower().lstrip(" .,!?")
-        if lower.startswith(phrase):
-            cleaned = cleaned[len(phrase):].lstrip(" .,!?")
-            stripped = True
-            break
-
-    # --- Pass 2: Fuzzy regex fallback (catches novel Whisper variants) ---
-    # Matches "Hey <1-2 words>" at start/end that look like wake word attempts.
-    # Only runs if the explicit list didn't already catch something.
-    if not stripped:
-        # Start: "Hey Jarvis/Chavis/Travis/etc." — 1-2 short words after "hey"
-        cleaned = re.sub(
-            r'^[Hh]ey[,.]?\s+\w{2,8}(\s+\w{2,5})?\s*[.,!?]*\s*',
-            '', cleaned, count=1
-        ).strip()
-        # End: same pattern at the end of the text
-        cleaned = re.sub(
-            r'\s*[.,!?]*\s*[Hh]ey[,.]?\s+\w{2,8}(\s+\w{2,5})?[.,!?]*\s*$',
-            '', cleaned, count=1
-        ).strip()
-
-    return cleaned.strip()
+_HUD_LEVEL_INTERVAL = 0.05    # 20fps throttle for audio_level messages
 
 
 # ---------------------------------------------------------------------------
 # Logging (module-level path set from config at startup)
 # ---------------------------------------------------------------------------
 
-_LOG_FILE = "/tmp/heyvox.log"
+_LOG_FILE = LOG_FILE_DEFAULT
 _LOG_MAX_BYTES = 1_000_000
 
 
@@ -324,7 +95,7 @@ def _init_log(log_file: str, log_max_bytes: int) -> None:
 def log(msg: str) -> None:
     """Write timestamped message to log file with rotation.
 
-    Only writes to the file directly — avoids double-logging when
+    Only writes to the file directly -- avoids double-logging when
     stdout is redirected to the same log file.
     """
     ts = time.strftime("%H:%M:%S")
@@ -343,326 +114,21 @@ def log(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Recording indicator (separate process)
+# HUD overlay lifecycle (delegated to heyvox.hud.process)
 # ---------------------------------------------------------------------------
 
-_indicator_proc = None
-_hud_log_fh = None  # stderr log file handle for HUD subprocess
-
-
-def _kill_overlay_pids(pids: list[int]) -> None:
-    """Kill overlay processes by PID. Uses SIGKILL — SIGTERM is unreliable on orphaned AppKit processes."""
-    for pid in pids:
-        try:
-            os.kill(pid, 9)
-        except ProcessLookupError:
-            pass
-    # Wait for macOS to reclaim window server resources (ghost icon cleanup)
-    if pids:
-        time.sleep(0.5)
-
-
-def _kill_orphan_indicators() -> None:
-    """Kill any leftover overlay processes from previous sessions."""
-    my_pid = os.getpid()
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "heyvox.hud.overlay"],
-            capture_output=True, text=True, timeout=3,
-        )
-        pids = []
-        for pid_str in result.stdout.strip().split('\n'):
-            if pid_str.strip():
-                pid = int(pid_str.strip())
-                if pid != my_pid:
-                    pids.append(pid)
-        _kill_overlay_pids(pids)
-    except Exception:
-        pass
-
-
-def _kill_duplicate_overlays(keep_pid: int | None = None) -> None:
-    """Ensure only one overlay process is running. Kill extras."""
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "heyvox.hud.overlay"],
-            capture_output=True, text=True, timeout=3,
-        )
-        pids = [int(p.strip()) for p in result.stdout.strip().split('\n') if p.strip()]
-        if len(pids) <= 1:
-            return
-        to_kill = [pid for pid in pids if pid != keep_pid]
-        _kill_overlay_pids(to_kill)
-        for pid in to_kill:
-            log(f"Killed duplicate overlay (pid={pid})")
-    except Exception:
-        pass
-
-
-def _launch_hud_overlay(menu_bar_only: bool = False) -> None:
-    """Launch the HUD overlay process once. It stays alive for the entire session.
-
-    Kills any orphan/duplicate overlays first to guarantee exactly one instance.
-    """
-    global _indicator_proc, _hud_log_fh
-    if _indicator_proc is not None and _indicator_proc.poll() is None:
-        # Already running — just ensure no duplicates
-        _kill_duplicate_overlays(keep_pid=_indicator_proc.pid)
-        return
-    # Kill anything leftover before launching
-    _kill_orphan_indicators()
-    try:
-        cmd = [sys.executable, "-m", "heyvox.hud.overlay"]
-        if menu_bar_only:
-            cmd.append("--menu-bar-only")
-        # Close previous log handle if restarting overlay
-        if _hud_log_fh is not None:
-            try:
-                _hud_log_fh.close()
-            except OSError:
-                pass
-        _hud_log_fh = open("/tmp/heyvox-hud-stderr.log", "a")
-        _indicator_proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=_hud_log_fh,
-        )
-        log(f"HUD overlay launched (pid={_indicator_proc.pid})")
-    except Exception as e:
-        log(f"WARNING: Could not launch HUD overlay: {e}")
-
-
-def _stop_hud_overlay() -> None:
-    """Terminate the HUD overlay process on shutdown."""
-    global _indicator_proc, _hud_log_fh
-    if _indicator_proc:
-        try:
-            _indicator_proc.terminate()
-            _indicator_proc.wait(timeout=3)
-        except Exception:
-            try:
-                _indicator_proc.kill()
-            except Exception:
-                pass
-        _indicator_proc = None
-    if _hud_log_fh is not None:
-        try:
-            _hud_log_fh.close()
-        except OSError:
-            pass
-        _hud_log_fh = None
-
-
 def _show_recording_indicator(active: bool) -> None:
-    """Legacy recording indicator — now a no-op.
+    """Legacy recording indicator -- now a no-op.
 
     The HUD overlay stays alive for the entire session. State is driven
-    by _hud_send() messages instead of launching/killing processes.
-    Kept for call-site compatibility.
+    by hud_send() messages instead of launching/killing processes.
     """
     pass
 
 
 # ---------------------------------------------------------------------------
-# Recording flow
+# Adapter builder
 # ---------------------------------------------------------------------------
-
-def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None) -> None:
-    """Begin a recording session.
-
-    Sets is_recording flag, signals TTS to pause, plays listening cue,
-    and shows the recording indicator.
-
-    Args:
-        ptt: True if triggered by push-to-talk (affects auto-send behavior).
-        config: HeyvoxConfig instance. Required.
-        preroll: Iterable of audio chunks captured before the wake word trigger.
-            Prepended to the audio buffer so the first words aren't clipped.
-    """
-    global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt, _recording_target
-    if config is None:
-        return
-    if _shutdown.is_set():
-        return  # Don't start recording during shutdown
-
-    with _state_lock:
-        if is_recording:
-            return
-        is_recording = True
-        recording_start_time = time.time()
-        # Pre-roll: prepend recent audio so first words aren't clipped
-        _audio_buffer = list(preroll) if preroll else []
-        _triggered_by_ptt = ptt
-        # Snapshot which app/text field is focused right now, so we can
-        # restore it at injection time even if the user clicks away.
-        _recording_target = snapshot_target()
-        if _recording_target:
-            ws_info = f", conductor_workspace={_recording_target.conductor_workspace!r}" if _recording_target.conductor_workspace else ""
-            log(f"[snapshot] app={_recording_target.app_name}, pid={_recording_target.app_pid}, "
-                f"window={_recording_target.window_title!r}, element={_recording_target.element_role}{ws_info}")
-        else:
-            log("[snapshot] WARNING: no target snapshot (AppKit unavailable?)")
-
-    # Preload STT model in background while user speaks — hides the ~1s
-    # model load latency behind recording time. No-op if already loaded.
-    if config.stt.backend == "local":
-        from heyvox.audio.stt import preload_model
-        preload_model()
-
-    # Signal Herald to pause TTS during recording (TTS-03, DECP-04)
-    # Herald stops current playback and holds new items until resume.
-    try:
-        from heyvox.audio.tts import set_recording as _tts_set_rec
-        _tts_set_rec(True)
-    except ImportError:
-        pass
-
-    # Pause browser/native media during recording (YouTube, Spotify, etc.)
-    # Run in background thread — pause_media() can block for seconds on
-    # osascript calls (Chrome JS access test), which would delay recording start.
-    def _bg_pause():
-        try:
-            from heyvox.audio.media import pause_media
-            pause_media()
-        except Exception as e:
-            log(f"WARNING: media pause failed: {e}")
-    threading.Thread(target=_bg_pause, daemon=True, name="vox-media-pause").start()
-
-    # Write recording flag for cross-process coordination
-    try:
-        with open(RECORDING_FLAG, "w"):
-            pass
-    except Exception:
-        pass
-
-    cues_dir = get_cues_dir(config.cues_dir)
-    audio_cue("listening", cues_dir)
-    _show_recording_indicator(True)
-    _hud_send({"type": "state", "state": "listening"})
-    log("Recording started. Waiting for stop wake word.")
-    print(f"[recording] Started, target={_recording_target.app_name if _recording_target else 'None'}", file=sys.stderr)
-
-
-def stop_recording(config: HeyvoxConfig = None) -> None:
-    """End a recording session and dispatch transcription.
-
-    Checks minimum recording duration, plays feedback cue, and starts
-    the transcription thread.
-
-    Args:
-        config: HeyvoxConfig instance. Required.
-    """
-    global is_recording, busy
-    if config is None:
-        return
-
-    with _state_lock:
-        if not is_recording:
-            return
-        is_recording = False
-        # Set busy immediately to prevent re-entry from other triggers
-        busy = True
-        duration = time.time() - recording_start_time
-        recorded_chunks = list(_audio_buffer)
-        # Capture PTT flag and recording target under lock — _send_local runs on
-        # a daemon thread and must not read globals (could be overwritten by a new recording).
-        ptt_snapshot = _triggered_by_ptt
-        target_snapshot = _recording_target
-
-    log("Stopping recording...")
-    _show_recording_indicator(False)
-    _hud_send({"type": "state", "state": "processing"})
-
-    # Zombie stream detection: track consecutive failed recordings (AUDIO-12)
-    global _consecutive_failed_recordings, _zombie_mic_reinit
-    if len(recorded_chunks) == 0:
-        _consecutive_failed_recordings += 1
-        log(f"WARNING: Recording produced 0 chunks (consecutive failures: {_consecutive_failed_recordings})")
-        if _consecutive_failed_recordings >= _ZOMBIE_FAIL_THRESHOLD:
-            log(f"WARNING: {_ZOMBIE_FAIL_THRESHOLD} consecutive empty recordings — flagging zombie stream for reinit")
-            _zombie_mic_reinit = True
-            _consecutive_failed_recordings = 0
-    else:
-        _consecutive_failed_recordings = 0
-
-    # NOTE: Recording flag (RECORDING_FLAG + _recording_active event) stays set
-    # through the STT→paste pipeline. It is released in _send_local's finally block
-    # (or in the early-exit paths below). This prevents Conductor's TTS hook from
-    # firing and stealing focus while we're still transcribing/pasting.
-
-    cues_dir = get_cues_dir(config.cues_dir)
-
-    if duration < config.min_recording_secs:
-        log(f"Recording too short ({duration:.1f}s < {config.min_recording_secs}s), cancelling")
-        _release_recording_guard()
-        with _state_lock:
-            busy = False
-        try:
-            from heyvox.audio.media import resume_media
-            resume_media()
-        except Exception:
-            pass
-        audio_cue("paused", cues_dir)
-        _hud_send({"type": "state", "state": "idle"})
-        return
-
-    if not ptt_snapshot:
-        audio_cue("ok", cues_dir)
-
-    try:
-        if config.stt.backend == "local":
-            # Compute energy on raw audio BEFORE trimming (wake word is loud,
-            # removing it would make the remaining audio seem quieter)
-            raw_rms_db = _audio_rms(recorded_chunks, config.audio.sample_rate)
-
-            # Save raw audio BEFORE any trimming (for debug analysis)
-            _save_debug_audio("raw", recorded_chunks, config.audio.sample_rate, {
-                "ptt": ptt_snapshot,
-                "raw_rms_dbfs": round(raw_rms_db, 1),
-            })
-
-            if not ptt_snapshot:
-                # Wake word audio trim — remove wake word from both ends so
-                # Whisper never sees it. This is the primary defense; the text-level
-                # _strip_wake_words() is a fallback for imperfect trims.
-                #
-                # Start trim: ~1.5s covers pre-roll buffer (500ms) + wake word (~1000ms).
-                # End trim: 0.5s — conservative, only cuts actual stop wake word.
-                # Without this, pre-roll audio (TTS, system sounds) gets transcribed.
-                ww_start_trim_secs = 1.5
-                ww_end_trim_secs = 0.5
-                start_trim_chunks = int(ww_start_trim_secs * config.audio.sample_rate / config.audio.chunk_size)
-                end_trim_chunks = int(ww_end_trim_secs * config.audio.sample_rate / config.audio.chunk_size)
-
-                pre_trim_count = len(recorded_chunks)
-
-                # Trim start wake word + cue bleed from front
-                if len(recorded_chunks) > start_trim_chunks + end_trim_chunks:
-                    recorded_chunks = recorded_chunks[start_trim_chunks:]
-                # Trim stop wake word from end (only if recording is long enough)
-                if end_trim_chunks > 0 and len(recorded_chunks) > end_trim_chunks:
-                    recorded_chunks = recorded_chunks[:-end_trim_chunks]
-
-                log(f"Audio trim: {pre_trim_count} chunks → {len(recorded_chunks)} "
-                    f"(start={start_trim_chunks}, end={end_trim_chunks})")
-
-                # Save trimmed audio for comparison
-                _save_debug_audio("trimmed", recorded_chunks, config.audio.sample_rate)
-
-            # _send_local has its own finally block that resets busy = False
-            threading.Thread(
-                target=_send_local,
-                args=(duration, recorded_chunks, config, _adapter, raw_rms_db),
-                kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot},
-                daemon=True,
-            ).start()
-    except Exception as e:
-        log(f"ERROR starting transcription: {e}")
-        _release_recording_guard()
-        with _state_lock:
-            busy = False
-        _hud_send({"type": "state", "state": "idle"})
-
 
 def _build_adapter(config: HeyvoxConfig):
     """Resolve the correct adapter from config.target_mode.
@@ -681,329 +147,80 @@ def _build_adapter(config: HeyvoxConfig):
         return GenericAdapter(enter_count=config.enter_count)
 
 
-def _release_recording_guard() -> None:
-    """Release the recording guard — both in-process event and cross-process file flag.
+# ---------------------------------------------------------------------------
+# Backward compat: start_recording / stop_recording wrappers
+# (test_flag_coordination.py calls these as module-level functions)
+# Remove in Phase 9 when tests are updated.
+# ---------------------------------------------------------------------------
 
-    Called after STT→paste completes (or on early exit) so Conductor's TTS hook
-    knows it's safe to speak again.
+# Module-level compat shims (test_flag_coordination.py reads these)
+is_recording = False   # Synced from ctx in main loop -- remove in Phase 9
+busy = False           # Synced from ctx in main loop -- remove in Phase 9
+recording_start_time = 0.0
+_audio_buffer = []
+_triggered_by_ptt = False
+_recording_target = None
+_state_lock = threading.Lock()
+
+# _recording is set in main() and used by the compat wrappers below
+_recording: RecordingStateMachine | None = None
+
+
+def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None) -> None:
+    """Backward-compat wrapper for test_flag_coordination.py. Remove in Phase 9.
+
+    Delegates to RecordingStateMachine if running; else minimal standalone fallback.
     """
+    global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt
+    if _recording is not None:
+        _recording.start(ptt=ptt, preroll=preroll)
+        is_recording = _recording.ctx.is_recording
+        return
+    # Standalone fallback for tests (no main() running)
+    if config is None:
+        return
+    with _state_lock:
+        if is_recording:
+            return
+        is_recording = True
+        recording_start_time = time.time()
+        _audio_buffer = list(preroll) if preroll else []
+        _triggered_by_ptt = ptt
     try:
-        from heyvox.audio.tts import set_recording as _tts_set_rec
-        _tts_set_rec(False)
-    except ImportError:
+        with open(RECORDING_FLAG, "w"):
+            pass
+    except Exception:
         pass
     try:
-        os.remove(RECORDING_FLAG)
-    except FileNotFoundError:
+        from heyvox.ipc import update_state
+        update_state({"recording": True})
+    except Exception:
         pass
 
 
-def _save_debug_audio(
-    label: str,
-    chunks: list,
-    sample_rate: int,
-    extra_info: dict | None = None,
-) -> str | None:
-    """Save raw audio chunks to a WAV file in the debug directory.
-
-    Returns the file path, or None if debug dir doesn't exist / saving fails.
-    Only saves when STT_DEBUG_DIR exists (create it to enable: mkdir /tmp/heyvox-debug).
-    """
-    if not os.path.isdir(STT_DEBUG_DIR):
-        return None
-    try:
-        import wave
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{ts}_{label}.wav"
-        filepath = os.path.join(STT_DEBUG_DIR, filename)
-
-        audio = np.concatenate(chunks) if chunks else np.array([], dtype=np.int16)
-        with wave.open(filepath, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)  # int16
-            wf.setframerate(sample_rate)
-            wf.writeframes(audio.tobytes())
-
-        duration = len(audio) / sample_rate if sample_rate > 0 else 0
-        rms = _audio_rms(chunks, sample_rate) if chunks else -96.0
-
-        # Write structured log entry
-        from heyvox.constants import STT_DEBUG_LOG
-        info = {
-            "timestamp": ts,
-            "label": label,
-            "file": filename,
-            "duration_s": round(duration, 2),
-            "rms_dbfs": round(rms, 1),
-            "num_chunks": len(chunks),
-        }
-        if extra_info:
-            info.update(extra_info)
-        import json
-        with open(STT_DEBUG_LOG, "a") as f:
-            f.write(json.dumps(info) + "\n")
-
-        return filepath
-    except Exception as e:
-        log(f"DEBUG: Failed to save audio: {e}")
-        return None
-
-
-def _audio_rms(chunks: list, sample_rate: int) -> float:
-    """Compute RMS energy of recorded audio chunks in dBFS.
-
-    Returns a negative value (0 dBFS = max, -96 dBFS ~ silence for 16-bit).
-    Used to skip STT on silent/near-silent recordings that would cause
-    Whisper to hallucinate ("Thank you for watching", etc.).
-    """
-    import numpy as np
-    if not chunks:
-        return -96.0
-    audio = np.concatenate(chunks).astype(np.float32)
-    if len(audio) == 0:
-        return -96.0
-    rms = np.sqrt(np.mean(audio ** 2))
-    if rms < 1e-10:
-        return -96.0
-    # Convert to dBFS (assuming 16-bit int range mapped to float)
-    return 20 * np.log10(rms / 32768.0)
-
-
-# Minimum audio energy (dBFS) to proceed with STT. Recordings below this
-# threshold are treated as silence — skips Whisper to avoid hallucinations.
-# -60 dBFS catches only true silence/near-silence. Normal quiet speech is ~-45 to -35 dBFS.
-_MIN_AUDIO_DBFS = -60.0
-
-
-def _send_local(duration: float, audio_chunks: list, config: HeyvoxConfig, adapter, raw_rms_db: float = 0.0, *, ptt: bool = False, recording_target=None) -> None:
-    """Transcribe locally and inject text into target app."""
-    global busy
-
-    try:
-        # Energy gate: skip STT on silent recordings to avoid Whisper hallucinations.
-        # Uses raw_rms_db computed BEFORE wake word trim (wake word is the loudest part).
-        if raw_rms_db < _MIN_AUDIO_DBFS:
-            log(f"Recording too quiet ({raw_rms_db:.1f} dBFS < {_MIN_AUDIO_DBFS} dBFS), skipping STT")
-            cues_dir = get_cues_dir(config.cues_dir)
-            audio_cue("paused", cues_dir)
+def stop_recording(config: HeyvoxConfig = None) -> None:
+    """Backward-compat wrapper. Remove in Phase 9."""
+    global is_recording, busy
+    if _recording is not None:
+        _recording.stop()
+        is_recording = _recording.ctx.is_recording
+        busy = _recording.ctx.busy
+        return
+    if config is None:
+        return
+    with _state_lock:
+        if not is_recording:
             return
-
-        log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
-        print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
-        t0 = time.time()
-        text = transcribe_audio(
-            audio_chunks,
-            engine=config.stt.local.engine,
-            mlx_model=config.stt.local.mlx_model,
-            language=config.stt.local.language,
-            sample_rate=config.audio.sample_rate,
-        )
-        elapsed = time.time() - t0
-        log(f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
-
-        # Log raw STT output for debug
-        _save_debug_audio("_stt_result", [], config.audio.sample_rate, {
-            "stt_raw": text[:200],
-            "stt_engine": config.stt.local.engine,
-            "stt_time_s": round(elapsed, 2),
-        })
-
-        # ECHO-03: Filter TTS echo from transcription (speaker mode protection).
-        # If the STT output matches recently spoken TTS text, it's echo, not the user.
-        echo_filtered = False
-        if text and config.echo_suppression.stt_echo_filter:
-            try:
-                from heyvox.audio.echo import filter_tts_echo
-                filtered = filter_tts_echo(text)
-                if filtered != text:
-                    log(f"ECHO-03: Stripped TTS echo from transcription (was: {text[:60]})")
-                    echo_filtered = True
-                    text = filtered
-            except Exception:
-                pass
-
-        # Quality filter: discard garbled/nonsensical STT output
-        if text and _is_garbled(text):
-            log(f"FILTER: Discarding garbled transcription: {text[:80]}")
-            cues_dir = get_cues_dir(config.cues_dir)
-            audio_cue("paused", cues_dir)
-            return
-
-        _hud_send({"type": "transcript", "text": text})
-
-        # Persist transcript BEFORE paste attempt — guarantees no text is ever lost
-        if text and text.strip():
-            try:
-                from heyvox.history import save as _save_transcript
-                _save_transcript(text, duration=duration, ptt=ptt)
-            except Exception as e:
-                log(f"WARNING: Failed to save transcript to history: {e}")
-
-        cues_dir = get_cues_dir(config.cues_dir)
-
-        if not text:
-            log("WARNING: Empty transcription, skipping")
-            audio_cue("paused", cues_dir)
-            return
-
-        # Check if cancelled during transcription
-        if _cancel_transcription.is_set():
-            log("Transcription cancelled by user (Escape)")
-            audio_cue("paused", cues_dir)
-            _cancel_transcription.clear()
-            return
-
-        # Check for voice commands
-        cmd_result = check_voice_command(text)
-        if cmd_result:
-            action_key, feedback = cmd_result
-            log(f"Voice command: {action_key} ({feedback})")
-
-            # Dispatch to native TTS engine for skip/stop/mute when enabled
-            # Requirement: TTS-03
-            _handled_natively = False
-            if config.tts.enabled:
-                if action_key == "tts-skip":
-                    from heyvox.audio.tts import skip_current
-                    skip_current()
-                    _handled_natively = True
-                elif action_key == "tts-stop":
-                    from heyvox.audio.tts import stop_all
-                    stop_all()
-                    _handled_natively = True
-                elif action_key == "tts-mute":
-                    from heyvox.audio.tts import set_muted, is_muted
-                    set_muted(not is_muted())
-                    _handled_natively = True
-
-            # Fall through to execute_voice_command for tts-next/tts-replay
-            # (not yet implemented natively) or when TTS is disabled.
-            if not _handled_natively:
-                tts_script = config.tts.script_path if config.tts.enabled else None
-                execute_voice_command(action_key, feedback, tts_script_path=tts_script, log_fn=log)
-
-            audio_cue("paused", cues_dir)
-            return
-
-        # Strip wake word phrases from transcription (start and end)
-        pre_strip = text
-        text = _strip_wake_words(text, config.wake_words.start, config.wake_words.stop)
-        if text != pre_strip:
-            log(f"Wake word strip: '{pre_strip[:80]}' → '{text[:80]}'")
-
-        # Final debug log entry with full pipeline result
-        _save_debug_audio("_final", [], config.audio.sample_rate, {
-            "stt_raw": pre_strip[:200] if 'pre_strip' in dir() else "",
-            "echo_filtered": echo_filtered if 'echo_filtered' in dir() else False,
-            "wake_word_stripped": text != pre_strip if 'pre_strip' in dir() else False,
-            "final_text": text[:200],
-        })
-
-        paste_text = f"{config.transcription_prefix}{text}" if config.transcription_prefix else text
-
-        # Re-check cancellation right before typing
-        if _cancel_transcription.is_set():
-            log("Transcription cancelled by user (Escape)")
-            audio_cue("paused", cues_dir)
-            _cancel_transcription.clear()
-            return
-
-        # Dedup guard: prevent multiple injections from concurrent _send_local threads
-        global _last_inject_time
-        with _inject_lock:
-            now = time.time()
-            if now - _last_inject_time < _INJECT_DEDUP_SECS:
-                log(f"WARNING: Duplicate injection suppressed ({now - _last_inject_time:.1f}s since last)")
-                return
-            _last_inject_time = now
-
-        target_app = recording_target.app_name if recording_target else None
-        target_window = recording_target.window_title if recording_target else None
-        log(f"[inject] target_app={target_app}, window={target_window!r}, "
-            f"mode={'PTT' if ptt else 'wake word'}, text={len(paste_text)} chars: {paste_text[:60]!r}")
-        print(f"[recording] Injecting → {target_app or 'frontmost'} (window={target_window!r})", file=sys.stderr)
-
-        # Save the user's current focus so we can restore it if injection
-        # steals focus from the SAME app they're already in. We only restore
-        # if the user hasn't moved away from the target — if they switched
-        # apps during transcription, we stay on the target (their intent at
-        # recording start) rather than chasing them to a different app.
-        pre_inject_pid = save_frontmost_pid()
-        target_pid = recording_target.app_pid if recording_target else 0
-        log(f"[inject] saved pre-inject frontmost pid={pre_inject_pid}, target pid={target_pid}")
-
-        if recording_target:
-            if recording_target.conductor_workspace:
-                log(f"[inject] Restoring Conductor workspace '{recording_target.conductor_workspace}'")
-            restore_target(recording_target)
-            log(f"[inject] Restored target: {recording_target.app_name}")
-
-        type_text(paste_text, app_name=target_app)
-
-        # Auto-send Enter in wake word mode if adapter says so
-        auto_send = not ptt and adapter.should_auto_send()
-        log(f"[inject] auto_send={auto_send} (ptt={ptt}, adapter.should_auto_send={adapter.should_auto_send()}, enter_count={adapter.enter_count})")
-        if auto_send:
-            time.sleep(1.0)
-            # target_app already resolved above
-            from heyvox.input.injection import press_enter as _press_enter
-            log(f"Pressing Enter x{adapter.enter_count} → {target_app or 'frontmost'}...")
-            _press_enter(adapter.enter_count, app_name=target_app)
-            log("Sent!")
-        else:
-            log(f"Pasted ({'PTT' if ptt else 'wake word'})")
-
-        # Only restore focus if the user was already in the target app before
-        # injection (i.e., we didn't need to switch apps). If the user moved
-        # to a different app during transcription, stay on the target — that's
-        # where they intended the text to go when they started recording.
-        if pre_inject_pid and pre_inject_pid == target_pid:
-            time.sleep(0.3)
-            restore_frontmost(pre_inject_pid)
-            log(f"[inject] restored frontmost to pid={pre_inject_pid} (was already on target)")
-        elif pre_inject_pid and pre_inject_pid != target_pid:
-            log(f"[inject] NOT restoring frontmost (user moved to pid={pre_inject_pid} during transcription, staying on target)")
-        # Show "Sent to [agent]" confirmation in HUD
-        _target_name = None
-        if not ptt:
-            _target_name = (
-                getattr(adapter, 'last_agent_name', None)
-                or getattr(adapter, '_target_app', None)
-            )
-        if ptt:
-            # PTT mode: no auto-Enter, just pasted — don't say "Sending"
-            _hud_send({"type": "state", "state": "idle", "text": "Pasted"})
-            audio_cue("ok", cues_dir)
-            log("Pasted (PTT)")
-        else:
-            sent_msg = "Sent to AI"
-            _hud_send({"type": "state", "state": "idle", "text": sent_msg})
-            audio_cue("sending", cues_dir)
-            log(sent_msg)
-    except subprocess.TimeoutExpired:
-        log("WARNING: Subprocess timed out during send phase")
-    except Exception as e:
-        log(f"ERROR in send phase: {e}")
-    finally:
-        _release_recording_guard()
-        with _state_lock:
-            busy = False
-        # Resume media that we paused at recording start
-        try:
-            from heyvox.audio.media import resume_media
-            resume_media()
-        except Exception as e:
-            log(f"WARNING: media resume failed: {e}")
-        _hud_send({"type": "state", "state": "idle"})
-        log("Ready for next wake word.")
+        is_recording = False
+        busy = True
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Singleton / PID management
 # ---------------------------------------------------------------------------
 
-_PID_FILE = "/tmp/heyvox.pid"
+_PID_FILE = HEYVOX_PID_FILE
+_pid_fd = None  # File descriptor kept open to hold the flock for the process lifetime.
 
 
 def _acquire_singleton():
@@ -1017,17 +234,19 @@ def _acquire_singleton():
             with open(_PID_FILE) as _f:
                 old_pid = int(_f.read().strip())
             os.kill(old_pid, 0)  # Check if alive
-            # Verify the process is actually vox (not a recycled PID)
+            # Verify the process is actually heyvox (not a recycled PID).
             try:
-                result = subprocess.run(
-                    ["ps", "-p", str(old_pid), "-o", "command="],
-                    capture_output=True, text=True, timeout=2,
-                )
-                if "vox" not in result.stdout.lower():
-                    log(f"PID {old_pid} is not vox (cmd: {result.stdout.strip()}), removing stale PID file")
-                    raise ProcessLookupError("not vox")
-            except subprocess.TimeoutExpired:
-                pass  # Proceed with kill if ps hangs
+                import psutil as _psutil
+                _proc = _psutil.Process(old_pid)
+                _cmdline = " ".join(_proc.cmdline()).lower()
+                if "heyvox" not in _cmdline:
+                    log(
+                        f"PID {old_pid} is not heyvox "
+                        f"(cmd: {_cmdline!r}), removing stale PID file"
+                    )
+                    raise ProcessLookupError("not heyvox")
+            except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                raise ProcessLookupError("gone or inaccessible")
             log(f"Killing previous vox instance (PID {old_pid})")
             os.kill(old_pid, signal.SIGTERM)
             time.sleep(1)
@@ -1042,39 +261,37 @@ def _acquire_singleton():
 
     # Clean up stale flag files and sockets from previous instance
     import glob as _glob
-    for pattern in ("/tmp/heyvox-recording", "/tmp/heyvox-media-paused-*",
-                     "/tmp/herald-media-paused-*", "/tmp/herald-pause",
-                     "/tmp/heyvox-hud.sock",
-                     "/tmp/claude-tts-mute", "/tmp/herald-mute", "/tmp/heyvox-verbosity",
+    for pattern in (RECORDING_FLAG, HEYVOX_MEDIA_PAUSED_PREFIX + "*",
+                     HERALD_MEDIA_PAUSED_PREFIX + "*", HERALD_PAUSE_FLAG,
+                     HUD_SOCKET_PATH,
+                     CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG, VERBOSITY_FILE,
                      # Herald state files that can go stale after crash
-                     "/tmp/herald-ambient", "/tmp/herald-mode",
-                     "/tmp/herald-last-play", "/tmp/herald-workspace",
+                     HERALD_AMBIENT_FLAG, HERALD_MODE_FILE,
+                     HERALD_LAST_PLAY, HERALD_WORKSPACE_FILE,
                      # Temp WAVs from crashed TTS worker
-                     "/tmp/herald-generating-*.wav"):
+                     HERALD_GENERATING_WAV_PREFIX + "*.wav"):
         for stale in _glob.glob(pattern):
             try:
                 os.unlink(stale)
             except (FileNotFoundError, IsADirectoryError):
                 pass
 
+    # Reset transient state (recording/tts_playing/herald_playing_pid/paused) on startup
+    from heyvox.ipc import reset_transient_state
+    reset_transient_state()
+
     # Write PID file and hold an advisory lock for the lifetime of the process.
-    # This eliminates the race window between reading the old PID and writing
-    # the new one — a concurrent starter will block on flock().
     import fcntl
     global _pid_fd
     _pid_fd = open(_PID_FILE, "w")
     try:
         fcntl.flock(_pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        log("Another vox instance holds the PID lock — exiting")
+        log("Another vox instance holds the PID lock -- exiting")
         _pid_fd.close()
         sys.exit(1)
     _pid_fd.write(str(os.getpid()))
     _pid_fd.flush()
-
-
-# File descriptor kept open to hold the flock for the process lifetime.
-_pid_fd = None
 
 
 def _release_singleton():
@@ -1095,18 +312,35 @@ def _release_singleton():
         pass
 
 
-def main() -> None:
-    """Main event loop — loads config, starts PTT, runs wake word detection."""
-    global is_recording, _audio_buffer, busy, _zombie_mic_reinit, _consecutive_failed_recordings, _busy_since
+def _stop_tts_from_escape(hud_send_fn) -> None:
+    """Stop TTS playback and clear queue (used by Escape key handler)."""
+    from heyvox.audio.tts import stop_all
+    stop_all()
+    hud_send_fn({"type": "state", "state": "idle"})
+    log("TTS stopped via Escape key.")
 
-    # Load configuration from ~/.config/heyvox/config.yaml (or defaults)
-    # Requirement: CONF-01
-    config = load_config()
+
+# ---------------------------------------------------------------------------
+# Setup phase (D-05)
+# ---------------------------------------------------------------------------
+
+def _setup(config: HeyvoxConfig):
+    """Initialize all subsystems and return (ctx, devices, recording).
+
+    Handles: singleton check, logging init, STT init, PTT setup,
+    wake word model loading, adapter creation, AppContext creation,
+    DeviceManager init, RecordingStateMachine creation.
+
+    Returns:
+        Tuple of (ctx, devices, recording, model, use_separate_words, wake_config)
+        where wake_config is a dict of wake word settings needed by _run_loop.
+    """
+    global _recording
+
     _init_log(config.log_file, config.log_max_bytes)
-    # Diagnostic: verify log() is working (both print to stderr and log to file)
+    # Diagnostic: verify log() is working
     print(f"[diag] _LOG_FILE={_LOG_FILE}, exists={os.path.exists(_LOG_FILE)}", file=sys.stderr, flush=True)
     log("STARTUP: log() initialized")
-    # Verify it actually wrote
     try:
         with open(_LOG_FILE) as f:
             last = f.readlines()[-1].strip()
@@ -1114,7 +348,7 @@ def main() -> None:
     except Exception as e:
         print(f"[diag] log() verification FAILED: {e}", file=sys.stderr, flush=True)
 
-    # Last-resort crash logging: catches exceptions that slip through main try/except
+    # Last-resort crash logging
     def _excepthook(exc_type, exc_value, exc_tb):
         import traceback as _tb
         msg = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
@@ -1125,19 +359,17 @@ def main() -> None:
     _acquire_singleton()
     import atexit
     atexit.register(_release_singleton)
-    atexit.register(lambda: log("EXIT: atexit handler fired — process is terminating"))
+    atexit.register(lambda: log("EXIT: atexit handler fired -- process is terminating"))
 
     # Startup cleanup: remove stale flags from previous crash/kill
-    # Check heartbeat from previous instance — if it exists and is stale,
-    # the old process was killed without clean shutdown (SIGKILL / native crash).
     try:
-        hb_age = time.time() - os.path.getmtime("/tmp/heyvox-heartbeat")
+        hb_age = time.time() - os.path.getmtime(HEYVOX_HEARTBEAT_FILE)
         if hb_age > 30:
             log(f"WARNING: Previous instance died without clean shutdown (heartbeat stale by {hb_age:.0f}s)")
     except FileNotFoundError:
         pass
-    for stale_flag in (RECORDING_FLAG, "/tmp/heyvox-tts-playing", "/tmp/claude-tts-playing.pid",
-                       "/tmp/heyvox-media-paused-rec"):
+    for stale_flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID,
+                       HEYVOX_MEDIA_PAUSED_REC):
         try:
             age = time.time() - os.path.getmtime(stale_flag)
             if age > 60:
@@ -1151,25 +383,40 @@ def main() -> None:
         except OSError:
             pass
 
+    # B6: Clean up orphaned media-pause flags
+    import glob as _glob_b6
+    for _mp_pattern in (HERALD_MEDIA_PAUSED_PREFIX + "*", HEYVOX_MEDIA_PAUSED_PREFIX + "*"):
+        for _mp_file in _glob_b6.glob(_mp_pattern):
+            try:
+                _mp_age = time.time() - os.path.getmtime(_mp_file)
+                if _mp_age > 60:
+                    os.unlink(_mp_file)
+                    log(f"Cleaned stale media-pause flag: {_mp_file} (age={_mp_age:.0f}s)")
+            except OSError:
+                pass
+
     # Start native TTS worker if enabled
-    # Requirement: TTS-03
-    from heyvox.audio.tts import start_worker as _start_tts, shutdown as _shutdown_tts
+    from heyvox.audio.tts import start_worker as _start_tts
     if config.tts.enabled:
         _start_tts(config)
         log("TTS worker started (Kokoro native engine)")
 
-    # Signal handlers for clean shutdown
+    # Create AppContext -- holds all shared mutable state
+    ctx = AppContext()
+    ctx.last_good_audio_time = time.time()
+
+    # Signal handlers use ctx events
     def handle_signal(signum, frame):
         log(f"Received signal {signum}, shutting down...")
-        _shutdown.set()
+        ctx.shutdown.set()
 
     def handle_cancel(signum, frame):
         """SIGUSR1 = request recording cancellation (deferred to main loop).
 
-        Signal handlers must avoid I/O and locks — just set an event.
-        The main loop checks _cancel_requested and does the actual cleanup.
+        Signal handlers must avoid I/O and locks -- just set an event.
+        The main loop checks ctx.cancel_requested and does the actual cleanup.
         """
-        _cancel_requested.set()
+        ctx.cancel_requested.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -1179,31 +426,47 @@ def main() -> None:
     start_word = config.wake_words.start
     stop_word = config.wake_words.stop
     use_separate_words = start_word != stop_word
-    threshold = config.threshold
-    cooldown = config.cooldown_secs
-    sample_rate = config.audio.sample_rate
-    chunk_size = config.audio.chunk_size
-    mic_priority = config.mic_priority
-    silence_timeout = config.silence_timeout_secs
-    silence_threshold = config.silence_threshold
 
-    _kill_orphan_indicators()
+    kill_orphan_indicators(log_fn=log)
 
-    # Launch HUD overlay process (persistent — stays alive for entire session)
-    # Then connect HUD client for IPC. The overlay needs ~0.5s to start its
-    # socket server, so the initial connect may fail — _hud_send auto-reconnects.
-    # Requirement: HUD-08
-    global _hud_client, _indicator_proc
+    # Launch HUD overlay process (persistent -- stays alive for entire session)
     if config.hud_enabled or config.hud_menu_bar_only:
-        _launch_hud_overlay(menu_bar_only=config.hud_menu_bar_only)
+        launch_hud_overlay(menu_bar_only=config.hud_menu_bar_only, log_fn=log)
         from heyvox.hud.ipc import HUDClient
-        _hud_client = HUDClient(HUD_SOCKET_PATH)
+        ctx.hud_client = HUDClient(HUD_SOCKET_PATH)
         try:
-            _hud_client.connect()
+            ctx.hud_client.connect()
         except Exception:
             pass
     else:
         log("HUD overlay disabled via config")
+
+    # HUD send function (closure over ctx)
+    def hud_send(msg: dict) -> None:
+        """Send a message to the HUD overlay. No-op if not connected."""
+        if ctx.hud_client is None:
+            log(f"[HUD-DBG] hud_client is None, skipping {msg.get('type')}")
+            return
+        if ctx.hud_client._sock is None:
+            now = time.time()
+            if now - ctx.hud_last_reconnect < _HUD_RECONNECT_INTERVAL:
+                return
+            ctx.hud_last_reconnect = now
+            log(f"[HUD-DBG] Attempting reconnect for {msg.get('type')}...")
+            try:
+                ctx.hud_client.reconnect()
+            except Exception as e:
+                log(f"[HUD-DBG] Reconnect failed: {e}")
+                return
+            if ctx.hud_client._sock is None:
+                log("[HUD-DBG] Reconnect succeeded but sock still None")
+                return
+            log("[HUD-DBG] Reconnected!")
+        try:
+            ctx.hud_client.send(msg)
+            log(f"[HUD-DBG] Sent {msg.get('type')}: {msg.get('state', '')}")
+        except Exception as e:
+            log(f"[HUD-DBG] Send failed: {e}")
 
     # Initialize STT backend
     log(f"STT backend: {config.stt.backend}")
@@ -1218,71 +481,49 @@ def main() -> None:
             log_fn=log,
         )
 
+    # Build adapter and create RecordingStateMachine
+    ctx.adapter = _build_adapter(config)
+    log(f"Target mode: {config.target_mode} (adapter: {type(ctx.adapter).__name__})")
+
+    recording = RecordingStateMachine(ctx=ctx, config=config, log_fn=log, hud_send=hud_send)
+    _recording = recording  # Store for backward-compat wrappers
+
     # Start push-to-talk listener if enabled
     if config.push_to_talk.enabled:
         from heyvox.input.ptt import start_ptt_listener
 
         ptt_callbacks = {
-            "on_start": lambda: start_recording(ptt=True, config=config),
-            "on_stop": lambda: stop_recording(config=config),
-            "on_cancel_transcription": lambda: _cancel_transcription.set(),
-            "on_cancel_recording": lambda: _cancel_recording_from_ptt(config),
-            "on_cancel_tts": _stop_tts_from_escape,
-            "is_busy": lambda: busy,
-            "is_recording": lambda: is_recording,
-            "is_speaking": lambda: os.path.exists(TTS_PLAYING_FLAG) or os.path.exists("/tmp/herald-playing.pid"),
+            "on_start": lambda: recording.start(ptt=True),
+            "on_stop": lambda: recording.stop(),
+            "on_cancel_transcription": lambda: ctx.cancel_transcription.set(),
+            "on_cancel_recording": lambda: recording.cancel(),
+            "on_cancel_tts": lambda: _stop_tts_from_escape(hud_send),
+            "is_busy": lambda: ctx.busy,
+            "is_recording": lambda: ctx.is_recording,
+            "is_speaking": lambda: (
+                os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
+            ),
         }
         start_ptt_listener(config.push_to_talk.key, ptt_callbacks, log_fn=log)
 
     # Load wake word models
-    # Phase 8: supports custom models dir from config, with fallback search
     from heyvox.audio.wakeword import load_models
     model, use_separate_words = load_models(
         start_word, stop_word, config.wake_words.models_dir,
         also_load=config.wake_words.also_load,
     )
-    _loaded_models = list(model.prediction_buffer.keys()) if hasattr(model, 'prediction_buffer') else []
-    print(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}", file=sys.stderr, flush=True)
+    _loaded_models = list(model.models.keys()) if hasattr(model, 'models') else []
+    print(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}",
+          file=sys.stderr, flush=True)
     log(f"Wake word models loaded: {_loaded_models}")
 
-    # Build text injection adapter based on config.target_mode
-    # Requirement: INPT-03
-    global _adapter
-    _adapter = _build_adapter(config)
-    log(f"Target mode: {config.target_mode} (adapter: {type(_adapter).__name__})")
-
-    # Open audio stream
-    log("Opening audio stream...")
-    pa = pyaudio.PyAudio()
-    dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                              sample_rate=sample_rate, chunk_size=chunk_size)
-    if dev_index is None:
-        log("FATAL: No microphone available, exiting")
-        sys.exit(1)
-
-    dev_name = pa.get_device_info_by_index(dev_index)['name']
-    log(f"Using input: [{dev_index}] {dev_name}")
-    stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-
-    # Write active mic name so HUD menu can display it
-    def _write_active_mic(name: str) -> None:
-        try:
-            with open(ACTIVE_MIC_FILE, "w") as f:
-                f.write(name)
-        except OSError:
-            pass
-
-    _write_active_mic(dev_name)
-
-    headset_mode = detect_headset(pa, dev_index)
-    log(f"Headset detected: {headset_mode} (echo suppression {'inactive' if headset_mode else 'active'})")
-
-    # ECHO-01: Track when TTS was last seen active (for post-TTS cooldown)
-    _tts_last_seen = 0.0
+    # Open audio stream -- delegate to DeviceManager
+    devices = DeviceManager(ctx=ctx, config=config, log_fn=log, hud_send=hud_send)
+    devices.init()
 
     # ECHO-05: Initialize WebRTC AEC if configured and in speaker mode
     _aec_active = False
-    if config.echo_suppression.aec_enabled and not headset_mode:
+    if config.echo_suppression.aec_enabled and not devices.headset_mode:
         try:
             from heyvox.audio.echo import init_aec
             _aec_active = init_aec(delay_ms=config.echo_suppression.aec_delay_ms)
@@ -1298,52 +539,83 @@ def main() -> None:
     else:
         log(f"Ready! Say '{start_word}' to start/stop voice input.")
 
+    return ctx, devices, recording, model, use_separate_words, hud_send, _aec_active
+
+
+# ---------------------------------------------------------------------------
+# Run loop (D-05)
+# ---------------------------------------------------------------------------
+
+def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingStateMachine,
+              config: HeyvoxConfig, model, use_separate_words: bool, hud_send, aec_active: bool) -> None:
+    """Main audio processing event loop.
+
+    Reads audio from the microphone, runs wake word detection, manages device
+    health, and delegates recording to RecordingStateMachine.
+
+    Args:
+        ctx: Shared application context (all mutable state).
+        devices: DeviceManager for microphone lifecycle.
+        recording: RecordingStateMachine for start/stop/cancel.
+        config: HeyvoxConfig instance.
+        model: Wake word model (openwakeword).
+        use_separate_words: Whether start/stop words differ.
+        hud_send: HUD send closure.
+        aec_active: Whether WebRTC AEC is active.
+    """
+    # Local aliases for frequently read config values (avoid attribute lookups in hot loop)
+    threshold = config.threshold
+    cooldown = config.cooldown_secs
+    sample_rate = config.audio.sample_rate
+    chunk_size = config.audio.chunk_size
+    silence_timeout = config.silence_timeout_secs
+    silence_threshold = config.silence_threshold
+    start_word = config.wake_words.start
+    stop_word = config.wake_words.stop
+
     cues_dir = get_cues_dir(config.cues_dir)
     last_trigger = 0.0
     consecutive_errors = 0
 
     # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
-    # so the first words of the command aren't clipped. (Research recommendation)
+    # so the first words of the command aren't clipped.
     from collections import deque
     _PREROLL_CHUNKS = max(1, int(0.5 * sample_rate / chunk_size))  # ~500ms
     _preroll_buffer: deque = deque(maxlen=_PREROLL_CHUNKS)
 
-    # Silent-mic health check state (AUDIO-08 completion)
-    _zero_streak = 0
-    HEALTH_CHECK_INTERVAL = 5.0  # Check every 5s for fast dead-mic recovery
-    last_health_check = time.time()
-
-    # Variance-based zombie stream detection (AUDIO-12)
-    # Zombie streams from AUHAL error -50 produce noise with unnaturally stable
-    # coefficient of variation (~0.577 = 1/sqrt(3) for uniform noise).
-    _health_cv_history: deque = deque(maxlen=6)  # Last 30s of CV values
-
-    # Device hotplug detection — periodically check if a higher-priority mic appeared
-    # Also tracks output device changes for audio feedback. Requirement: AUDIO-11
-    _DEVICE_SCAN_INTERVAL = 3.0  # seconds — fast detection for USB/BT hotplug
-    _last_device_scan = time.time()
-    _last_output_device = ""
-    _mic_pinned = False  # True after manual mic switch — suppresses auto-switch back
-    try:
-        _default_out = pa.get_default_output_device_info()
-        _last_output_device = _default_out['name']
-    except Exception:
-        pass
-
-    # Memory watchdog — warn if RSS exceeds threshold
-    _MEM_WARN_MB = 1500
+    # Memory watchdog
+    _MEM_WARN_MB = 2000
+    _MEM_CRITICAL_MB = 2500
     _last_mem_check = time.time()
-    _MEM_CHECK_INTERVAL = 60.0  # Check every 60s
+    _MEM_CHECK_INTERVAL = 15.0
 
-    # SIGKILL-proof heartbeat: mtime on this file is the last proof of life.
-    # If the process dies without logging (SIGKILL, native crash), check
-    # this file's mtime to narrow down when the death occurred.
-    _HEARTBEAT_FILE = "/tmp/heyvox-heartbeat"
-    _HEARTBEAT_INTERVAL = 10.0  # Touch every 10s (low overhead)
+    # SIGKILL-proof heartbeat
+    _HEARTBEAT_FILE = HEYVOX_HEARTBEAT_FILE
+    _HEARTBEAT_INTERVAL = 10.0
     _last_heartbeat = 0.0
 
+    # ECHO-01: Post-TTS cooldown
+    _tts_last_seen = 0.0
+
+    # Busy watchdog state
+    _busy_since: float = 0.0
+
+    def _hud_ensure_connected() -> None:
+        """Attempt periodic reconnect if the HUD connection was lost."""
+        if ctx.hud_client is None:
+            return
+        if ctx.hud_client._sock is not None:
+            return
+        now = time.time()
+        if now - ctx.hud_last_reconnect >= _HUD_RECONNECT_INTERVAL:
+            ctx.hud_last_reconnect = now
+            try:
+                ctx.hud_client.reconnect()
+            except Exception:
+                pass
+
     try:
-        while not _shutdown.is_set():
+        while not ctx.shutdown.is_set():
             # Heartbeat: touch file periodically as proof of life
             _now_hb = time.time()
             if _now_hb - _last_heartbeat >= _HEARTBEAT_INTERVAL:
@@ -1353,421 +625,159 @@ def main() -> None:
                         _hbf.write(f"{int(_now_hb)}\n")
                 except Exception:
                     pass
+
             # Handle deferred cancel from SIGUSR1 (signal-safe: no I/O in handler)
-            if _cancel_requested.is_set():
-                _cancel_requested.clear()
-                if is_recording:
+            if ctx.cancel_requested.is_set():
+                ctx.cancel_requested.clear()
+                if ctx.is_recording:
                     log("Received cancel signal (USR1)")
-                    _show_recording_indicator(False)
-                    _release_recording_guard()
-                    with _state_lock:
-                        is_recording = False
-                        busy = False
-                        _audio_buffer.clear()
-                    try:
-                        from heyvox.audio.media import resume_media
-                        resume_media()
-                    except Exception:
-                        pass
-                    cues_dir = get_cues_dir(config.cues_dir)
-                    audio_cue("paused", cues_dir)
-                    _hud_send({"type": "state", "state": "idle"})
+                    recording.cancel()
                     log("Recording cancelled via signal.")
 
             try:
                 audio = np.frombuffer(
-                    stream.read(chunk_size, exception_on_overflow=False),
+                    devices.stream.read(chunk_size, exception_on_overflow=False),
                     dtype=np.int16,
                 )
                 consecutive_errors = 0
+
+                # AUDIO-13: track last time we saw real audio (level >= 10)
+                if int(np.abs(audio).max()) >= 10:
+                    ctx.last_good_audio_time = time.time()
+
             except IOError as e:
                 consecutive_errors += 1
                 if consecutive_errors <= 2:
                     log(f"Audio read error ({consecutive_errors}/2): {e}")
                     time.sleep(0.1)
                     continue
-                log("Mic appears disconnected, searching for new mic...")
-                _mic_pinned = False  # Pinned device gone — allow priority-based selection
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-                pa.terminate()
-                time.sleep(0.5)
-                pa = pyaudio.PyAudio()
-                dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                          sample_rate=sample_rate, chunk_size=chunk_size)
-                if dev_index is None:
-                    log("No mic found, retrying in 2s...")
-                    time.sleep(2)
+                if not devices.handle_io_error():
                     continue
-                dev_name = pa.get_device_info_by_index(dev_index)['name']
-                log(f"Switched to: [{dev_index}] {dev_name}")
-                stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                _write_active_mic(dev_name)
-                device_change_cue(dev_name, "input")
-                _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
                 model.reset()  # Clear corrupted wake word state (AUDIO-12)
-                _health_cv_history.clear()
                 consecutive_errors = 0
                 continue
 
-            # Zombie stream reinit — triggered by consecutive failed recordings (AUDIO-12)
-            if _zombie_mic_reinit:
-                _zombie_mic_reinit = False
-                log("Zombie stream reinit: forcing mic recovery after consecutive empty recordings")
-                print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
-                _hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
-                _mic_pinned = False
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-                pa.terminate()
-                time.sleep(0.5)
-                pa = pyaudio.PyAudio()
-                dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                          sample_rate=sample_rate, chunk_size=chunk_size,
-                                          require_audio=True)
-                if dev_index is None:
-                    dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                              sample_rate=sample_rate, chunk_size=chunk_size)
-                if dev_index is None:
-                    log("No mic found after zombie reinit, retrying in 2s...")
-                    time.sleep(2)
+            # AUDIO-13: time-based dead mic detection -- delegates to DeviceManager
+            devices.check_dead_mic_timeout()
+
+            # Zombie stream reinit -- triggered by consecutive failed recordings (AUDIO-12)
+            # or time-based dead mic timeout (AUDIO-13)
+            if ctx.zombie_mic_reinit:
+                ctx.zombie_mic_reinit = False
+                if not devices.reinit(require_audio=True):
                     continue
-                dev_name = pa.get_device_info_by_index(dev_index)['name']
-                log(f"Zombie reinit recovered: [{dev_index}] {dev_name}")
-                print(f"[mic] Zombie reinit recovered: [{dev_index}] {dev_name}", file=sys.stderr, flush=True)
-                stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                headset_mode = detect_headset(pa, dev_index)
-                _write_active_mic(dev_name)
-                device_change_cue(dev_name, "input")
-                _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
                 model.reset()
-                _health_cv_history.clear()
                 consecutive_errors = 0
                 continue
 
             # Buffer audio during recording (for local STT)
-            with _state_lock:
-                _is_rec = is_recording
-                _is_busy = busy
-                _is_ptt = _triggered_by_ptt
+            with ctx.lock:
+                _is_rec = ctx.is_recording
+                _is_busy = ctx.busy
+                _is_ptt = ctx.triggered_by_ptt
                 if _is_rec and config.stt.backend == "local":
-                    _audio_buffer.append(audio.copy())
+                    ctx.audio_buffer.append(audio.copy())
                 elif not _is_rec and not _is_busy:
-                    # Feed pre-roll buffer when idle — captures audio before wake word
+                    # Feed pre-roll buffer when idle -- captures audio before wake word
                     _preroll_buffer.append(audio.copy())
 
             # Send live audio level to HUD at ~20fps during recording (HUD-08)
-            # Uses RMS + log scaling for sensitivity to whispers
             if _is_rec:
-                global _hud_last_level_send
                 now_level = time.time()
-                if now_level - _hud_last_level_send >= _HUD_LEVEL_INTERVAL:
-                    _hud_last_level_send = now_level
+                if now_level - ctx.hud_last_level_send >= _HUD_LEVEL_INTERVAL:
+                    ctx.hud_last_level_send = now_level
                     rms = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
-                    # Log scale: map RMS ~30-10000 to 0.0-1.0
                     import math
                     if rms > 1.0:
                         db = 20.0 * math.log10(rms)
-                        # ~30 dB (whisper) → 0.0, ~80 dB (loud) → 1.0
                         level = max(0.0, min(1.0, (db - 30.0) / 50.0))
                     else:
                         level = 0.0
-                    _hud_send({"type": "audio_level", "level": round(level, 3)})
+                    hud_send({"type": "audio_level", "level": round(level, 3)})
 
             # Proactive silent-mic health check (catches A2DP bad-state without IOError)
-            # Requirement: AUDIO-08
             if not _is_rec and not _is_busy:
                 _hud_ensure_connected()
                 now = time.time()
-                if now - last_health_check >= HEALTH_CHECK_INTERVAL:
-                    last_health_check = now
-                    level = int(np.abs(audio).max())
+                _prev_stream = devices.stream
+                devices.health_check(audio)
+                # If health_check recovered to a new stream, update
+                if devices.stream is not _prev_stream and devices.stream is not None:
+                    model.reset()  # Clear corrupted wake word state (AUDIO-12)
+                    consecutive_errors = 0
 
-                    # Variance-based zombie stream detection (AUDIO-12)
-                    # Zombie streams return noise with unnaturally stable coefficient
-                    # of variation (~0.577 for uniform noise). Real mic audio varies widely.
-                    if level >= 10:
-                        abs_audio = np.abs(audio.astype(np.float32))
-                        _mean = float(abs_audio.mean())
-                        if _mean > 1e-6:
-                            _cv = float(abs_audio.std() / _mean)
-                            _health_cv_history.append(_cv)
-                            if len(_health_cv_history) >= 4:
-                                _cv_values = list(_health_cv_history)
-                                _cv_std = float(np.std(_cv_values))
-                                _cv_mean = float(np.mean(_cv_values))
-                                if _cv_std < 0.05 and 0.45 < _cv_mean < 0.70:
-                                    log(f"WARNING: Zombie stream detected (CV={_cv_mean:.3f}±{_cv_std:.3f}), forcing recovery")
-                                    print(f"[mic] Zombie stream (CV={_cv_mean:.3f}±{_cv_std:.3f})", file=sys.stderr, flush=True)
-                                    _zero_streak = 2  # Force the existing recovery path below
-
-                    if level < 10 or _zero_streak >= 2:  # Dead mic OR zombie stream
-                        if level < 10:
-                            _zero_streak += 1
-                        if _zero_streak >= 2:  # 2 × 5s = 10s to detect (or forced by zombie check)
-                            _dead_mic_name = pa.get_device_info_by_index(dev_index)['name']
-                            _silent_recover_count = getattr(main, '_silent_recover_count', 0) + 1
-                            main._silent_recover_count = _silent_recover_count
-                            # Exponential backoff: 1s, 5s, 15s, 30s, 60s, ... (cap 60s)
-                            _backoff = min(60, max(1, 5 * (2 ** (_silent_recover_count - 2))))
-                            log(f"WARNING: Silent mic detected ({_dead_mic_name}), re-scanning devices... (attempt {_silent_recover_count}, backoff {_backoff}s)")
-                            print(f"[mic] Silent mic detected ({_dead_mic_name}), re-scanning...", file=sys.stderr, flush=True)
-                            _hud_send({"type": "error", "text": f"Mic silent: {_dead_mic_name}"})
-                            _zero_streak = 0
-                            _mic_pinned = False  # Allow priority-based re-selection
-                            try:
-                                stream.stop_stream()
-                                stream.close()
-                            except Exception:
-                                pass
-                            pa.terminate()
-                            time.sleep(_backoff)
-                            pa = pyaudio.PyAudio()
-                            # Exclude the dead device to try alternatives first
-                            _exclude_prio = [p for p in mic_priority if p.lower() not in _dead_mic_name.lower()]
-                            dev_index = find_best_mic(pa, mic_priority=_exclude_prio or mic_priority,
-                                                      sample_rate=sample_rate, chunk_size=chunk_size,
-                                                      require_audio=True)
-                            if dev_index is None:
-                                # No alternative — try the original priority list as last resort
-                                dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                                          sample_rate=sample_rate, chunk_size=chunk_size,
-                                                          require_audio=True)
-                            if dev_index is None:
-                                log(f"No mic after reinit, retrying in {_backoff}s...")
-                                time.sleep(_backoff)
-                                continue
-                            dev_name = pa.get_device_info_by_index(dev_index)['name']
-                            log(f"Mic recovered: [{dev_index}] {dev_name}")
-                            print(f"[mic] Recovered: [{dev_index}] {dev_name}", file=sys.stderr, flush=True)
-                            if dev_name != _dead_mic_name:
-                                main._silent_recover_count = 0  # Reset backoff on successful switch
-                            stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                            headset_mode = detect_headset(pa, dev_index)
-                            _write_active_mic(dev_name)
-                            device_change_cue(dev_name, "input")
-                            _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
-                            model.reset()  # Clear corrupted wake word state (AUDIO-12)
-                            _health_cv_history.clear()
-                            consecutive_errors = 0
-                            continue
-                    else:
-                        _zero_streak = 0
-
-                # Memory watchdog — check RSS every 60s
-                _MEM_CRITICAL_MB = 1000
+                # Memory watchdog -- check RSS every 60s
                 if now - _last_mem_check >= _MEM_CHECK_INTERVAL:
                     _last_mem_check = now
-                    # Use current RSS (not peak/high-water mark) so the watchdog
-                    # doesn't false-trigger after MLX model is loaded then unloaded.
                     import psutil
                     rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
                     if rss_mb > _MEM_CRITICAL_MB:
                         log(f"WATCHDOG: Memory critical ({rss_mb:.0f} MB), auto-restarting...")
-                        _hud_send({"type": "error", "text": f"Restarting: {rss_mb:.0f}MB"})
+                        hud_send({"type": "error", "text": f"Restarting: {rss_mb:.0f}MB"})
                         time.sleep(0.5)
-                        # Release PID lock before execv so the new process image
-                        # can acquire it cleanly (execv preserves PID but closes fds)
                         _release_singleton()
                         try:
                             os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
                         except Exception as exc:
-                            # execv failed (e.g. syntax error in new code) — fall back
-                            # to subprocess so the process doesn't just die silently.
                             log(f"WATCHDOG: execv failed ({exc}), falling back to subprocess restart")
                             import subprocess as _sp
                             _sp.Popen([sys.executable, "-m", "heyvox.main"],
                                       start_new_session=True)
-                            _shutdown.set()
+                            ctx.shutdown.set()
                     elif rss_mb > _MEM_WARN_MB:
                         log(f"WARNING: Memory usage high: {rss_mb:.0f} MB (threshold: {_MEM_WARN_MB} MB)")
-                        _hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
+                        hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
 
-            # Overlay health: relaunch if dead, kill duplicates (piggyback on device scan interval)
-            if not _is_rec and not _is_busy and now - _last_device_scan >= _DEVICE_SCAN_INTERVAL:
-                if _indicator_proc is not None:
-                    if _indicator_proc.poll() is not None:
-                        log(f"WARNING: HUD overlay exited (rc={_indicator_proc.returncode}), relaunching")
-                        _indicator_proc = None
-                        _launch_hud_overlay(menu_bar_only=config.hud_menu_bar_only)
+            # Overlay health: relaunch if dead, kill duplicates
+            _now_scan = time.time()
+            if not _is_rec and not _is_busy and _now_scan - devices._last_device_scan >= devices._DEVICE_SCAN_INTERVAL:
+                _proc = get_indicator_proc()
+                if _proc is not None:
+                    if _proc.poll() is not None:
+                        log(f"WARNING: HUD overlay exited (rc={_proc.returncode}), relaunching")
+                        launch_hud_overlay(menu_bar_only=config.hud_menu_bar_only, log_fn=log)
                     else:
-                        _kill_duplicate_overlays(keep_pid=_indicator_proc.pid)
+                        kill_duplicate_overlays(keep_pid=_proc.pid, log_fn=log)
 
-            # Device hotplug — check if a higher-priority mic appeared (only when idle)
-            if not _is_rec and not _is_busy and now - _last_device_scan >= _DEVICE_SCAN_INTERVAL:
-                _last_device_scan = now
-                try:
-                    # PortAudio caches the device list — create a temporary instance
-                    # to discover newly connected devices (e.g. USB/Bluetooth hotplug).
-                    # Filter out dead devices (paired-but-disconnected Bluetooth).
-                    _dead_names = get_dead_input_device_names()
-                    _scan_pa = pyaudio.PyAudio()
-                    try:
-                        current_count = _scan_pa.get_device_count()
-                        current_names = set()
-                        for _di in range(current_count):
-                            try:
-                                _info = _scan_pa.get_device_info_by_index(_di)
-                                if _info['maxInputChannels'] > 0 and _info['name'].lower() not in _dead_names:
-                                    current_names.add(_info['name'])
-                            except Exception:
-                                pass
-                    finally:
-                        _scan_pa.terminate()
+            # Device hotplug -- delegated to DeviceManager
+            devices.scan()
 
-                    # If mic is pinned but the pinned device disappeared, unpin
-                    if _mic_pinned and not any(dev_name.lower() in n.lower() or n.lower() in dev_name.lower() for n in current_names):
-                        log(f"Pinned mic '{dev_name}' disappeared — unpinning, reverting to priority list")
-                        _mic_pinned = False
-
-                    # Check if a higher-priority device is available but not currently selected.
-                    # Skip auto-switch if user manually pinned a mic via menu.
-                    # Use tracked dev_name (not pa.get_device_info which may have stale indices).
-                    better_available = False
-                    for prio_name in mic_priority if not _mic_pinned else []:
-                        matching = [n for n in current_names if prio_name.lower() in n.lower()]
-                        if matching:
-                            if prio_name.lower() in dev_name.lower():
-                                break  # Already using this priority level or higher
-                            better_available = True
-                            log(f"Higher-priority mic detected: {matching[0]} (current: {dev_name})")
-                            break
-
-                    if better_available:
-                        try:
-                            stream.stop_stream()
-                            stream.close()
-                        except Exception:
-                            pass
-                        pa.terminate()
-                        pa = pyaudio.PyAudio()
-                        dev_index = find_best_mic(pa, mic_priority=mic_priority,
-                                                  sample_rate=sample_rate, chunk_size=chunk_size)
-                        if dev_index is not None:
-                            dev_name = pa.get_device_info_by_index(dev_index)['name']
-                            log(f"Switched to: [{dev_index}] {dev_name}")
-                            stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                            headset_mode = detect_headset(pa, dev_index)
-                            log(f"Headset mode: {headset_mode}")
-                            _write_active_mic(dev_name)
-                            device_change_cue(dev_name, "input")
-                            _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
-                    # Check for manual mic switch request from HUD menu
-                    if os.path.exists(MIC_SWITCH_REQUEST_FILE):
-                        try:
-                            with open(MIC_SWITCH_REQUEST_FILE) as f:
-                                requested_name = f.read().strip()
-                            os.unlink(MIC_SWITCH_REQUEST_FILE)
-                            if requested_name:
-                                log(f"Mic switch requested from menu: {requested_name}")
-                                # Find the requested device in fresh scan results
-                                target_index = None
-                                for n in current_names:
-                                    if requested_name.lower() in n.lower():
-                                        # Get index from scan PA
-                                        _scan2 = pyaudio.PyAudio()
-                                        try:
-                                            for _di2 in range(_scan2.get_device_count()):
-                                                try:
-                                                    _d2 = _scan2.get_device_info_by_index(_di2)
-                                                    if _d2['name'] == n and _d2['maxInputChannels'] > 0:
-                                                        target_index = _di2
-                                                        break
-                                                except Exception:
-                                                    pass
-                                        finally:
-                                            _scan2.terminate()
-                                        break
-                                if target_index is not None:
-                                    try:
-                                        stream.stop_stream()
-                                        stream.close()
-                                    except Exception:
-                                        pass
-                                    pa.terminate()
-                                    pa = pyaudio.PyAudio()
-                                    dev_index = target_index
-                                    dev_name = pa.get_device_info_by_index(dev_index)['name']
-                                    log(f"Switched to: [{dev_index}] {dev_name} (pinned)")
-                                    stream = open_mic_stream(pa, dev_index, sample_rate=sample_rate, chunk_size=chunk_size)
-                                    headset_mode = detect_headset(pa, dev_index)
-                                    _mic_pinned = True  # Suppress auto-switch back to priority mic
-                                    _write_active_mic(dev_name)
-                                    device_change_cue(dev_name, "input")
-                                    _hud_send({"type": "state", "text": f"Mic: {dev_name}"})
-                                else:
-                                    log(f"Requested mic not found: {requested_name}")
-                        except Exception as e:
-                            log(f"Mic switch request error: {e}")
-
-                    # Also check if the default output device changed (AUDIO-11)
-                    try:
-                        _cur_out = pa.get_default_output_device_info()
-                        _cur_out_name = _cur_out['name']
-                        if _cur_out_name != _last_output_device and _last_output_device:
-                            log(f"Output device changed: {_last_output_device} → {_cur_out_name}")
-                            device_change_cue(_cur_out_name, "output")
-                            _hud_send({"type": "state", "text": f"Speaker: {_cur_out_name}"})
-                        _last_output_device = _cur_out_name
-                    except Exception:
-                        pass
-
-                except Exception:
-                    pass  # Don't crash the main loop on scan errors
-
-            # Silence watchdog — end recording after silence_timeout seconds of quiet
-            # Only for wake-word triggered recordings (PTT has natural release)
-            # If speech was captured before the silence, transcribe it.
-            # Only discard if the entire recording is silent (false wake word trigger).
+            # Silence watchdog -- end recording after silence_timeout seconds of quiet
             if _is_rec and not _is_ptt and silence_timeout > 0:
-                elapsed = time.time() - recording_start_time
+                elapsed = time.time() - ctx.recording_start_time
                 if elapsed > silence_timeout:
-                    with _state_lock:
-                        recent_chunks = _audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
-                        all_chunks = list(_audio_buffer)
+                    with ctx.lock:
+                        recent_chunks = ctx.audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
+                        all_chunks = list(ctx.audio_buffer)
                     if recent_chunks:
                         max_recent = max(int(np.abs(c).max()) for c in recent_chunks)
                         if max_recent < silence_threshold:
-                            # Recent audio is silent — check if ANY speech was captured
                             max_overall = max(int(np.abs(c).max()) for c in all_chunks) if all_chunks else 0
                             if max_overall < silence_threshold:
-                                # Entire recording is silent — discard (false trigger)
+                                # Entire recording is silent -- discard (false trigger)
                                 log(f"Silence timeout ({silence_timeout}s, all silent max={max_overall}), cancelling")
-                                _show_recording_indicator(False)
-                                _release_recording_guard()
-                                with _state_lock:
-                                    is_recording = False
-                                    busy = False
-                                    _audio_buffer.clear()
-                                audio_cue("paused", cues_dir)
-                                _hud_send({"type": "state", "state": "idle"})
+                                recording.cancel()
                                 log("Ready for next wake word.")
                                 continue
                             else:
-                                # Speech was captured before silence — transcribe it
+                                # Speech was captured before silence -- transcribe it
                                 log(f"Silence timeout ({silence_timeout}s, max_recent={max_recent}), "
                                     f"but speech detected (max_overall={max_overall}), transcribing")
-                                stop_recording(config=config)
+                                recording.stop()
                                 continue
 
             if _is_busy:
-                # Busy flag watchdog — force-reset if stuck (AUDIO-12)
+                # Busy flag watchdog -- force-reset if stuck (AUDIO-12)
                 if _busy_since == 0.0:
                     _busy_since = time.time()
                 elif time.time() - _busy_since > _BUSY_TIMEOUT:
                     log(f"WARNING: busy flag stuck for {_BUSY_TIMEOUT}s, force-resetting (watchdog)")
                     print(f"[watchdog] busy flag stuck for {_BUSY_TIMEOUT}s, resetting", file=sys.stderr, flush=True)
-                    with _state_lock:
-                        busy = False
+                    with ctx.lock:
+                        ctx.busy = False
                     _busy_since = 0.0
                     _release_recording_guard()
-                    _hud_send({"type": "state", "state": "idle"})
+                    hud_send({"type": "state", "state": "idle"})
                     # Fall through to wake word processing
                 else:
                     continue
@@ -1779,11 +789,8 @@ def main() -> None:
                 continue
 
             # Echo suppression: skip wake word while ANY TTS is playing.
-            # Even headsets can have mic bleed (e.g. G435 wireless).
-            # Check both Vox's own flag and Conductor's external TTS flag.
-            # Requirement: AUDIO-09, AUDIO-10
             _tts_active = False
-            for _tts_flag in (TTS_PLAYING_FLAG, "/tmp/claude-tts-playing.pid"):
+            for _tts_flag in (TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID):
                 if os.path.exists(_tts_flag):
                     try:
                         flag_age = time.time() - os.path.getmtime(_tts_flag)
@@ -1796,8 +803,7 @@ def main() -> None:
             if _tts_active:
                 continue  # Suppress wake word during TTS playback
 
-            # ECHO-01: Post-TTS cooldown — suppress wake word for grace period
-            # after TTS ends to handle room reverb tail.
+            # ECHO-01: Post-TTS cooldown
             _echo_grace = config.echo_suppression.grace_after_tts
             if _echo_grace > 0 and _tts_last_seen > 0:
                 since_tts = time.time() - _tts_last_seen
@@ -1805,25 +811,25 @@ def main() -> None:
                     continue  # Still in reverb tail grace period
 
             # ECHO-05: Process mic frame through WebRTC AEC if enabled
-            if _aec_active:
+            if aec_active:
                 from heyvox.audio.echo import process_mic_frame
                 audio = process_mic_frame(audio, sample_rate=sample_rate)
 
             model.predict(audio)
 
-            # ECHO-02: Dynamic threshold in speaker mode — raise threshold
-            # when no headset is detected to reduce false triggers from ambient audio.
-            _speaker_mult = config.echo_suppression.speaker_threshold_multiplier if not headset_mode else 1.0
+            # ECHO-02: Dynamic threshold in speaker mode
+            _speaker_mult = (
+                config.echo_suppression.speaker_threshold_multiplier
+                if not devices.headset_mode else 1.0
+            )
 
-            # Cooldown is shorter during recording — repeated stop attempts should
-            # get through quickly. Start cooldown stays normal to prevent double-triggers.
+            # Cooldown is shorter during recording
             stop_cooldown = min(cooldown, 0.5)
 
             _model_thresholds = config.wake_words.model_thresholds
 
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
-                # Per-model threshold override (e.g. hey_vox: 0.95 for noisy models)
                 base_thr = _model_thresholds.get(ww_name, threshold)
                 active_threshold = (base_thr * _speaker_mult * 0.85) if _is_rec else (base_thr * _speaker_mult)
                 active_cooldown = stop_cooldown if _is_rec else cooldown
@@ -1838,21 +844,19 @@ def main() -> None:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         last_trigger = now
-                        # PTT owns the recording lifecycle — ignore wake words
-                        # Use _is_ptt/_is_rec snapshots (taken under _state_lock above)
-                        # to avoid reading bare globals from the main thread.
+                        # PTT owns the recording lifecycle -- ignore wake words
                         if _is_ptt and _is_rec:
                             pass
                         elif use_separate_words:
                             if start_word in ww_name and not _is_rec:
-                                start_recording(config=config, preroll=_preroll_buffer)
+                                recording.start(preroll=_preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
-                                stop_recording(config=config)
+                                recording.stop()
                         else:
                             if not _is_rec:
-                                start_recording(config=config, preroll=_preroll_buffer)
+                                recording.start(preroll=_preroll_buffer)
                             else:
-                                stop_recording(config=config)
+                                recording.stop()
                     model.reset()
 
     except KeyboardInterrupt:
@@ -1865,73 +869,52 @@ def main() -> None:
         log("FATAL: Unhandled exception in main loop")
         import traceback
         log(traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Main event loop -- loads config, starts PTT, runs wake word detection."""
+    config = load_config()
+
+    ctx, devices, recording, model, use_separate_words, hud_send, aec_active = _setup(config)
+
+    from heyvox.audio.tts import shutdown as _shutdown_tts
+
+    try:
+        _run_loop(ctx, devices, recording, config, model, use_separate_words, hud_send, aec_active)
     finally:
         log("Cleaning up...")
         # Always clean up flag files to avoid blocking TTS orchestrator
-        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, "/tmp/herald-pause"):
+        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, HERALD_PAUSE_FLAG):
             try:
                 os.unlink(flag)
             except FileNotFoundError:
                 pass
         # Clean up media pause flags (both heyvox and herald namespaces)
         import glob as _glob
-        for f in _glob.glob("/tmp/heyvox-media-paused-*") + _glob.glob("/tmp/herald-media-paused-*"):
+        for f in _glob.glob(HEYVOX_MEDIA_PAUSED_PREFIX + "*") + _glob.glob(HERALD_MEDIA_PAUSED_PREFIX + "*"):
             try:
                 os.unlink(f)
             except FileNotFoundError:
                 pass
-        if _hud_client:
-            _hud_client.close()
+        if ctx.hud_client:
+            ctx.hud_client.close()
         # Only kill HUD on explicit stop (SIGTERM/SIGINT), not on watchdog restart
-        # or unhandled exception — so the user keeps the menu bar icon to restart.
-        if _shutdown.is_set():
-            _stop_hud_overlay()
+        if ctx.shutdown.is_set():
+            stop_hud_overlay()
         # Shut down native TTS worker cleanly (drains queue + joins thread)
-        # Requirement: TTS-03
         if config.tts.enabled:
             _shutdown_tts()
             log("TTS worker stopped")
-        try:
-            stream.stop_stream()
-            stream.close()
-        except Exception:
-            pass
-        pa.terminate()
-        # Keep ACTIVE_MIC_FILE across restarts so HUD shows last-known mic
-        # instead of "None" during the brief startup window before mic detection.
+        devices.cleanup()
         log("Shutdown complete.")
 
 
-def _stop_tts_from_escape() -> None:
-    """Stop TTS playback and clear queue (used by Escape key handler)."""
-    from heyvox.audio.tts import stop_all
-    stop_all()
-    _hud_send({"type": "state", "state": "idle"})
-    log("TTS stopped via Escape key.")
-
-
-def _cancel_recording_from_ptt(config: HeyvoxConfig) -> None:
-    """Cancel an active recording (used by PTT Escape handler)."""
-    global is_recording, busy
-    _show_recording_indicator(False)
-    _release_recording_guard()
-    with _state_lock:
-        is_recording = False
-        busy = False
-        _audio_buffer.clear()
-    try:
-        from heyvox.audio.media import resume_media
-        resume_media()
-    except Exception:
-        pass
-    cues_dir = get_cues_dir(config.cues_dir)
-    audio_cue("paused", cues_dir)
-    _hud_send({"type": "state", "state": "idle"})
-    log("Recording cancelled.")
-
-
 def run() -> None:
-    """CLI entry point — called by vox.cli on 'heyvox start'."""
+    """CLI entry point -- called by vox.cli on 'heyvox start'."""
     main()
 
 

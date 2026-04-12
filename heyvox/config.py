@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 from platformdirs import user_config_dir
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator, ValidationError
+from heyvox.constants import LOG_FILE_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +255,7 @@ class HeyvoxConfig(BaseModel):
     # Path to cues directory — empty = auto-detect from package location
     cues_dir: str = ""
 
-    log_file: str = "/tmp/heyvox.log"
+    log_file: str = LOG_FILE_DEFAULT
     log_max_bytes: int = 1_000_000
 
     @field_validator("target_mode")

@@ -33,7 +33,7 @@ PILL_H = 28
 PILL_MARGIN_TOP = 8
 PILL_MARGIN_RIGHT = 16  # Default distance from right edge of screen
 ANIM_DURATION = 0.2
-POSITION_FILE = "/tmp/heyvox-hud-position.json"  # Persists user-dragged position
+from heyvox.constants import HUD_POSITION_FILE as POSITION_FILE  # Persists user-dragged position
 _MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
 
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
@@ -487,7 +487,7 @@ def _write_tts_cmd(cmd: str) -> None:
         from heyvox.constants import TTS_CMD_FILE
         cmd_path = TTS_CMD_FILE
     except ImportError:
-        cmd_path = "/tmp/heyvox-tts-cmd"
+        cmd_path = "/tmp/heyvox-tts-cmd"  # Must match heyvox.constants.TTS_CMD_FILE
     try:
         tmp_path = cmd_path + ".tmp"
         with open(tmp_path, "w") as f:
@@ -506,7 +506,8 @@ def _make_menu_action_class():
     from Foundation import NSObject
     from AppKit import NSPasteboard, NSPasteboardTypeString
 
-    _TTS_MUTE_FLAGS = ["/tmp/claude-tts-mute", "/tmp/herald-mute"]
+    from heyvox.constants import CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG
+    _TTS_MUTE_FLAGS = [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]
 
     class _MenuActionHandler(NSObject):
         def copyTranscript_(self, sender):
@@ -575,7 +576,8 @@ def _make_menu_action_class():
         def openLog_(self, sender):
             import subprocess
             try:
-                subprocess.run(["open", "-a", "Console", "/tmp/heyvox.log"])
+                from heyvox.constants import LOG_FILE_DEFAULT
+                subprocess.run(["open", "-a", "Console", LOG_FILE_DEFAULT])
             except Exception:
                 pass
 
@@ -628,7 +630,8 @@ def _make_menu_action_class():
             # Send SIGTERM to main process and wait for clean shutdown
             # (atexit handler releases PID lock). Avoid pkill which can
             # also kill the newly spawned process.
-            pid_file = "/tmp/heyvox.pid"
+            from heyvox.constants import HEYVOX_PID_FILE, HEYVOX_RESTART_LOG
+            pid_file = HEYVOX_PID_FILE
             old_pid = 0
             try:
                 with open(pid_file) as f:
@@ -660,12 +663,23 @@ def _make_menu_action_class():
             except FileNotFoundError:
                 pass
 
-            # Relaunch main process — it will spawn its own overlay
-            subprocess.Popen(
+            # Relaunch main process — it will spawn its own overlay.
+            # Log stderr so startup failures are diagnosable.
+            restart_log = open(HEYVOX_RESTART_LOG, "w")
+            proc = subprocess.Popen(
                 [sys.executable, "-m", "heyvox.main"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=restart_log,
                 start_new_session=True,  # Detach so our exit doesn't kill it
             )
+
+            # Wait briefly and verify the new process is alive before quitting
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                # New process already exited — don't quit overlay so user
+                # still has the menu bar icon and can see something went wrong.
+                restart_log.close()
+                return
+
             # Quit this overlay — the new main process launches a fresh one
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
@@ -675,7 +689,8 @@ def _make_menu_action_class():
             import os
             import signal as _sig
             try:
-                with open("/tmp/heyvox.pid") as f:
+                from heyvox.constants import HEYVOX_PID_FILE
+                with open(HEYVOX_PID_FILE) as f:
                     pid = int(f.read().strip())
                 os.kill(pid, _sig.SIGTERM)
             except (FileNotFoundError, ValueError, ProcessLookupError):
@@ -731,13 +746,17 @@ def _build_transcript_menu(handler):
         return item
 
     # -- Gather state --
-    queue_count = len(_glob.glob("/tmp/herald-queue/*.wav"))
-    hold_count = len(_glob.glob("/tmp/herald-hold/*.wav"))
+    from heyvox.constants import (
+        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG,
+        HERALD_ORCH_PID, KOKORO_DAEMON_SOCK, KOKORO_DAEMON_PID, HUD_SOCKET_PATH,
+    )
+    queue_count = len(_glob.glob(HERALD_QUEUE_DIR + "/*.wav"))
+    hold_count = len(_glob.glob(HERALD_HOLD_DIR + "/*.wav"))
     try:
         from heyvox.audio.tts import is_muted as _tts_is_muted
         _is_muted = _tts_is_muted()
     except Exception:
-        _is_muted = os.path.exists("/tmp/claude-tts-mute") or os.path.exists("/tmp/herald-mute")
+        _is_muted = os.path.exists(CLAUDE_TTS_MUTE_FLAG) or os.path.exists(HERALD_MUTE_FLAG)
 
     try:
         from heyvox.audio.tts import get_verbosity
@@ -1021,9 +1040,9 @@ def _build_transcript_menu(handler):
         except Exception:
             return False
 
-    orch_ok = _pid_alive("/tmp/herald-orchestrator.pid")
-    kokoro_ok = os.path.exists("/tmp/kokoro-daemon.sock") and _pid_alive("/tmp/kokoro-daemon.pid")
-    hud_ok = os.path.exists("/tmp/heyvox-hud.sock")
+    orch_ok = _pid_alive(HERALD_ORCH_PID)
+    kokoro_ok = os.path.exists(KOKORO_DAEMON_SOCK) and _pid_alive(KOKORO_DAEMON_PID)
+    hud_ok = os.path.exists(HUD_SOCKET_PATH)
 
     def _status_item(name, ok):
         icon = "\U0001f7e2" if ok else "\U0001f534"
