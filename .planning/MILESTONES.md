@@ -1,5 +1,39 @@
 # Milestones
 
+## v1.1 Architecture Hardening (Shipped: 2026-04-11)
+
+**Phases completed:** 4 phases, 14 plans
+**Timeline:** 2 days (2026-04-10 → 2026-04-11)
+**Commits:** 83
+**Codebase:** 15,105 LOC Python
+
+**Delivered:** Internal architecture overhaul — main.py decomposed, Herald ported from bash to Python, flag-file IPC replaced with atomic state, 114-test pytest suite added. No user-facing changes; all improvements are reliability and maintainability.
+
+**Key accomplishments:**
+
+1. Decomposed main.py monolith (2000→896 lines) into RecordingStateMachine, DeviceManager, WakeWordProcessor, and AppContext modules
+2. Ported Herald TTS orchestrator from bash to pure Python — eliminated 4 shell boundary crossings per TTS request
+3. CoreAudio ctypes bindings replace osascript for volume reads/writes; mute/volume cached at 5s TTL
+4. Consolidated 25+ /tmp flag files into atomic `/tmp/heyvox-state.json` with centralized constants
+5. Added periodic garbage collection for orphaned Herald queue files (WAV, sidecar, timing)
+6. 114-test pytest suite: pure functions, state machine transitions, HUD IPC round-trips, device selection
+
+**Bugs introduced & fixed (post-refactor):**
+
+- MLX Whisper memory leak: `ThreadPoolExecutor` changed to `shutdown(wait=False)` — orphaned threads held GPU memory, spiraling to 10GB+. Fixed with context manager.
+- Memory watchdog restart loop: threshold 1000MB below MLX Whisper baseline ~1050MB → tight kill/reload cycle. Fixed: warn=2000MB, critical=2500MB.
+- HUD overlay syntax errors: unindented try: blocks in overlay.py. Fixed: re-indented.
+- Conductor socket injection: sidecar query RPC is internal-only, external calls return null silently. Fixed: disabled socket injection, clipboard+paste always.
+- Sherpa ThreadPoolExecutor: same shutdown(wait=False) bug in sherpa-onnx path. Fixed with same context manager.
+
+**Known tech debt (deferred to v2.0):**
+
+- 7 backward-compat shim vars in main.py (test scaffolding)
+- tts_playing state field dual-write incomplete
+- 6 stale test failures (pre-existing, not v1.1 scope)
+
+---
+
 ## v1.0 MVP (Shipped: 2026-03-27)
 
 **Phases completed:** 5 phases, 10 plans
@@ -7,6 +41,7 @@
 **Timeline:** 2 days (2026-03-26 → 2026-03-27)
 
 **Key accomplishments:**
+
 1. Standalone Python package with modular structure and Pydantic config — zero Conductor dependency
 2. Full audio pipeline: wake word detection, push-to-talk, MLX Whisper STT, echo suppression, headset detection, silent-mic health checks
 3. Adapter protocol for multi-agent text injection (Generic, LastAgent, Conductor) with configurable target modes

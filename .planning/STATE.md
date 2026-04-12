@@ -2,35 +2,35 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Architecture Hardening
-status: verifying
-stopped_at: Completed 09-02-PLAN.md
-last_updated: "2026-04-11T18:32:26.570Z"
+status: completed
+stopped_at: Milestone v1.1 archived
+last_updated: "2026-04-11T21:00:00Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 4
   completed_phases: 4
   total_plans: 14
   completed_plans: 14
-  percent: 50
+  percent: 100
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-10)
+See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 09 — test-suite
+**Current focus:** Planning next milestone (v2.0)
 
 ## Current Position
 
-Phase: 09 (test-suite) — EXECUTING
-Plan: 2 of 2
-Status: Phase complete — ready for verification
+Phase: —
+Plan: —
+Status: Milestone v1.1 complete. Run `/gsd:new-milestone` for v2.0.
 Last activity: 2026-04-11
 
-Progress: [██████████          ] 50% (5/10 v1.0 phases complete; v1.1 starting)
+Progress: [████████████████████] 100% (v1.1 shipped)
 
 ## Performance Metrics
 
@@ -40,7 +40,11 @@ Progress: [██████████          ] 50% (5/10 v1.0 phases compl
 - Average duration: 3.5 min
 - Total execution time: ~0.6 hours
 
-**v1.1 plans:** Not yet started
+**Velocity (v1.1):**
+
+- Total plans completed: 14
+- Commits: 83
+- Timeline: 2 days (2026-04-10 → 2026-04-11)
 
 ## Accumulated Context
 
@@ -48,36 +52,16 @@ Progress: [██████████          ] 50% (5/10 v1.0 phases compl
 
 Full decision log in PROJECT.md Key Decisions table.
 
-- [Phase 06-decomposition]: Module-level pytestmark skip allows Plans 01-03 to unskip tests with one line removal
-- [Phase 06]: dataclasses.field(default_factory=...) for all mutable AppContext defaults to prevent shared state
-- [Phase 06]: Backward-compat re-exports in main.py preserve test API until Phase 9 cleanup
-- [Phase 06-decomposition]: Device-private state on DeviceManager (not AppContext): pa, stream, headset_mode, _mic_pinned, cv_history live on DeviceManager; AppContext holds cross-concern state only
-- [Phase 06-decomposition]: Bridge pattern for recording globals in Plan 02: ctx.is_recording = is_recording at loop top; removed in Plan 03 when recording state moves to AppContext
-- [Phase 06-decomposition]: HUD process lifecycle extracted to heyvox/hud/process.py as natural decomposition
-- [Phase 07-herald-python-port]: Add herald constants to constants.py for single source of truth; detect_mood/detect_language as module-level functions for testability
-- [Phase 07-herald-python-port]: Thin bash shims (D-03): 5-line hook shims retained for entry points, python3 -m heyvox.herald.worker handles all logic
-- [Phase 07-herald-python-port]: Inline import of pause_media/resume_media in _media_pause/_media_resume to avoid circular imports
-- [Phase 07-herald-python-port]: normalize_samples operates in float32 space (pre-int16) matching orchestrator int16-scale constants
-- [Phase 08-ipc-consolidation]: Standalone daemons (watcher.py, kokoro-daemon.py, hush_host.py) annotated with source-of-truth comments instead of importing heyvox.constants
-- [Phase 08-ipc-consolidation]: Dual-write strategy: old flag files kept intact, state file populated alongside for safe migration to 08-03
-- [Phase 08-ipc-consolidation]: TRANSIENT_FIELDS as a set constant makes reset_transient_state() self-documenting
-- [Phase 08-ipc-consolidation]: Inline try/except around all update_state() calls prevents IPC failure from crashing callers
-- [Phase 08-ipc-consolidation]: Queue GC: claim_dir added to dir_thresholds (1h) replacing inline block; HERALD_WATCHER_HANDLED_DIR cleaned via separate loop to avoid dataclass change
-- [Phase 09-test-suite]: Import from heyvox.text_processing directly (Phase 9 cleanup of backward-compat re-export from main.py)
-
 ### Pending Todos
 
 None.
 
 ### Blockers/Concerns
 
-- main.py is ~2000 lines with 17+ globals — Phase 6 (Decomposition) addresses this first
-- Herald orchestrator.sh crosses shell/Python boundary 4x per TTS request — Phase 7 eliminates this
-- 25+ flag files in /tmp/ with race conditions — Phase 8 consolidates to atomic state file
-- Phase ordering is strict: Decomp → Herald Port → IPC → Tests (each depends on prior)
+None — milestone complete.
 
 ## Session Continuity
 
-Last session: 2026-04-11T18:32:26.566Z
-Stopped at: Completed 09-02-PLAN.md
+Last session: 2026-04-11
+Stopped at: Milestone v1.1 archived
 Resume file: None
