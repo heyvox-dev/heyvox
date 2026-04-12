@@ -14,20 +14,24 @@ class TestTypeText:
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
     @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
-    def test_basic_paste(self, mock_clip, mock_sleep, mock_run):
+    @patch("heyvox.input.injection._get_frontmost_app", return_value="TestApp")
+    def test_basic_paste(self, mock_front, mock_clip, mock_sleep, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         type_text("hello")
-        # pbcopy (set) + osascript (Cmd-V) = 2 subprocess calls
+        # pbcopy (set clipboard) + osascript (Cmd-V paste) = 2 subprocess calls
+        # (_get_frontmost_app is patched so its subprocess calls are excluded)
         assert mock_run.call_count == 2
 
     @patch("heyvox.input.injection.subprocess.run")
     @patch("heyvox.input.injection.time.sleep")
     @patch("heyvox.input.injection.get_clipboard_text", return_value="hello")
-    def test_no_clipboard_restore(self, mock_clip, mock_sleep, mock_run):
+    @patch("heyvox.input.injection._get_frontmost_app", return_value="TestApp")
+    def test_no_clipboard_restore(self, mock_front, mock_clip, mock_sleep, mock_run):
         """Clipboard is NOT restored after paste — prevents Electron race condition."""
         mock_run.return_value = MagicMock(returncode=0)
         type_text("hello")
-        # Only 2 calls: pbcopy + Cmd-V. No third call to restore.
+        # Only 2 calls: pbcopy + Cmd-V. No third call to restore clipboard.
+        # (_get_frontmost_app is patched so its subprocess calls are excluded)
         assert mock_run.call_count == 2
 
     @patch("heyvox.input.injection.subprocess.run")
