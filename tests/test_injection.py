@@ -48,8 +48,12 @@ class TestTypeText:
                 with patch("heyvox.input.injection.time.sleep"):
                     mock_run.return_value = MagicMock(returncode=0)
                     type_text("hello")
-        # Only 1 subprocess call: Cmd-V. No second call to restore clipboard.
-        assert mock_run.call_count == 1
+        # Subprocess calls: get_frontmost_before + Cmd-V + get_frontmost_after = 3.
+        # No additional call to write clipboard content back (no restore).
+        # NSPasteboard.setString_forType_ is never called a second time.
+        assert mock_run.call_count == 3
+        # Verify NSPasteboard was only written once (no restore write)
+        mock_pb.setString_forType_.assert_called_once()
 
     def test_aborts_on_verify_mismatch(self):
         """If clipboard read returns wrong text, abort without pasting."""
