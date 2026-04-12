@@ -57,7 +57,7 @@ class TestPauseMedia:
 
     @patch("heyvox.audio.media._hush_command", return_value=None)
     @patch("heyvox.audio.media._is_media_playing_native", return_value=None)
-    @patch("heyvox.audio.media._browser_has_video_tab", return_value=False)
+    @patch("heyvox.audio.media._browser_has_media_tab", return_value=False)
     @patch("heyvox.audio.media._test_chrome_js_access", return_value=False)
     def test_noop_when_no_session(self, mock_js, mock_video, mock_state, mock_hush):
         """No native session and no browser media → returns False, no flag created."""
@@ -94,7 +94,7 @@ class TestPauseMedia:
         mock_key.assert_not_called()
 
     @patch("heyvox.audio.media._hush_command", return_value=None)
-    @patch("heyvox.audio.media._browser_has_video_tab", return_value=False)
+    @patch("heyvox.audio.media._browser_has_media_tab", return_value=False)
     @patch("heyvox.audio.media._test_chrome_js_access", return_value=False)
     @patch("heyvox.audio.media._get_mr", return_value=None)
     @patch("heyvox.audio.media._is_media_playing_native", return_value=True)
