@@ -180,6 +180,23 @@ class AudioConfig(BaseModel):
     chunk_size: int = 1280
 
 
+class InjectionConfig(BaseModel):
+    """Per-app focus settle delays and retry parameters for paste injection.
+
+    Requirement: PASTE-02, PASTE-03
+    """
+    focus_settle_secs: float = 0.1
+    max_retries: int = 2
+    app_delays: dict[str, float] = {
+        "conductor": 0.3,
+        "cursor": 0.15,
+        "windsurf": 0.15,
+        "visual studio code": 0.15,
+        "iterm2": 0.03,
+        "terminal": 0.03,
+    }
+
+
 class EchoSuppressionConfig(BaseModel):
     """Echo suppression configuration.
 
@@ -245,6 +262,7 @@ class HeyvoxConfig(BaseModel):
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
+    injection: InjectionConfig = InjectionConfig()
 
     # HUD overlay — floating pill with waveform and state indicator
     hud_enabled: bool = True

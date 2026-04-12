@@ -20,10 +20,7 @@ SUBPROCESS_TIMEOUT = 5
 
 def _log(msg: str) -> None:
     """Log to stderr with [injection] prefix."""
-    try:
-        print(f"[injection] {msg}", file=sys.stderr, flush=True)
-    except (BrokenPipeError, OSError):
-        pass
+    print(f"[injection] {msg}", file=sys.stderr, flush=True)
 
 
 def _get_frontmost_app() -> str:
@@ -69,7 +66,7 @@ def _hush_send(command: dict) -> dict | None:
             return json.loads(data.strip())
         return None
     except (OSError, json.JSONDecodeError, TimeoutError) as e:
-        _log(f"Hush socket error: {e}")
+        print(f"[injection] Hush socket error: {e}", file=sys.stderr)
         return None
 
 
@@ -77,10 +74,10 @@ def _chrome_type_text(text: str) -> bool:
     """Insert text via the Hush Chrome extension. Returns True on success."""
     resp = _hush_send({"action": "type-text", "text": text})
     if resp and resp.get("ok"):
-        _log(f"Chrome type-text OK (tab: {resp.get('title', '?')})")
+        print(f"[injection] Chrome type-text OK (tab: {resp.get('title', '?')})", file=sys.stderr)
         return True
     if resp and resp.get("error"):
-        _log(f"Chrome type-text failed: {resp['error']}")
+        print(f"[injection] Chrome type-text failed: {resp['error']}", file=sys.stderr)
     return False
 
 
@@ -96,18 +93,40 @@ def _chrome_press_enter(count: int) -> bool:
 # osascript (clipboard + Cmd-V / keystroke)
 # ---------------------------------------------------------------------------
 
-def _set_clipboard(text: str) -> bool:
-    """Set clipboard text via pbcopy."""
+def _set_clipboard(text: str) -> tuple[bool, int]:
+    """Set clipboard text via NSPasteboard (no subprocess).
+
+    Returns (success, change_count_after_write). On failure returns (False, -1).
+
+    Requirement: PASTE-01
+    """
     try:
-        result = subprocess.run(
-            ["pbcopy"],
-            input=text.encode("utf-8"),
-            capture_output=True, timeout=SUBPROCESS_TIMEOUT,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError) as e:
-        _log(f"_set_clipboard failed: {e}")
-        return False
+        import AppKit
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        result = pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+        count = pb.changeCount()
+        return bool(result), count
+    except Exception as e:
+        _log(f"_set_clipboard (NSPasteboard) failed: {e}")
+        return False, -1
+
+
+def _settle_delay_for(app_name: str | None, app_delays: dict[str, float], default: float) -> float:
+    """Resolve the focus settle delay for a given app name.
+
+    Uses case-insensitive substring match against keys in app_delays.
+    Returns default if app_name is None or no key matches.
+
+    Requirement: PASTE-03
+    """
+    if not app_name:
+        return default
+    name_lower = app_name.lower()
+    for key, delay in app_delays.items():
+        if key.lower() in name_lower:
+            return delay
+    return default
 
 
 def _save_frontmost_pid() -> int:
@@ -133,16 +152,23 @@ def _restore_frontmost(pid: int) -> None:
         pass
 
 
-def _osascript_type_text(text: str, app_name: str | None = None) -> None:
+def _osascript_type_text(text: str, app_name: str | None = None, settle_secs: float = 0.1) -> None:
     """Paste text via clipboard + Cmd-V (osascript).
 
     When app_name is provided, targets that process directly. Briefly
     activates the target for the paste, then restores the previously
     focused app so the user isn't interrupted on multi-monitor setups.
+
+    settle_secs: focus settle delay (Python sleep before Cmd-V). Replaces
+    the old hardcoded AppleScript 'delay 0.3' — now controlled by
+    InjectionConfig.app_delays per-app profiles.
+
+    Requirement: PASTE-02, PASTE-03
     """
     _log(f"paste: target={app_name or 'frontmost'}, text={len(text)} chars: {text[:60]!r}")
 
-    if not _set_clipboard(text):
+    ok, _count = _set_clipboard(text)
+    if not ok:
         _log("ERROR: failed to set clipboard, aborting paste")
         return
 
@@ -157,14 +183,13 @@ def _osascript_type_text(text: str, app_name: str | None = None) -> None:
     original_pid = _save_frontmost_pid()
     _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
 
-    time.sleep(0.05)
+    time.sleep(settle_secs)
     if app_name:
         safe_name = app_name.replace('\\', '\\\\').replace('"', '\\"')
         script = (
             f'tell application "System Events"\n'
             f'    tell process "{safe_name}"\n'
             f'        set frontmost to true\n'
-            f'        delay 0.3\n'
             f'        keystroke "v" using command down\n'
             f'    end tell\n'
             f'end tell'
@@ -295,10 +320,14 @@ def clipboard_is_image() -> bool:
 
 
 def get_clipboard_text() -> str:
-    """Return the current clipboard text, or "" if clipboard is empty or not text."""
-    result = subprocess.run(
-        ["osascript", "-e",
-         'try\nset c to (the clipboard as text)\nreturn c\non error\nreturn ""\nend try'],
-        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
-    )
-    return result.stdout.strip()
+    """Return the current clipboard text via NSPasteboard, or "" if empty or not text.
+
+    Requirement: PASTE-01
+    """
+    try:
+        import AppKit
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        text = pb.stringForType_(AppKit.NSPasteboardTypeString)
+        return str(text) if text else ""
+    except Exception:
+        return ""
