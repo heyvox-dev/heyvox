@@ -735,17 +735,27 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 continue
 
             # Echo suppression: skip wake word while ANY TTS is playing.
+            # Check atomic state file first (primary, written by Herald orchestrator).
+            # Fall back to legacy flag files for processes that predate the state file.
             _tts_active = False
-            for _tts_flag in (TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID):
-                if os.path.exists(_tts_flag):
-                    try:
-                        flag_age = time.time() - os.path.getmtime(_tts_flag)
-                        if flag_age < TTS_PLAYING_MAX_AGE_SECS:
-                            _tts_active = True
-                            _tts_last_seen = time.time()
-                            break
-                    except OSError:
-                        pass
+            try:
+                from heyvox.ipc.state import read_state as _read_ipc_state
+                if _read_ipc_state().get("tts_playing"):
+                    _tts_active = True
+                    _tts_last_seen = time.time()
+            except Exception:
+                pass
+            if not _tts_active:
+                for _tts_flag in (TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID):
+                    if os.path.exists(_tts_flag):
+                        try:
+                            flag_age = time.time() - os.path.getmtime(_tts_flag)
+                            if flag_age < TTS_PLAYING_MAX_AGE_SECS:
+                                _tts_active = True
+                                _tts_last_seen = time.time()
+                                break
+                        except OSError:
+                            pass
             if _tts_active:
                 continue  # Suppress wake word during TTS playback
 

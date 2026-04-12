@@ -46,6 +46,7 @@ from heyvox.constants import (  # noqa: E402 — after __future__ import
     HERALD_ORCH_PID, HERALD_PLAYING_PID, HERALD_ORIGINAL_VOL_FILE,
     HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG, RECORDING_FLAG, HERALD_PLAY_NEXT,
     HERALD_LAST_PLAY, VERBOSITY_FILE, HERALD_WATCHER_HANDLED_DIR,
+    TTS_PLAYING_FLAG,
 )
 
 
@@ -561,10 +562,16 @@ def _play_wav(
         cfg.playing_pid_file.write_text(str(proc.pid))
     except OSError:
         pass
+    # Dual-write: atomic state file (primary) + legacy flag file (parallel write).
+    # main.py echo suppression reads both; atomic state is the new source of truth.
     try:
         from heyvox.ipc import update_state
-        update_state({"herald_playing_pid": proc.pid})
+        update_state({"herald_playing_pid": proc.pid, "tts_playing": True})
     except Exception:
+        pass
+    try:
+        open(TTS_PLAYING_FLAG, "w").close()
+    except OSError:
         pass
 
     # Watchdog: kill afplay if recording starts mid-playback
@@ -591,10 +598,15 @@ def _play_wav(
     watchdog_stop.set()
     watchdog_thread.join(timeout=0.5)
     cfg.playing_pid_file.unlink(missing_ok=True)
+    # Dual-write: clear atomic state (primary) + remove legacy flag file (parallel).
     try:
         from heyvox.ipc import update_state
-        update_state({"herald_playing_pid": None})
+        update_state({"herald_playing_pid": None, "tts_playing": False})
     except Exception:
+        pass
+    try:
+        os.unlink(TTS_PLAYING_FLAG)
+    except FileNotFoundError:
         pass
 
     # If watchdog killed playback, wait for recording to finish
