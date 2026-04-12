@@ -122,6 +122,16 @@ None - InjectionConfig is defined and defaults are set. The wiring of `config.in
 - InjectionConfig model ready; next plan should wire it into type_text call sites via config parameter
 - error.aiff cue ready for use in recording.py paste failure detection
 
+## Self-Check: PASSED
+
+- heyvox/input/injection.py: FOUND
+- heyvox/config.py: FOUND
+- heyvox/cues/error.aiff: FOUND
+- tests/test_injection.py: FOUND
+- .planning/phases/12-paste-injection-reliability/12-01-SUMMARY.md: FOUND
+- Commit b4d7be1 (test): FOUND
+- Commit a4c0fa7 (feat): FOUND
+
 ---
 *Phase: 12-paste-injection-reliability*
 *Completed: 2026-04-12*
