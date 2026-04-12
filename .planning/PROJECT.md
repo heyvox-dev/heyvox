@@ -37,21 +37,21 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 - ✓ All IPC paths consolidated in heyvox/constants.py — v1.1 Phase 8
 - ✓ Atomic state file (/tmp/heyvox-state.json) for cross-process coordination — v1.1 Phase 8
 - ✓ Queue garbage collection for orphaned Herald files — v1.1 Phase 8
+- ✓ main.py decomposed into RecordingStateMachine, DeviceManager, WakeWordProcessor, AppContext — v1.1 Phase 6
+- ✓ Herald TTS orchestrator ported from bash to pure Python — v1.1 Phase 7
+- ✓ CoreAudio ctypes bindings for volume (no osascript) — v1.1 Phase 7
+- ✓ Volume/mute detection cached at 5s TTL — v1.1 Phase 7
+- ✓ 114-test pytest suite (pure functions, state machines, IPC, device selection) — v1.1 Phase 9
 
 ### Active
 
-(See REQUIREMENTS.md for v1.1 requirements)
+(No active milestone — run `/gsd:new-milestone` to define v2.0)
 
-## Current Milestone: v1.1 Architecture Hardening
+## Current State
 
-**Goal:** Refactor the core architecture for reliability, testability, and maintainability — decompose the monolithic main loop, eliminate the bash/Python boundary in Herald, consolidate fragile flag-file IPC, and add a test suite.
+**Shipped v1.1** on 2026-04-11 (Architecture Hardening). All 15 requirements satisfied.
 
-**Target features:**
-- Decompose main.py into RecordingStateMachine, DeviceManager, WakeWordProcessor modules
-- Port Herald orchestrator.sh to Python
-- Consolidate 25+ /tmp flag files into a single atomic state file
-- Add core test suite (pure functions, state transitions, IPC)
-- Kokoro daemon health monitoring (shipped pre-milestone)
+**Next milestone:** v2.0 Cross-Platform & Polish (not yet defined)
 
 ### Out of Scope
 
@@ -67,10 +67,10 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 
 ## Context
 
-**Shipped v1.0 MVP** with 4,280 LOC Python across 5 phases in 2 days.
-Tech stack: Python 3.12+, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, sherpa-onnx, Kokoro TTS, FastMCP, pyaudio, sounddevice, Pydantic, launchd.
+**Shipped v1.1** with 15,105 LOC Python across 9 phases (v1.0 + v1.1) over 2 milestones.
+Tech stack: Python 3.12+, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, sherpa-onnx, Kokoro TTS, FastMCP, pyaudio, sounddevice, Pydantic, launchd, CoreAudio ctypes.
 
-**Architecture:** Hybrid voice model — voice IN via OS-level (wake word → STT → osascript paste), voice OUT via MCP (`voice_speak`), voice HUD via independent AppKit process + Unix socket IPC at `/tmp/vox-hud.sock`.
+**Architecture:** Hybrid voice model — voice IN via OS-level (wake word → STT → osascript paste), voice OUT via MCP (`voice_speak`), voice HUD via independent AppKit process + Unix socket IPC at `/tmp/vox-hud.sock`. Core decomposed into RecordingStateMachine, DeviceManager, WakeWordProcessor modules with shared AppContext. Herald TTS runs pure Python (no bash). IPC uses atomic state file.
 
 **Competitive landscape (March 2026):**
 - Spokenly: free, MCP-based — but no wake word, no TTS, no orchestration
@@ -88,7 +88,9 @@ Tech stack: Python 3.12+, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, she
 **Known issues / tech debt:**
 - Package name not finalized — "vox" taken on PyPI/Homebrew. Candidates: heyvox, voxcode, hotmic, murmur, hark.
 - HUD visual quality needs human testing on macOS display (frosted glass, animations, click-through)
-- No automated tests yet — v1.0 was code generation, v1.1 should add test coverage
+- 7 backward-compat shim vars in main.py (test scaffolding only)
+- tts_playing state field dual-write incomplete (old flag file still primary)
+- 6 stale test failures in pre-v1.1 tests (injection, media, e2e)
 - Homebrew formula not yet created (pipx install works)
 
 ## Constraints
@@ -119,6 +121,11 @@ Tech stack: Python 3.12+, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, she
 | MIT license for OSS core | Maximum adoption | Confirmed |
 | pipx install as v1 distribution | Avoids Homebrew formula complexity | Confirmed |
 | Package name TBD | "vox" taken; need availability check | ⚠️ Revisit |
+| Decompose main.py into modules | 2000-line monolith untestable | ✓ Good — 896 lines, 4 focused modules |
+| Port Herald bash→Python | 4 shell boundary crossings per TTS | ✓ Good — pure Python, no subprocess |
+| CoreAudio ctypes for volume | osascript spawns shell per call | ✓ Good — direct API, cached 5s |
+| Atomic state file for IPC | 25+ flag files with race conditions | ✓ Good — single JSON, temp+rename |
+| Dual-write migration for state | Safe rollback if state file has bugs | ✓ Good — old flags still work |
 
 ## Evolution
 
@@ -138,4 +145,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-11 — Phase 8 (IPC Consolidation) complete, Phase 9 (Test Suite) next*
+*Last updated: 2026-04-11 after v1.1 milestone*

@@ -84,6 +84,14 @@ None. All 60 tests passed on first run (2 skipped: hook file documentation tests
 - TEST-03 and TEST-04 (HUD IPC and device selection) handled by Plan 09-02
 - Full test suite ready for CI validation
 
+## Self-Check: PASSED
+
+- FOUND: `.planning/phases/09-test-suite/09-01-SUMMARY.md`
+- FOUND: commit `8f667f6` (Task 1 — is_garbled tests + echo buffer isolation + wake word import fix)
+- FOUND: commit `386f9be` (Task 2 — RecordingStateMachine behavioral transition tests)
+- FOUND: commit `5c9d441` (docs — plan metadata, STATE.md, ROADMAP.md, REQUIREMENTS.md)
+- All 60 tests pass (2 skipped), verified with pytest
+
 ---
 *Phase: 09-test-suite*
 *Completed: 2026-04-11*
