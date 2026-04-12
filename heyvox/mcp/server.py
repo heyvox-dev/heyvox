@@ -98,12 +98,13 @@ def voice_status() -> str:
     from heyvox.ipc import read_state
     _ipc_state = read_state()
 
-    # Primary: flag files; supplementary: state file for cross-process coordination
+    # Primary: atomic state file; fallback: legacy flag files
     recording = os.path.exists(RECORDING_FLAG) or _ipc_state.get("recording", False)
     speaking = (
-        os.path.exists(TTS_PLAYING_FLAG)
-        or os.path.exists(HERALD_PLAYING_PID)
+        _ipc_state.get("tts_playing", False)
         or bool(_ipc_state.get("herald_playing_pid"))
+        or os.path.exists(TTS_PLAYING_FLAG)
+        or os.path.exists(HERALD_PLAYING_PID)
     )
 
     if recording:

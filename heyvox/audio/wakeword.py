@@ -97,5 +97,10 @@ def load_models(
         resolved = _find_model_file(m, search_dirs)
         model_paths.append(resolved)
 
-    model = Model(wakeword_models=model_paths)
+    # Use onnx framework if any custom .onnx paths are provided
+    has_onnx = any(p.endswith(".onnx") for p in model_paths)
+    model = Model(
+        wakeword_models=model_paths,
+        inference_framework="onnx" if has_onnx else "tflite",
+    )
     return model, use_separate_words

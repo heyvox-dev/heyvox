@@ -224,8 +224,9 @@ class HeyvoxConfig(BaseModel):
     threshold: float = 0.5
     cooldown_secs: float = 2.0
     min_recording_secs: float = 1.5
-    silence_timeout_secs: float = 5.0
+    silence_timeout_secs: float = 2.0
     silence_threshold: int = 200
+    max_recording_secs: float = 30.0
 
     # Target app to focus before typing — empty = paste into whatever is focused
     # Requirement: DECP-01 (decoupling: no hardcoded app default)

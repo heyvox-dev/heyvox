@@ -15,7 +15,7 @@ Requirements for Polish & Reliability release. Each maps to roadmap phases.
 
 ### Tech Debt
 
-- [ ] **DEBT-01**: 7 backward-compat shim vars removed from main.py
+- [x] **DEBT-01**: 7 backward-compat shim vars removed from main.py
 - [x] **DEBT-02**: tts_playing dual-write completed (Python + bash scripts migrated to atomic state)
 - [x] **DEBT-03**: websockets deprecation warning fixed (asyncio.server import)
 
@@ -75,7 +75,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-01 | Phase 10 | Complete |
 | TEST-02 | Phase 10 | Complete |
 | TEST-03 | Phase 10 | Complete |
-| DEBT-01 | Phase 11 | Pending |
+| DEBT-01 | Phase 11 | Complete |
 | DEBT-02 | Phase 11 | Complete |
 | DEBT-03 | Phase 11 | Complete |
 | PASTE-01 | Phase 12 | Pending |

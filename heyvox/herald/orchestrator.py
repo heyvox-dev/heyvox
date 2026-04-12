@@ -685,7 +685,7 @@ class HeraldOrchestrator:
         cfg.play_next_flag.unlink(missing_ok=True)
         try:
             from heyvox.ipc import update_state
-            update_state({"herald_playing_pid": None})
+            update_state({"herald_playing_pid": None, "tts_playing": False})
         except Exception:
             pass
 
