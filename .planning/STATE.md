@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Polish & Reliability
-status: executing
-stopped_at: Completed 11-tech-debt-cleanup-01-PLAN.md
-last_updated: "2026-04-12T09:51:46.648Z"
+status: verifying
+stopped_at: Completed 11-02-PLAN.md
+last_updated: "2026-04-12T10:08:58.976Z"
 last_activity: 2026-04-12
 progress:
   total_phases: 11
-  completed_phases: 9
-  total_plans: 27
-  completed_plans: 28
+  completed_phases: 8
+  total_plans: 19
+  completed_plans: 29
   percent: 25
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-12)
 
 Phase: 11 (tech-debt-cleanup) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-12
 
 Progress: [██░░░░░░░░░░░░░░░░░░] 25% (1/4 phases complete)
@@ -70,6 +70,8 @@ Key decisions for v1.2:
 - [Phase 10-test-stability]: Use pytestmark + addopts to exclude integration tests from default run — composable and explicit
 - [Phase 10-test-stability]: Intent-based subprocess assertions (filter by command name) instead of call_count for injection tests — decoupled from implementation details
 - [Phase 11-tech-debt-cleanup]: Migrate tests before deleting shims (separate commits) ensures tests never reference deleted code
+- [Phase 11-tech-debt-cleanup]: Use websockets.asyncio.server.serve via __aenter__() to eliminate DeprecationWarning without restructuring ChromeBridge API
+- [Phase 11-tech-debt-cleanup]: Dual-write: atomic state file is primary for tts_playing, legacy flag file is parallel write for safe gradual cutover
 
 ### Pending Todos
 
@@ -84,6 +86,6 @@ Key decisions for v1.2:
 
 ## Session Continuity
 
-Last session: 2026-04-12T09:51:46.645Z
-Stopped at: Completed 11-tech-debt-cleanup-01-PLAN.md
+Last session: 2026-04-12T10:08:58.972Z
+Stopped at: Completed 11-02-PLAN.md
 Resume with: `/gsd:plan-phase 11`
