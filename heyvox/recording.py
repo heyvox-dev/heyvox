@@ -415,7 +415,7 @@ class RecordingStateMachine:
         import subprocess as _subprocess
         from heyvox.audio.stt import transcribe_audio
         from heyvox.audio.cues import audio_cue, get_cues_dir
-        from heyvox.input.injection import type_text, save_frontmost_pid, restore_frontmost
+        from heyvox.input.injection import type_text, save_frontmost_pid, restore_frontmost, _settle_delay_for
         from heyvox.input.target import restore_target
         from heyvox.audio.tts import check_voice_command, execute_voice_command
 
@@ -619,6 +619,7 @@ class RecordingStateMachine:
             # but don't actually deliver messages. Kept conductor.py for future use
             # if Conductor exposes a public API.
             _injected_via_conductor = False
+            paste_ok = True  # Default to True; set to False if type_text fails
 
             if not _injected_via_conductor:
                 if recording_target:
@@ -630,9 +631,25 @@ class RecordingStateMachine:
                     restore_target(recording_target)
                     self._log(f"[inject] Restored target: {recording_target.app_name}")
 
-                type_text(paste_text, app_name=target_app)
+                # Resolve per-app settle delay and max retries from config
+                injection_cfg = getattr(self.ctx.config, "injection", None)
+                if injection_cfg:
+                    settle = _settle_delay_for(
+                        target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
+                    )
+                    max_retries = injection_cfg.max_retries
+                else:
+                    settle = 0.1
+                    max_retries = 2
+                paste_ok = type_text(
+                    paste_text,
+                    app_name=target_app,
+                    snap=recording_target,
+                    settle_secs=settle,
+                    max_retries=max_retries,
+                )
 
-            # Auto-send Enter in wake word mode if adapter says so
+            # Auto-send Enter in wake word mode if adapter says so (only on success)
             adapter = self.ctx.adapter
             auto_send = not ptt and adapter.should_auto_send()
             self._log(
@@ -640,12 +657,14 @@ class RecordingStateMachine:
                 f"adapter.should_auto_send={adapter.should_auto_send()}, "
                 f"enter_count={adapter.enter_count})"
             )
-            if auto_send:
+            if paste_ok and auto_send:
                 time.sleep(1.0)
                 from heyvox.input.injection import press_enter as _press_enter
                 self._log(f"Pressing Enter x{adapter.enter_count} -> {target_app or 'frontmost'}...")
                 _press_enter(adapter.enter_count, app_name=target_app)
                 self._log("Sent!")
+            elif not paste_ok:
+                self._log("[inject] skipping auto-Enter — paste failed")
             else:
                 self._log(f"Injected (paste, {'PTT' if ptt else 'wake word'})")
 
@@ -662,8 +681,12 @@ class RecordingStateMachine:
                     "during transcription, staying on target)"
                 )
 
-            # Show "Sent to [agent]" confirmation in HUD
-            if ptt:
+            # Show confirmation in HUD — use paste_ok to decide cue and message
+            if not paste_ok:
+                self._hud_send({"type": "state", "state": "idle", "text": "Paste failed"})
+                # Error cue already played by type_text — just log
+                self._log("Paste FAILED — error cue played by injection")
+            elif ptt:
                 # PTT mode: no auto-Enter, just pasted -- don't say "Sending"
                 self._hud_send({"type": "state", "state": "idle", "text": "Pasted"})
                 audio_cue("ok", cues_dir)
