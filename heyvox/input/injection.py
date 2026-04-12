@@ -13,6 +13,8 @@ import subprocess
 import sys
 import time
 
+from heyvox.audio.cues import audio_cue
+
 
 # Max seconds to wait for osascript subprocess to complete
 SUBPROCESS_TIMEOUT = 5
@@ -112,6 +114,91 @@ def _set_clipboard(text: str) -> tuple[bool, int]:
         return False, -1
 
 
+def _clipboard_still_ours(expected_count: int) -> bool:
+    """Return True if nobody stole the clipboard since we wrote it.
+
+    Compares the current NSPasteboard changeCount against the count captured
+    immediately after our write. A mismatch means another process modified the
+    clipboard while we were waiting for the settle delay.
+
+    Requirement: PASTE-02
+    """
+    try:
+        import AppKit
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        return pb.changeCount() == expected_count
+    except Exception:
+        return False
+
+
+def _verify_target_focused(expected_bundle_id: str | None) -> bool:
+    """Check if the frontmost app matches the expected target before pasting.
+
+    Uses NSWorkspace.sharedWorkspace().frontmostApplication().bundleIdentifier()
+    to verify the correct app is focused. Returns True if:
+    - expected_bundle_id is None (skip check)
+    - frontmost app bundle ID matches expected_bundle_id
+
+    Returns False if a different app is focused (paste would go to wrong app).
+    Fails-open (returns True) on exception — don't block paste on check failure.
+
+    Requirement: PASTE-05
+    """
+    if expected_bundle_id is None:
+        return True
+    try:
+        import AppKit
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        front = ws.frontmostApplication()
+        actual = front.bundleIdentifier()
+        if actual == expected_bundle_id:
+            return True
+        _log(f"Focus verify FAILED: expected {expected_bundle_id}, got {actual}")
+        return False
+    except Exception as e:
+        _log(f"Focus verify exception: {e}")
+        return True  # Fail-open: if check fails, proceed with paste
+
+
+# AX roles that can receive direct value injection (native AppKit text fields only)
+_AX_NATIVE_ROLES = frozenset({"AXTextField", "AXTextArea"})
+
+
+def _ax_inject_text(snap, text: str) -> bool:
+    """Inject text directly via AX value set — only for native AppKit text fields.
+
+    Bypasses clipboard entirely by setting AXValue directly on the element.
+    Only applicable for AXTextField and AXTextArea (native AppKit widgets).
+    Explicitly skips AXWebArea (Electron/WebKit apps) where AXValue write has no effect.
+
+    Args:
+        snap: TargetSnapshot (or None). Must have ax_element and element_role.
+        text: Text to inject.
+
+    Returns:
+        True if text was injected via AX, False if not applicable or failed.
+
+    Requirement: PASTE-04
+    """
+    if snap is None:
+        return False
+    if not hasattr(snap, "element_role") or snap.element_role not in _AX_NATIVE_ROLES:
+        return False
+    if snap.ax_element is None:
+        return False
+    try:
+        from ApplicationServices import AXUIElementSetAttributeValue
+        err = AXUIElementSetAttributeValue(snap.ax_element, "AXValue", text)
+        if err == 0:
+            _log(f"AX fast-path: injected {len(text)} chars into {snap.element_role}")
+            return True
+        _log(f"AX fast-path: failed (err={err})")
+        return False
+    except Exception as e:
+        _log(f"AX fast-path exception: {e}")
+        return False
+
+
 def _settle_delay_for(app_name: str | None, app_delays: dict[str, float], default: float) -> float:
     """Resolve the focus settle delay for a given app name.
 
@@ -152,7 +239,13 @@ def _restore_frontmost(pid: int) -> None:
         pass
 
 
-def _osascript_type_text(text: str, app_name: str | None = None, settle_secs: float = 0.1) -> None:
+def _osascript_type_text(
+    text: str,
+    app_name: str | None = None,
+    settle_secs: float = 0.1,
+    expected_bundle_id: str | None = None,
+    max_retries: int = 2,
+) -> bool:
     """Paste text via clipboard + Cmd-V (osascript).
 
     When app_name is provided, targets that process directly. Briefly
@@ -163,27 +256,59 @@ def _osascript_type_text(text: str, app_name: str | None = None, settle_secs: fl
     the old hardcoded AppleScript 'delay 0.3' — now controlled by
     InjectionConfig.app_delays per-app profiles.
 
-    Requirement: PASTE-02, PASTE-03
+    expected_bundle_id: if set, verifies frontmost app bundle ID before paste.
+    Aborts with error cue if focus has moved to a different app (PASTE-05).
+
+    max_retries: number of times to retry if clipboard is stolen during settle.
+
+    Returns:
+        True on successful paste, False on any failure.
+
+    Requirement: PASTE-02, PASTE-03, PASTE-05
     """
     _log(f"paste: target={app_name or 'frontmost'}, text={len(text)} chars: {text[:60]!r}")
 
-    ok, _count = _set_clipboard(text)
-    if not ok:
-        _log("ERROR: failed to set clipboard, aborting paste")
-        return
+    # Step 1: Proactive focus verification before touching clipboard (PASTE-05)
+    if not _verify_target_focused(expected_bundle_id):
+        _log(f"ERROR: focus verification failed (expected={expected_bundle_id}), aborting paste")
+        audio_cue("error")
+        return False
 
-    verify = get_clipboard_text()
-    if verify != text:
-        _log(f"ERROR: clipboard verify failed — expected {len(text)} chars, got {len(verify)} chars, aborting paste")
-        return
+    attempt = 0
+    while attempt <= max_retries:
+        ok, expected_count = _set_clipboard(text)
+        if not ok:
+            _log("ERROR: failed to set clipboard, aborting paste")
+            audio_cue("error")
+            return False
 
-    _log(f"paste: clipboard verified OK ({len(text)} chars)")
+        verify = get_clipboard_text()
+        if verify != text:
+            _log(f"ERROR: clipboard verify failed — expected {len(text)} chars, got {len(verify)} chars, aborting paste")
+            audio_cue("error")
+            return False
 
-    frontmost_before = _get_frontmost_app()
-    original_pid = _save_frontmost_pid()
-    _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
+        _log(f"paste: clipboard verified OK ({len(text)} chars)")
 
-    time.sleep(settle_secs)
+        frontmost_before = _get_frontmost_app()
+        original_pid = _save_frontmost_pid()
+        _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
+
+        time.sleep(settle_secs)
+
+        # Step 2: Check that nobody stole the clipboard during the settle delay (PASTE-02)
+        if not _clipboard_still_ours(expected_count):
+            _log(f"ERROR: clipboard stolen during settle (attempt {attempt + 1}/{max_retries + 1})")
+            if attempt < max_retries:
+                _log("paste: retrying after clipboard theft...")
+                attempt += 1
+                continue
+            _log("paste: max retries exceeded after clipboard theft, aborting")
+            audio_cue("error")
+            return False
+
+        break  # clipboard is ours, proceed with paste
+
     if app_name:
         safe_name = app_name.replace('\\', '\\\\').replace('"', '\\"')
         script = (
@@ -204,11 +329,15 @@ def _osascript_type_text(text: str, app_name: str | None = None, settle_secs: fl
     frontmost_after = _get_frontmost_app()
     if result.returncode != 0:
         _log(f"paste: FAILED (rc={result.returncode}): {result.stderr.decode().strip()}")
-    else:
-        _log(f"paste: OK → frontmost app AFTER = {frontmost_after}")
+        audio_cue("error")
+        return False
+
+    _log(f"paste: OK → frontmost app AFTER = {frontmost_after}")
 
     if app_name and frontmost_after != app_name and frontmost_after != "?":
         _log(f"paste: WARNING: target was {app_name} but frontmost is {frontmost_after} — may have pasted to wrong app!")
+
+    return True
 
 
 def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
@@ -260,20 +389,50 @@ def restore_frontmost(pid: int) -> None:
     _restore_frontmost(pid)
 
 
-def type_text(text: str, app_name: str | None = None) -> None:
+def type_text(
+    text: str,
+    app_name: str | None = None,
+    snap=None,
+    settle_secs: float = 0.1,
+    max_retries: int = 2,
+) -> bool:
     """Insert text into an app.
 
     When app_name is provided, targets that specific process for paste.
     This prevents pasting into the wrong app if focus changed during STT.
 
-    Tries Chrome extension (via Hush socket) first for direct DOM insertion.
-    Falls back to clipboard + Cmd-V via osascript.
+    Tries in order:
+    1. Chrome extension (via Hush socket) — fastest, DOM-level injection
+    2. AX fast-path (AXTextField/AXTextArea via AXValue) — native AppKit only
+    3. Clipboard + Cmd-V via osascript — universal fallback
+
+    Args:
+        text: Text to inject.
+        app_name: Target app process name (for osascript targeting).
+        snap: TargetSnapshot (or None). Used for AX fast-path and focus verification.
+        settle_secs: Focus settle delay before Cmd-V (per-app tuned via InjectionConfig).
+        max_retries: Number of retries on clipboard theft.
+
+    Returns:
+        True on success, False on failure. Error cue is played on failure.
     """
     if _chrome_type_text(text):
         _log(f"type_text: done via Chrome extension ({len(text)} chars)")
-        return
-    _log(f"type_text: Chrome unavailable, using osascript → {app_name or 'frontmost'}")
-    _osascript_type_text(text, app_name=app_name)
+        return True
+
+    if _ax_inject_text(snap, text):
+        _log(f"type_text: done via AX fast-path ({len(text)} chars)")
+        return True
+
+    _log(f"type_text: using osascript → {app_name or 'frontmost'}")
+    expected_bundle_id = getattr(snap, "app_bundle_id", None) if snap is not None else None
+    return _osascript_type_text(
+        text,
+        app_name=app_name,
+        settle_secs=settle_secs,
+        expected_bundle_id=expected_bundle_id,
+        max_retries=max_retries,
+    )
 
 
 def press_enter(count: int = 1, app_name: str | None = None) -> None:
