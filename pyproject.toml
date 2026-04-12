@@ -63,6 +63,8 @@ chrome = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-mock",
+    "pytest-subprocess",
     "ruff",
 ]
 
@@ -109,4 +111,5 @@ asyncio_mode = "strict"
 addopts = "-m 'not integration'"
 markers = [
     "integration: requires BlackHole virtual audio and a running heyvox instance",
+    "requires_audio: marks tests that need physical audio input hardware (skipped in CI)",
 ]
