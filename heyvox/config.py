@@ -298,21 +298,27 @@ def load_config(config_path: Path | None = None) -> HeyvoxConfig:
             with open(path) as f:
                 raw: Any = yaml.safe_load(f)
         except yaml.YAMLError as e:
-            print(f"ERROR: Config file has invalid YAML syntax: {e}", file=sys.stderr)
-            print(f"  File: {path}", file=sys.stderr)
-            print("  Using defaults. Fix the file or delete it to regenerate.", file=sys.stderr)
+            try:
+                print(f"ERROR: Config file has invalid YAML syntax: {e}", file=sys.stderr)
+                print(f"  File: {path}", file=sys.stderr)
+                print("  Using defaults. Fix the file or delete it to regenerate.", file=sys.stderr)
+            except (BrokenPipeError, OSError):
+                pass
             return HeyvoxConfig()
         if raw is None:
             raw = {}
         try:
             return HeyvoxConfig(**raw)
         except ValidationError as e:
-            print("ERROR: Invalid vox configuration:", file=sys.stderr)
-            for err in e.errors():
-                loc = " -> ".join(str(p) for p in err["loc"])
-                print(f"  Field '{loc}': {err['msg']}", file=sys.stderr)
-                if "input" in err:
-                    print(f"    Got: {err['input']!r}", file=sys.stderr)
+            try:
+                print("ERROR: Invalid vox configuration:", file=sys.stderr)
+                for err in e.errors():
+                    loc = " -> ".join(str(p) for p in err["loc"])
+                    print(f"  Field '{loc}': {err['msg']}", file=sys.stderr)
+                    if "input" in err:
+                        print(f"    Got: {err['input']!r}", file=sys.stderr)
+            except (BrokenPipeError, OSError):
+                pass
             sys.exit(1)
     else:
         return HeyvoxConfig()

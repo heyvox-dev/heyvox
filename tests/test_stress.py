@@ -5,7 +5,9 @@ Tests memory stability, rapid-fire dictation, concurrent TTS+recording,
 long recordings, and recovery from edge cases. Uses BlackHole virtual
 audio loopback.
 
-Run with: pytest tests/test_stress.py -v -s
+Run with: pytest tests/test_stress.py -v -s -m integration
+
+Marked as `integration` so they are excluded from the default test run.
 """
 
 import os
@@ -22,6 +24,9 @@ from tests.test_e2e import (
     write_wav,
     generate_silence,
 )
+
+# Mark the entire module as integration so it's excluded from default pytest runs.
+pytestmark = pytest.mark.integration
 
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")

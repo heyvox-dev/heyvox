@@ -14,7 +14,6 @@ import os
 import sys
 import time
 import signal
-import threading
 import numpy as np
 
 from heyvox.config import load_config, HeyvoxConfig
@@ -92,6 +91,14 @@ def _init_log(log_file: str, log_max_bytes: int) -> None:
     _LOG_MAX_BYTES = log_max_bytes
 
 
+def _safe_stderr(msg: str) -> None:
+    """Print to stderr, silently ignoring BrokenPipeError."""
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def log(msg: str) -> None:
     """Write timestamped message to log file with rotation.
 
@@ -145,74 +152,6 @@ def _build_adapter(config: HeyvoxConfig):
     else:  # "always-focused" default
         from heyvox.adapters.generic import GenericAdapter
         return GenericAdapter(enter_count=config.enter_count)
-
-
-# ---------------------------------------------------------------------------
-# Backward compat: start_recording / stop_recording wrappers
-# (test_flag_coordination.py calls these as module-level functions)
-# Remove in Phase 9 when tests are updated.
-# ---------------------------------------------------------------------------
-
-# Module-level compat shims (test_flag_coordination.py reads these)
-is_recording = False   # Synced from ctx in main loop -- remove in Phase 9
-busy = False           # Synced from ctx in main loop -- remove in Phase 9
-recording_start_time = 0.0
-_audio_buffer = []
-_triggered_by_ptt = False
-_recording_target = None
-_state_lock = threading.Lock()
-
-# _recording is set in main() and used by the compat wrappers below
-_recording: RecordingStateMachine | None = None
-
-
-def start_recording(ptt: bool = False, config: HeyvoxConfig = None, preroll=None) -> None:
-    """Backward-compat wrapper for test_flag_coordination.py. Remove in Phase 9.
-
-    Delegates to RecordingStateMachine if running; else minimal standalone fallback.
-    """
-    global is_recording, recording_start_time, _audio_buffer, _triggered_by_ptt
-    if _recording is not None:
-        _recording.start(ptt=ptt, preroll=preroll)
-        is_recording = _recording.ctx.is_recording
-        return
-    # Standalone fallback for tests (no main() running)
-    if config is None:
-        return
-    with _state_lock:
-        if is_recording:
-            return
-        is_recording = True
-        recording_start_time = time.time()
-        _audio_buffer = list(preroll) if preroll else []
-        _triggered_by_ptt = ptt
-    try:
-        with open(RECORDING_FLAG, "w"):
-            pass
-    except Exception:
-        pass
-    try:
-        from heyvox.ipc import update_state
-        update_state({"recording": True})
-    except Exception:
-        pass
-
-
-def stop_recording(config: HeyvoxConfig = None) -> None:
-    """Backward-compat wrapper. Remove in Phase 9."""
-    global is_recording, busy
-    if _recording is not None:
-        _recording.stop()
-        is_recording = _recording.ctx.is_recording
-        busy = _recording.ctx.busy
-        return
-    if config is None:
-        return
-    with _state_lock:
-        if not is_recording:
-            return
-        is_recording = False
-        busy = True
 
 
 # ---------------------------------------------------------------------------
@@ -339,14 +278,14 @@ def _setup(config: HeyvoxConfig):
 
     _init_log(config.log_file, config.log_max_bytes)
     # Diagnostic: verify log() is working
-    print(f"[diag] _LOG_FILE={_LOG_FILE}, exists={os.path.exists(_LOG_FILE)}", file=sys.stderr, flush=True)
+    _safe_stderr(f"[diag] _LOG_FILE={_LOG_FILE}, exists={os.path.exists(_LOG_FILE)}")
     log("STARTUP: log() initialized")
     try:
         with open(_LOG_FILE) as f:
             last = f.readlines()[-1].strip()
-        print(f"[diag] log() wrote: {last}", file=sys.stderr, flush=True)
+        _safe_stderr(f"[diag] log() wrote: {last}")
     except Exception as e:
-        print(f"[diag] log() verification FAILED: {e}", file=sys.stderr, flush=True)
+        _safe_stderr(f"[diag] log() verification FAILED: {e}")
 
     # Last-resort crash logging
     def _excepthook(exc_type, exc_value, exc_tb):
@@ -486,7 +425,6 @@ def _setup(config: HeyvoxConfig):
     log(f"Target mode: {config.target_mode} (adapter: {type(ctx.adapter).__name__})")
 
     recording = RecordingStateMachine(ctx=ctx, config=config, log_fn=log, hud_send=hud_send)
-    _recording = recording  # Store for backward-compat wrappers
 
     # Start push-to-talk listener if enabled
     if config.push_to_talk.enabled:
@@ -513,8 +451,7 @@ def _setup(config: HeyvoxConfig):
         also_load=config.wake_words.also_load,
     )
     _loaded_models = list(model.models.keys()) if hasattr(model, 'models') else []
-    print(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}",
-          file=sys.stderr, flush=True)
+    _safe_stderr(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}")
     log(f"Wake word models loaded: {_loaded_models}")
 
     # Open audio stream -- delegate to DeviceManager
@@ -570,6 +507,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     chunk_size = config.audio.chunk_size
     silence_timeout = config.silence_timeout_secs
     silence_threshold = config.silence_threshold
+    max_recording_secs = getattr(config, 'max_recording_secs', 30.0)
     start_word = config.wake_words.start
     stop_word = config.wake_words.stop
 
@@ -742,6 +680,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # Device hotplug -- delegated to DeviceManager
             devices.scan()
 
+            # Max recording duration -- safety cap to prevent runaway recordings
+            if _is_rec and not _is_ptt and max_recording_secs > 0:
+                elapsed = time.time() - ctx.recording_start_time
+                if elapsed > max_recording_secs:
+                    log(f"Max recording duration ({max_recording_secs}s) reached, stopping")
+                    recording.stop()
+                    continue
+
             # Silence watchdog -- end recording after silence_timeout seconds of quiet
             if _is_rec and not _is_ptt and silence_timeout > 0:
                 elapsed = time.time() - ctx.recording_start_time
@@ -772,7 +718,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     _busy_since = time.time()
                 elif time.time() - _busy_since > _BUSY_TIMEOUT:
                     log(f"WARNING: busy flag stuck for {_BUSY_TIMEOUT}s, force-resetting (watchdog)")
-                    print(f"[watchdog] busy flag stuck for {_BUSY_TIMEOUT}s, resetting", file=sys.stderr, flush=True)
+                    _safe_stderr(f"[watchdog] busy flag stuck for {_BUSY_TIMEOUT}s, resetting")
                     with ctx.lock:
                         ctx.busy = False
                     _busy_since = 0.0
@@ -839,7 +785,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     msg = f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) {'>>> TRIGGER' if triggered else ''}"
                     log(msg)
                     if triggered:
-                        print(f"[wakeword] {msg.strip()}", file=sys.stderr, flush=True)
+                        _safe_stderr(f"[wakeword] {msg.strip()}")
                 if s > active_threshold:
                     now = time.time()
                     if now - last_trigger > active_cooldown:

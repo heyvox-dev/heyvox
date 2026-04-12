@@ -32,9 +32,9 @@ jobs:
         run: |
           ruff check heyvox/ tests/
 
-      - name: Run tests (excluding e2e)
+      - name: Run tests (excluding e2e and stress)
         run: |
-          pytest tests/ -k "not e2e" -v --tb=short
+          pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_stress.py -v --tb=short
 
       - name: Verify CLI entry points
         run: |
