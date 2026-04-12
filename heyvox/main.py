@@ -92,6 +92,14 @@ def _init_log(log_file: str, log_max_bytes: int) -> None:
     _LOG_MAX_BYTES = log_max_bytes
 
 
+def _safe_stderr(msg: str) -> None:
+    """Print to stderr, silently ignoring BrokenPipeError."""
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def log(msg: str) -> None:
     """Write timestamped message to log file with rotation.
 
@@ -339,14 +347,14 @@ def _setup(config: HeyvoxConfig):
 
     _init_log(config.log_file, config.log_max_bytes)
     # Diagnostic: verify log() is working
-    print(f"[diag] _LOG_FILE={_LOG_FILE}, exists={os.path.exists(_LOG_FILE)}", file=sys.stderr, flush=True)
+    _safe_stderr(f"[diag] _LOG_FILE={_LOG_FILE}, exists={os.path.exists(_LOG_FILE)}")
     log("STARTUP: log() initialized")
     try:
         with open(_LOG_FILE) as f:
             last = f.readlines()[-1].strip()
-        print(f"[diag] log() wrote: {last}", file=sys.stderr, flush=True)
+        _safe_stderr(f"[diag] log() wrote: {last}")
     except Exception as e:
-        print(f"[diag] log() verification FAILED: {e}", file=sys.stderr, flush=True)
+        _safe_stderr(f"[diag] log() verification FAILED: {e}")
 
     # Last-resort crash logging
     def _excepthook(exc_type, exc_value, exc_tb):
@@ -513,8 +521,7 @@ def _setup(config: HeyvoxConfig):
         also_load=config.wake_words.also_load,
     )
     _loaded_models = list(model.models.keys()) if hasattr(model, 'models') else []
-    print(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}",
-          file=sys.stderr, flush=True)
+    _safe_stderr(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}")
     log(f"Wake word models loaded: {_loaded_models}")
 
     # Open audio stream -- delegate to DeviceManager
@@ -772,7 +779,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     _busy_since = time.time()
                 elif time.time() - _busy_since > _BUSY_TIMEOUT:
                     log(f"WARNING: busy flag stuck for {_BUSY_TIMEOUT}s, force-resetting (watchdog)")
-                    print(f"[watchdog] busy flag stuck for {_BUSY_TIMEOUT}s, resetting", file=sys.stderr, flush=True)
+                    _safe_stderr(f"[watchdog] busy flag stuck for {_BUSY_TIMEOUT}s, resetting")
                     with ctx.lock:
                         ctx.busy = False
                     _busy_since = 0.0
@@ -839,7 +846,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     msg = f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) {'>>> TRIGGER' if triggered else ''}"
                     log(msg)
                     if triggered:
-                        print(f"[wakeword] {msg.strip()}", file=sys.stderr, flush=True)
+                        _safe_stderr(f"[wakeword] {msg.strip()}")
                 if s > active_threshold:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
