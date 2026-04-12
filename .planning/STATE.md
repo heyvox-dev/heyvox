@@ -3,14 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Polish & Reliability
 status: executing
-stopped_at: Completed 10-test-stability 10-01-PLAN
-last_updated: "2026-04-12T07:03:57.223Z"
+stopped_at: "Completed 10-02-PLAN.md (CI workflow update)"
+last_updated: "2026-04-12T07:35:00Z"
 last_activity: 2026-04-12
 progress:
-  total_phases: 10
-  completed_phases: 8
-  total_plans: 24
-  completed_plans: 25
+  total_phases: 4
+  completed_phases: 1
+  total_plans: 2
+  completed_plans: 2
+  percent: 25
 ---
 
 # Project State
@@ -20,20 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-12)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 10 — test-stability
+**Current focus:** v1.2 Polish & Reliability — Phase 10 complete, Phase 11 next
 
 ## Current Position
 
-Phase: 10 (test-stability) — EXECUTING
-Plan: 2 of 2
-Status: Ready to execute
+Phase: 10 (Test Stability) — COMPLETE
+Plan: 2/2 — complete
+Status: Phase 10 complete. Phase 11 (Tech Debt Cleanup) is next.
 Last activity: 2026-04-12
 
-```
-[Phase 10] [Phase 11] [Phase 12] [Phase 13]
-[        ] [        ] [        ] [        ]
-  0% complete
-```
+Progress: [██░░░░░░░░░░░░░░░░░░] 25% (1/4 phases complete)
 
 ## Performance Metrics
 
@@ -49,11 +46,19 @@ Last activity: 2026-04-12
 - Commits: 83
 - Timeline: 2 days (2026-04-10 → 2026-04-11)
 
+**Velocity (v1.2 — in progress):**
+
+- Total plans completed: 2
+- Average duration: ~3 min
+- Phase 10 complete (2026-04-12)
+
 ## Accumulated Context
 
 ### Decisions
 
-Full decision log in PROJECT.md Key Decisions table.
+- Use `--ignore` path flags instead of `-k` keyword filter in CI pytest command — path-based is explicit and matches pyproject.toml addopts
+- Use pytestmark + addopts rather than conftest skipif to exclude integration tests — marks are composable and explicit
+- Patch `_get_frontmost_app` in injection tests to isolate call counts — added after tests were written, patching is cleaner than updating expected counts
 
 Key decisions for v1.2:
 
@@ -77,6 +82,6 @@ Key decisions for v1.2:
 
 ## Session Continuity
 
-Last session: 2026-04-12T07:03:57.220Z
-Stopped at: Completed 10-test-stability 10-01-PLAN
-Resume with: `/gsd:plan-phase 10`
+Last session: 2026-04-12
+Stopped at: Phase 10 complete
+Resume with: `/gsd:plan-phase 11`

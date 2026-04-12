@@ -32,7 +32,7 @@
 
 ### 📋 v1.2 Polish & Reliability
 
-- [ ] **Phase 10: Test Stability** — Fix 5 stale test failures, add audio mocking, CI runs green
+- [x] **Phase 10: Test Stability** — 2/2 plans complete (2026-04-12)
 - [ ] **Phase 11: Tech Debt Cleanup** — Remove 7 shim vars, complete tts_playing dual-write, fix websockets deprecation
 - [ ] **Phase 12: Paste Injection Reliability** — NSPasteboard direct write, per-app focus delays, retry on focus steal
 - [ ] **Phase 13: Distribution & UX Polish** — PyPI publish pipeline, Homebrew formula, HUD mic display
@@ -52,10 +52,10 @@ Phases TBD — define via `/gsd:new-milestone`
   2. Injection tests assert which subprocess command ran, not how many times subprocess was called
   3. Media tests reference the current function name and pass without manual patch updates
   4. A new developer can run `pytest` locally without audio hardware and see all tests green
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans executed
 Plans:
 - [x] 10-01-PLAN.md — Add dev dependencies (pytest-mock, pytest-subprocess) and pytest marker registration
-- [ ] 10-02-PLAN.md — Fix 5 stale test failures and update CI workflow command
+- [x] 10-02-PLAN.md — Fix 5 stale test failures and update CI workflow command
 
 ### Phase 11: Tech Debt Cleanup
 **Goal**: Single source of truth for all shared state — no shim vars, no dual-write ambiguity, no deprecation warnings
@@ -107,7 +107,7 @@ Plans:
 | 7. Herald Python Port | v1.1 | 5/5 | Complete | 2026-04-11 |
 | 8. IPC Consolidation | v1.1 | 3/3 | Complete | 2026-04-11 |
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
-| 10. Test Stability | v1.2 | 1/2 | In Progress|  |
+| 10. Test Stability | v1.2 | 2/2 | Complete | 2026-04-12 |
 | 11. Tech Debt Cleanup | v1.2 | 0/? | Not started | - |
 | 12. Paste Injection Reliability | v1.2 | 0/? | Not started | - |
 | 13. Distribution & UX Polish | v1.2 | 0/? | Not started | - |
