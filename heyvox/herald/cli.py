@@ -27,6 +27,10 @@ def dispatch(args: list[str]) -> int:
         return _cmd_resume()
     elif cmd == "skip":
         return _cmd_skip()
+    elif cmd == "stop":
+        return _cmd_stop()
+    elif cmd == "interrupt":
+        return _cmd_interrupt()
     elif cmd == "mute":
         return _cmd_mute()
     elif cmd == "status":
@@ -94,6 +98,55 @@ def _cmd_skip() -> int:
     return 0
 
 
+def _cmd_stop() -> int:
+    """Kill current afplay and clear entire queue (D-07: Escape behavior).
+
+    Clears TTS state immediately so echo suppression doesn't stay muted.
+    """
+    _kill_afplay()
+    _clear_tts_state()
+    return _cmd_skip()  # Clear all queue files
+
+
+def _cmd_interrupt() -> int:
+    """Kill current afplay; let orchestrator purge current message parts only (D-06).
+
+    The orchestrator detects non-zero afplay exit, then calls _purge_message_parts()
+    which only removes files matching the current message prefix. Unrelated queued
+    messages survive.
+    """
+    _kill_afplay()
+    _clear_tts_state()
+    return 0
+
+
+def _kill_afplay() -> None:
+    """Kill afplay process by reading HERALD_PLAYING_PID."""
+    import signal
+    from heyvox.constants import HERALD_PLAYING_PID
+    if not os.path.exists(HERALD_PLAYING_PID):
+        return
+    try:
+        pid = int(open(HERALD_PLAYING_PID).read().strip())
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+
+
+def _clear_tts_state() -> None:
+    """Clear TTS flag and IPC state immediately (don't wait for orchestrator)."""
+    from heyvox.constants import TTS_PLAYING_FLAG
+    try:
+        os.unlink(TTS_PLAYING_FLAG)
+    except FileNotFoundError:
+        pass
+    try:
+        from heyvox.ipc import update_state
+        update_state({"tts_playing": False})
+    except Exception:
+        pass
+
+
 def _cmd_mute() -> int:
     """Toggle mute flag."""
     from heyvox.constants import HERALD_MUTE_FLAG
@@ -150,6 +203,11 @@ def _cmd_queue() -> int:
 
 def _cmd_orchestrator() -> int:
     """Start orchestrator daemon (blocking)."""
+    # Own process group so kokoro-daemon restarts don't kill us
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
     from heyvox.herald.orchestrator import HeraldOrchestrator
     orch = HeraldOrchestrator()
     orch.run()
