@@ -604,13 +604,11 @@ class RecordingStateMachine:
                 f"target pid={target_pid}"
             )
 
-            # NOTE: Direct socket injection (e.g. Conductor sidecar) is disabled.
-            # The sidecar registers methods on an internal tunnel, not the external
-            # Unix socket. Kept heyvox/input/conductor.py for future use if an
-            # app-specific injection API becomes available.
-            _injected_via_conductor = False
+            # NOTE: Direct socket injection is disabled. Kept heyvox/input/conductor.py
+            # for future use if an app exposes a public injection API.
+            _injected_via_socket = False
 
-            if not _injected_via_conductor:
+            if not _injected_via_socket:
                 if recording_target:
                     if recording_target.detected_workspace:
                         self._log(

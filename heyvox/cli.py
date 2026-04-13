@@ -653,10 +653,10 @@ def main():
     sub_bugreport.set_defaults(func=_cmd_bugreport)
 
 
-    # conductor-inject — test direct socket injection into Conductor
+    # conductor-inject -- test direct socket injection (Conductor-specific, for debugging)
     sub_inject = subparsers.add_parser(
         "conductor-inject",
-        help="Inject text into a Conductor session via sidecar socket (test)",
+        help="Inject text into a Conductor session via sidecar socket (debug/test)",
     )
     sub_inject.add_argument("text", help="Text to inject as a user message")
     sub_inject.add_argument(

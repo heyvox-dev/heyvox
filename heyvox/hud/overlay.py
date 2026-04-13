@@ -351,7 +351,7 @@ def _apply_state(
     # Show/hide idle label
     if idle_label is not None:
         idle_label.setHidden_(is_active)
-        # Show temporary status text (e.g. "Sent to Conductor") then revert
+        # Show temporary status text (e.g. "Sent to Claude") then revert
         if not is_active and tts_text:
             idle_label.setStringValue_(tts_text)
             # Schedule revert to default label after 3 seconds

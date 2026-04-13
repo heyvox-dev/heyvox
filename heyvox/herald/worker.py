@@ -207,8 +207,13 @@ class HeraldWorker:
     """
 
     def __init__(self) -> None:
-        # Workspace name from environment (D-04: only env var, no DB query)
-        self._workspace: str = os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
+        # Workspace name from environment (D-04: only env var, no DB query).
+        # HEYVOX_WORKSPACE is the generic env var; CONDUCTOR_WORKSPACE_NAME
+        # is kept for backward compatibility with Conductor hook environments.
+        self._workspace: str = (
+            os.environ.get("HEYVOX_WORKSPACE", "")
+            or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -305,9 +310,12 @@ class HeraldWorker:
         if lang_voice and lang != "en-us":
             voice = lang_voice
 
-        # Multi-agent voice routing (highest priority)
+        # Multi-agent voice routing (highest priority).
+        # HEYVOX_AGENT is the generic env var; CONDUCTOR_AGENT and
+        # CLAUDE_AGENT_NAME are kept for backward compatibility.
         agent_name = (
-            os.environ.get("CONDUCTOR_AGENT", "")
+            os.environ.get("HEYVOX_AGENT", "")
+            or os.environ.get("CONDUCTOR_AGENT", "")
             or os.environ.get("CLAUDE_AGENT_NAME", "")
         )
         if agent_name:
