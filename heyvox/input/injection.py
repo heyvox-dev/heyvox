@@ -309,16 +309,35 @@ def _osascript_type_text(
 
         break  # clipboard is ours, proceed with paste
 
-    if app_name:
-        safe_name = app_name.replace('\\', '\\\\').replace('"', '\\"')
-        script = (
-            f'tell application "System Events"\n'
-            f'    tell process "{safe_name}"\n'
-            f'        set frontmost to true\n'
-            f'        keystroke "v" using command down\n'
-            f'    end tell\n'
-            f'end tell'
-        )
+    # Use the actual process name from System Events (frontmost_before) for the
+    # AppleScript target, not the user-facing app_name — macOS process names are
+    # case-sensitive (e.g., "conductor" not "Conductor").
+    process_name = frontmost_before if frontmost_before and frontmost_before != "?" else app_name
+    already_frontmost = process_name and frontmost_before and process_name.lower() == _get_frontmost_app().lower()
+    if process_name:
+        safe_name = process_name.replace('\\', '\\\\').replace('"', '\\"')
+        if already_frontmost:
+            # App is already frontmost — skip 'set frontmost to true' to preserve
+            # element focus (target restore already focused the correct text field).
+            # Calling set frontmost again disrupts web view focus in Electron/Tauri apps.
+            script = (
+                f'tell application "System Events"\n'
+                f'    tell process "{safe_name}"\n'
+                f'        keystroke "v" using command down\n'
+                f'    end tell\n'
+                f'end tell'
+            )
+        else:
+            # App is not frontmost — activate it with a delay for focus to settle
+            script = (
+                f'tell application "System Events"\n'
+                f'    tell process "{safe_name}"\n'
+                f'        set frontmost to true\n'
+                f'        delay 0.2\n'
+                f'        keystroke "v" using command down\n'
+                f'    end tell\n'
+                f'end tell'
+            )
     else:
         script = 'tell application "System Events"\n    keystroke "v" using command down\nend tell'
     result = subprocess.run(
@@ -334,7 +353,7 @@ def _osascript_type_text(
 
     _log(f"paste: OK → frontmost app AFTER = {frontmost_after}")
 
-    if app_name and frontmost_after != app_name and frontmost_after != "?":
+    if app_name and frontmost_after.lower() != app_name.lower() and frontmost_after != "?":
         _log(f"paste: WARNING: target was {app_name} but frontmost is {frontmost_after} — may have pasted to wrong app!")
 
     return True
@@ -352,8 +371,13 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
     enter_script = "\n        ".join(
         ["keystroke return", "delay 0.2"] * count
     )
-    if app_name:
-        safe_name = app_name.replace('\\', '\\\\').replace('"', '\\"')
+    # Use actual process name from System Events (case-sensitive)
+    process_name = _get_frontmost_app() if app_name else None
+    if process_name and process_name == "?":
+        process_name = app_name
+    target_name = process_name or app_name
+    if target_name:
+        safe_name = target_name.replace('\\', '\\\\').replace('"', '\\"')
         script = (
             f'tell application "System Events"\n'
             f'    tell process "{safe_name}"\n'
