@@ -179,8 +179,8 @@ def set_recording(active: bool) -> None:
 
 
 def interrupt() -> None:
-    """Stop current TTS playback immediately."""
-    _herald("skip")
+    """Stop current TTS playback immediately (selective: preserves unrelated queued messages)."""
+    _herald("interrupt")
 
 
 def skip_current() -> None:
@@ -195,8 +195,7 @@ def stop_all() -> None:
 
 def clear_queue() -> None:
     """Clear queued messages without stopping current playback."""
-    # Herald doesn't have a separate clear-queue command; stop clears everything
-    _herald("stop")
+    _herald("skip")
 
 
 def set_muted(muted: bool) -> None:
