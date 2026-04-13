@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.0
-milestone_name: Cross-Platform & Polish
-status: verifying
-stopped_at: "12-03-PLAN.md — paused at Task 2 checkpoint:human-verify"
-last_updated: "2026-04-13T07:38:21.996Z"
+milestone: v1.2
+milestone_name: Paste Injection Reliability
+status: executing
+stopped_at: Completed 13-02-PLAN.md
+last_updated: "2026-04-13T10:38:31.162Z"
 last_activity: 2026-04-13
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 11
-  total_plans: 30
-  completed_plans: 32
+  total_plans: 34
+  completed_plans: 33
   percent: 100
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Planning next milestone (v2.0)
+**Current focus:** Phase 13 — audio-reliability
 
 ## Current Position
 
-Phase: 12
-Plan: Not started
-Status: Task 1 complete (TestMultiAppInjection 24 tests); awaiting human-verify checkpoint (Task 2)
+Phase: 13 (audio-reliability) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-04-13
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
@@ -57,6 +57,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 12]: _verify_target_focused fails-open on exception: don't block paste if NSWorkspace check throws
 - [Phase 12]: audio_cue imported at module level in injection.py: enables test mocking via patch()
 - [Phase 12-03]: _run_type_text helper patches _verify_target_focused=True: isolates clipboard/injection path in integration tests
+- [Phase 13-audio-reliability]: herald interrupt kills afplay but preserves queue for orchestrator selective purge (D-06)
+- [Phase 13-audio-reliability]: herald stop kills afplay + clears queue; TTS state flag cleared synchronously for echo suppression (D-07/AUDIO-03)
 
 ### Pending Todos
 
@@ -68,6 +70,6 @@ None — milestone complete.
 
 ## Session Continuity
 
-Last session: 2026-04-12T19:45:00.000Z
-Stopped at: 12-03-PLAN.md — paused at Task 2 checkpoint:human-verify
+Last session: 2026-04-13T10:38:31.158Z
+Stopped at: Completed 13-02-PLAN.md
 Resume file: None

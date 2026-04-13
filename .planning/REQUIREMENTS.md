@@ -32,7 +32,7 @@ Requirements for Polish & Reliability release. Each maps to roadmap phases.
 
 - [ ] **AUDIO-01**: Per-device profiles (noise floor, buffer size, silence threshold) auto-calibrated on first use
 - [ ] **AUDIO-02**: Wake word detection stays active during TTS playback when headset detected (no echo risk)
-- [ ] **AUDIO-03**: Escape key stops TTS playback immediately (kill afplay, clear queue)
+- [x] **AUDIO-03**: Escape key stops TTS playback immediately (kill afplay, clear queue)
 - [ ] **AUDIO-04**: Recording blocks TTS from starting; TTS holds in queue until recording finishes
 - [ ] **AUDIO-05**: Silence detection uses percentage-based threshold (not single-spike max) for Bluetooth robustness
 - [ ] **AUDIO-06**: Main audio loop refactored into AudioStage pipeline (deferred to post-Phase 13)
@@ -95,7 +95,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PASTE-06 | Phase 12 | Pending |
 | AUDIO-01 | Phase 13 | Pending |
 | AUDIO-02 | Phase 13 | Pending |
-| AUDIO-03 | Phase 13 | Pending |
+| AUDIO-03 | Phase 13 | Complete |
 | AUDIO-04 | Phase 13 | Pending |
 | AUDIO-05 | Phase 13 | Pending |
 | AUDIO-06 | Phase 15 (TBD) | Deferred |
