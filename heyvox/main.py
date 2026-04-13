@@ -885,11 +885,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 break
                         except OSError:
                             pass
-            if _tts_active:
-                continue  # Suppress wake word during TTS playback
+            # D-08/D-09: Only suppress wake word during TTS when NOT echo_safe
+            # Echo safe = headset mode (auto) or profile override or force_disabled
+            _echo_safe = devices.headset_mode  # D-08: headset = echo_safe by default
+            if devices.active_profile and devices.active_profile.echo_safe is not None:
+                _echo_safe = devices.active_profile.echo_safe  # Profile override
+            if getattr(config.echo_suppression, 'force_disabled', False):
+                _echo_safe = True  # D-11: force bypass
 
-            # ECHO-01: Post-TTS cooldown
-            _echo_grace = config.echo_suppression.grace_after_tts
+            if _tts_active and not _echo_safe:
+                continue  # Suppress wake word during TTS in speaker mode only
+
+            # ECHO-01: Post-TTS cooldown (D-10: 0.5s for headset, 2.0s for speaker mode)
+            _echo_grace = 0.5 if _echo_safe else 2.0
             if _echo_grace > 0 and _tts_last_seen > 0:
                 since_tts = time.time() - _tts_last_seen
                 if since_tts < _echo_grace:
@@ -929,6 +937,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         last_trigger = now
+                        # D-05: If TTS is playing (echo_safe mode), interrupt it and start recording
+                        if _tts_active and _echo_safe and not _is_rec:
+                            from heyvox.audio.tts import interrupt as tts_interrupt
+                            from pathlib import Path
+                            # Write recording flag FIRST (Pitfall 3: orchestrator needs to see _is_paused)
+                            Path(RECORDING_FLAG).touch()
+                            tts_interrupt()  # Kill afplay, orchestrator purges current message parts
+                            _tts_last_seen = 0  # Clear TTS tracking so grace period doesn't block
+                            last_trigger = 0  # Bypass cooldown for this trigger (start recording instantly)
+                            log("Wake word during TTS — interrupted playback, starting recording")
                         # PTT owns the recording lifecycle -- ignore wake words
                         if _is_ptt and _is_rec:
                             pass

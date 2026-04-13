@@ -224,6 +224,10 @@ class EchoSuppressionConfig(BaseModel):
     # ECHO-06: AEC stream delay in ms (built-in speakers ~50ms).
     aec_delay_ms: int = 50
 
+    # D-11: Force echo suppression off (bypass speaker mode suppression).
+    # When True, wake word detection continues during TTS even without a headset.
+    force_disabled: bool = False
+
 
 class MicProfileEntryConfig(BaseModel):
     """Per-device mic profile override.
