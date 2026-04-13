@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Paste Injection Reliability
 status: executing
-stopped_at: Completed 13-audio-reliability-01-PLAN.md
-last_updated: "2026-04-13T10:39:36.102Z"
+stopped_at: Completed 13-audio-reliability-03-PLAN.md
+last_updated: "2026-04-13T10:47:45.253Z"
 last_activity: 2026-04-13
 progress:
   total_phases: 13
   completed_phases: 11
   total_plans: 34
-  completed_plans: 34
+  completed_plans: 35
   percent: 100
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 13 (audio-reliability) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-04-13
 
@@ -61,6 +61,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 13-audio-reliability]: herald stop kills afplay + clears queue; TTS state flag cleared synchronously for echo suppression (D-07/AUDIO-03)
 - [Phase 13-audio-reliability]: MicProfileManager: config overrides always win over calibration cache (D-03)
 - [Phase 13-audio-reliability]: MicProfileEntry calibration uses median of chunk peaks * 3.5 (capped 500) for Bluetooth noise resilience (D-04, D-12)
+- [Phase 13-audio-reliability]: Echo suppression gate now checks headset_mode first, then profile.echo_safe override, then force_disabled — last wins, all can override
+- [Phase 13-audio-reliability]: Grace period constants are device-aware (0.5s headset / 2.0s speaker) per D-10, no longer configurable
+- [Phase 13-audio-reliability]: RECORDING_FLAG written before tts.interrupt() so orchestrator sees recording before purging (Pitfall 3)
 
 ### Pending Todos
 
@@ -72,6 +75,6 @@ None — milestone complete.
 
 ## Session Continuity
 
-Last session: 2026-04-13T10:39:36.099Z
-Stopped at: Completed 13-audio-reliability-01-PLAN.md
+Last session: 2026-04-13T10:47:45.250Z
+Stopped at: Completed 13-audio-reliability-03-PLAN.md
 Resume file: None
