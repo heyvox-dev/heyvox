@@ -59,7 +59,7 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 ## Current State
 
 **Shipped v1.1** on 2026-04-11 (Architecture Hardening). All 15 requirements satisfied.
-**v1.2** in progress (Polish & Reliability). Phase 10 (test-stability) complete — CI test suite stable with intent-based assertions, proper dev deps, and audio marker for CI skipping.
+**v1.2** in progress (Polish & Reliability). Phase 13 (audio-reliability) complete — per-device mic profiles, headset-aware echo suppression, TTS stop/interrupt fix, auto-calibration, `heyvox calibrate` CLI.
 
 ### Out of Scope
 
@@ -153,4 +153,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-12 after Phase 10 (test-stability) complete*
+*Last updated: 2026-04-13 after Phase 13 (audio-reliability) complete*
