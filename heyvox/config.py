@@ -225,6 +225,34 @@ class EchoSuppressionConfig(BaseModel):
     aec_delay_ms: int = 50
 
 
+class MicProfileEntryConfig(BaseModel):
+    """Per-device mic profile override.
+
+    All fields are optional — missing fields fall back to the global config default.
+    Use in config.yaml under ``mic_profiles:`` keyed by partial device name.
+
+    Example::
+
+        mic_profiles:
+          G435:
+            silence_threshold: 300
+            echo_safe: true
+
+    Requirement: AUDIO-01, D-02
+    """
+    noise_floor: int | None = None
+    silence_threshold: int | None = None
+    buffer_size: int | None = None
+    cooldown_tier: int | None = None
+    sample_rate: int | None = None
+    chunk_size: int | None = None
+    gain: float | None = None
+    voice_isolation_mode: bool | None = None
+    echo_safe: bool | None = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
 # ---------------------------------------------------------------------------
 # Root config model
 # ---------------------------------------------------------------------------
@@ -243,7 +271,7 @@ class HeyvoxConfig(BaseModel):
     min_recording_secs: float = 1.5
     silence_timeout_secs: float = 2.0
     silence_threshold: int = 200
-    max_recording_secs: float = 30.0
+    max_recording_secs: float = 300.0
 
     # Target app to focus before typing — empty = paste into whatever is focused
     # Requirement: DECP-01 (decoupling: no hardcoded app default)
@@ -263,6 +291,12 @@ class HeyvoxConfig(BaseModel):
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
     injection: InjectionConfig = InjectionConfig()
+
+    # Per-device mic profiles — keyed by partial device name (case-insensitive).
+    # Values override global silence_threshold, sample_rate, etc. for specific mics.
+    # Auto-calibration data is merged in at runtime from ~/.cache/heyvox/mic-profiles.json.
+    # Requirement: AUDIO-01, D-02
+    mic_profiles: dict[str, MicProfileEntryConfig] = {}
 
     # HUD overlay — floating pill with waveform and state indicator
     hud_enabled: bool = True
