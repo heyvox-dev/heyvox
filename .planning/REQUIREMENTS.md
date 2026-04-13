@@ -28,6 +28,15 @@ Requirements for Polish & Reliability release. Each maps to roadmap phases.
 - [ ] **PASTE-05**: Focus detection verifies correct app/field before paste, with fallback to clipboard + notification
 - [ ] **PASTE-06**: Paste works reliably in non-Conductor apps (Cursor, Windsurf, VS Code, iTerm, etc.)
 
+### Audio Reliability
+
+- [ ] **AUDIO-01**: Per-device profiles (noise floor, buffer size, silence threshold) auto-calibrated on first use
+- [ ] **AUDIO-02**: Wake word detection stays active during TTS playback when headset detected (no echo risk)
+- [ ] **AUDIO-03**: Escape key stops TTS playback immediately (kill afplay, clear queue)
+- [ ] **AUDIO-04**: Recording blocks TTS from starting; TTS holds in queue until recording finishes
+- [ ] **AUDIO-05**: Silence detection uses percentage-based threshold (not single-spike max) for Bluetooth robustness
+- [ ] **AUDIO-06**: Main audio loop refactored into AudioStage pipeline (deferred to post-Phase 13)
+
 ### Distribution
 
 - [ ] **DIST-01**: PyPI name verified/secured and publish workflow configured (GitHub Actions OIDC)
@@ -84,15 +93,21 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PASTE-04 | Phase 12 | Pending |
 | PASTE-05 | Phase 12 | Pending |
 | PASTE-06 | Phase 12 | Pending |
-| DIST-01 | Phase 13 | Pending |
-| DIST-02 | Phase 13 | Pending |
-| DIST-03 | Phase 13 | Pending |
-| UX-01 | Phase 13 | Pending |
-| UX-02 | Phase 13 | Pending |
+| AUDIO-01 | Phase 13 | Pending |
+| AUDIO-02 | Phase 13 | Pending |
+| AUDIO-03 | Phase 13 | Pending |
+| AUDIO-04 | Phase 13 | Pending |
+| AUDIO-05 | Phase 13 | Pending |
+| AUDIO-06 | Phase 15 (TBD) | Deferred |
+| DIST-01 | Phase 14 | Pending |
+| DIST-02 | Phase 14 | Pending |
+| DIST-03 | Phase 14 | Pending |
+| UX-01 | Phase 14 | Pending |
+| UX-02 | Phase 14 | Pending |
 
 **Coverage:**
-- v1.2 requirements: 17 total
-- Mapped to phases: 17
+- v1.2 requirements: 23 total
+- Mapped to phases: 23
 - Unmapped: 0
 
 ---
