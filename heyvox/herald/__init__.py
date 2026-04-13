@@ -29,9 +29,28 @@ def run_herald(*args: str, env: dict | None = None) -> int:
 
 
 def start_orchestrator() -> None:
-    """Start the Herald orchestrator daemon (blocking)."""
-    from heyvox.herald.orchestrator import HeraldOrchestrator
-    orch = HeraldOrchestrator()
+    """Start the Herald orchestrator daemon (blocking).
+
+    Loads the app profile config to configure workspace switching.
+    """
+    from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
+    ws_switch_cmd = ""
+    ws_app_name = ""
+    try:
+        from heyvox.config import load_config
+        cfg = load_config()
+        for profile in cfg.app_profiles:
+            if profile.has_workspace_detection and profile.workspace_switch_cmd:
+                ws_switch_cmd = profile.workspace_switch_cmd
+                ws_app_name = profile.name
+                break
+    except Exception:
+        pass
+    orch_cfg = OrchestratorConfig(
+        workspace_switch_cmd=ws_switch_cmd,
+        workspace_app_name=ws_app_name,
+    )
+    orch = HeraldOrchestrator(config=orch_cfg)
     orch.run()
 
 
