@@ -29,15 +29,22 @@
 
 </details>
 
-### 📋 v2.0 Cross-Platform & Polish (Planned)
-
-Phases TBD — define via `/gsd:new-milestone`
-
 ### 🔧 v1.2 Paste Injection Reliability (Active)
 
 - [x] Phase 12: Paste Injection Reliability (1/3 plans) — in progress (completed 2026-04-13)
 - [ ] Phase 13: Audio Reliability — device profiles, TTS/recording interaction, silence detection robustness
+  **Goal:** Robust audio pipeline across mic types with per-device profiles, headset-aware echo suppression, and instant TTS interruption
+  **Plans:** 4 plans
+  Plans:
+  - [ ] 13-01-PLAN.md — Device profiles: MicProfileManager, config model, cache, calibration
+  - [ ] 13-02-PLAN.md — TTS interruption: fix herald stop, add interrupt, fix Escape handler
+  - [ ] 13-03-PLAN.md — Integration: wire profiles into main loop, echo suppression gate, auto-calibration
+  - [ ] 13-04-PLAN.md — CLI: add heyvox calibrate command
 - [ ] Phase 14: Distribution & UX Polish — PyPI, Homebrew, HUD mic display
+
+### 📋 v2.0 Cross-Platform & Polish (Planned)
+
+Phases TBD — define via `/gsd:new-milestone`
 
 ## Progress
 
@@ -53,5 +60,5 @@ Phases TBD — define via `/gsd:new-milestone`
 | 8. IPC Consolidation | v1.1 | 3/3 | Complete | 2026-04-11 |
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
 | 12. Paste Injection Reliability | v1.2 | 1/3 | Complete    | 2026-04-13 |
-| 13. Audio Reliability | v1.2 | 0/? | Planned | — |
+| 13. Audio Reliability | v1.2 | 0/4 | Planned | — |
 | 14. Distribution & UX Polish | v1.2 | 0/? | Planned | — |
