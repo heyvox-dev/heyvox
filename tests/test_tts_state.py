@@ -53,7 +53,7 @@ class TestIsMuted(unittest.TestCase):
     def setUp(self):
         tts._muted = False
         # Clean file flags
-        for f in ["/tmp/claude-tts-mute"]:
+        for f in ["/tmp/herald-mute"]:
             try:
                 os.remove(f)
             except FileNotFoundError:
@@ -61,7 +61,7 @@ class TestIsMuted(unittest.TestCase):
 
     def tearDown(self):
         tts._muted = False
-        for f in ["/tmp/claude-tts-mute"]:
+        for f in ["/tmp/herald-mute"]:
             try:
                 os.remove(f)
             except FileNotFoundError:
@@ -78,7 +78,7 @@ class TestIsMuted(unittest.TestCase):
 
     @patch("heyvox.audio.tts._is_system_muted", return_value=False)
     def test_muted_by_file_flag(self, _):
-        open("/tmp/claude-tts-mute", "w").close()
+        open("/tmp/herald-mute", "w").close()
         assert tts.is_muted() is True
 
     @patch("heyvox.audio.tts._is_system_muted", return_value=True)
@@ -98,7 +98,7 @@ class TestSetMuted(unittest.TestCase):
         self._cleanup_flags()
 
     def _cleanup_flags(self):
-        for f in ["/tmp/claude-tts-mute", "/tmp/herald-mute"]:
+        for f in ["/tmp/herald-mute"]:
             try:
                 os.remove(f)
             except FileNotFoundError:
@@ -108,7 +108,6 @@ class TestSetMuted(unittest.TestCase):
     def test_mute_creates_flags(self, mock_herald):
         tts.set_muted(True)
         assert tts._muted is True
-        assert os.path.exists("/tmp/claude-tts-mute")
         assert os.path.exists("/tmp/herald-mute")
         mock_herald.assert_called_once_with("stop")
 
@@ -119,7 +118,6 @@ class TestSetMuted(unittest.TestCase):
         # Then unmute
         tts.set_muted(False)
         assert tts._muted is False
-        assert not os.path.exists("/tmp/claude-tts-mute")
         assert not os.path.exists("/tmp/herald-mute")
 
     @patch("heyvox.audio.tts._herald")
@@ -143,7 +141,7 @@ class TestVerbosityFileSync(unittest.TestCase):
         self._cleanup()
 
     def _cleanup(self):
-        for f in ["/tmp/heyvox-verbosity", "/tmp/claude-tts-mute", "/tmp/herald-mute"]:
+        for f in ["/tmp/heyvox-verbosity", "/tmp/herald-mute"]:
             try:
                 os.remove(f)
             except FileNotFoundError:
@@ -169,7 +167,6 @@ class TestVerbosityFileSync(unittest.TestCase):
         """'skip' verbosity should also create mute flags for Herald."""
         tts.set_verbosity("skip")
         assert tts._muted is True
-        assert os.path.exists("/tmp/claude-tts-mute")
         assert os.path.exists("/tmp/herald-mute")
 
     def test_set_full_clears_mute_flags(self):
@@ -177,7 +174,7 @@ class TestVerbosityFileSync(unittest.TestCase):
         tts.set_verbosity("skip")
         tts.set_verbosity("full")
         assert tts._muted is False
-        assert not os.path.exists("/tmp/claude-tts-mute")
+        assert not os.path.exists("/tmp/herald-mute")
 
     def test_get_verbosity_reads_file(self):
         """get_verbosity() should read from file, not just in-memory."""
@@ -289,7 +286,7 @@ class TestTtsThreadSafety(unittest.TestCase):
         tts._verbosity = tts.Verbosity.FULL
         tts._style = "detailed"
         for f in ["/tmp/heyvox-verbosity", "/tmp/heyvox-tts-style",
-                  "/tmp/claude-tts-mute", "/tmp/herald-mute"]:
+                  "/tmp/herald-mute"]:
             try:
                 os.remove(f)
             except FileNotFoundError:

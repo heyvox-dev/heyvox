@@ -41,8 +41,6 @@ from heyvox.constants import (
     HERALD_LAST_PLAY,
     HERALD_WORKSPACE_FILE,
     HERALD_GENERATING_WAV_PREFIX,
-    CLAUDE_TTS_MUTE_FLAG,
-    CLAUDE_TTS_PLAYING_PID,
     HERALD_PLAYING_PID,
     VERBOSITY_FILE,
 )
@@ -55,15 +53,6 @@ from heyvox.hud.process import (
     kill_duplicate_overlays,
     get_indicator_proc,
 )
-
-# Backward-compat re-exports (tests import these; remove in Phase 9)
-from heyvox.text_processing import (
-    is_garbled as _is_garbled,
-    strip_wake_words as _strip_wake_words,
-    _WAKE_WORD_PHRASES,
-)
-from heyvox.recording import _audio_rms, _save_debug_audio, _release_recording_guard
-_MIN_AUDIO_DBFS = -60.0  # Re-exported for test_wakeword_trim.py
 
 
 # ---------------------------------------------------------------------------
@@ -125,15 +114,6 @@ def log(msg: str) -> None:
 # ---------------------------------------------------------------------------
 # HUD overlay lifecycle (delegated to heyvox.hud.process)
 # ---------------------------------------------------------------------------
-
-def _show_recording_indicator(active: bool) -> None:
-    """Legacy recording indicator -- now a no-op.
-
-    The HUD overlay stays alive for the entire session. State is driven
-    by hud_send() messages instead of launching/killing processes.
-    """
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Adapter builder
@@ -205,7 +185,7 @@ def _acquire_singleton():
     for pattern in (RECORDING_FLAG, HEYVOX_MEDIA_PAUSED_PREFIX + "*",
                      HERALD_MEDIA_PAUSED_PREFIX + "*", HERALD_PAUSE_FLAG,
                      HUD_SOCKET_PATH,
-                     CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG, VERBOSITY_FILE,
+                     HERALD_MUTE_FLAG, VERBOSITY_FILE,
                      # Herald state files that can go stale after crash
                      HERALD_AMBIENT_FLAG, HERALD_MODE_FILE,
                      HERALD_LAST_PLAY, HERALD_WORKSPACE_FILE,
@@ -309,7 +289,7 @@ def _setup(config: HeyvoxConfig):
             log(f"WARNING: Previous instance died without clean shutdown (heartbeat stale by {hb_age:.0f}s)")
     except FileNotFoundError:
         pass
-    for stale_flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID,
+    for stale_flag in (RECORDING_FLAG, TTS_PLAYING_FLAG,
                        HEYVOX_MEDIA_PAUSED_REC):
         try:
             age = time.time() - os.path.getmtime(stale_flag)
@@ -560,7 +540,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         from heyvox.audio.negative_collector import NegativeCollector
         neg_dir = config.wake_words.negatives_dir
         if not neg_dir:
-            neg_dir = str(Path(str(CONFIG_DIR)) / "negatives")
+            neg_dir = os.path.join(str(CONFIG_DIR), "negatives")
         _neg_collector = NegativeCollector(
             negatives_dir=neg_dir,
             max_clips=config.wake_words.negatives_max_clips,
@@ -944,7 +924,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             except Exception:
                 pass
             if not _tts_active:
-                for _tts_flag in (TTS_PLAYING_FLAG, CLAUDE_TTS_PLAYING_PID):
+                for _tts_flag in (TTS_PLAYING_FLAG,):
                     if os.path.exists(_tts_flag):
                         try:
                             flag_age = time.time() - os.path.getmtime(_tts_flag)

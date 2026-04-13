@@ -131,7 +131,6 @@ class TestLastAgentAdapterEnter:
 
         adapter = LastAgentAdapter.__new__(LastAgentAdapter)
         adapter._enter_count = 2
-        adapter._last_injected_via_conductor = False  # set by __init__, required for should_auto_send()
         adapter._last_agent_name = None  # set by __init__, used in should_auto_send() log output
         assert adapter.should_auto_send() is True
 

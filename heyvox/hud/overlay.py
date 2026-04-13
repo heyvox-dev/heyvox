@@ -529,8 +529,8 @@ def _make_menu_action_class():
     from Foundation import NSObject
     from AppKit import NSPasteboard, NSPasteboardTypeString
 
-    from heyvox.constants import CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG
-    _TTS_MUTE_FLAGS = [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]
+    from heyvox.constants import HERALD_MUTE_FLAG
+    _TTS_MUTE_FLAGS = [HERALD_MUTE_FLAG]
 
     class _MenuActionHandler(NSObject):
         def copyTranscript_(self, sender):
@@ -770,7 +770,7 @@ def _build_transcript_menu(handler):
 
     # -- Gather state --
     from heyvox.constants import (
-        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG,
+        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_MUTE_FLAG,
         HERALD_ORCH_PID, KOKORO_DAEMON_SOCK, KOKORO_DAEMON_PID, HUD_SOCKET_PATH,
     )
     queue_count = len(_glob.glob(HERALD_QUEUE_DIR + "/*.wav"))
@@ -779,7 +779,7 @@ def _build_transcript_menu(handler):
         from heyvox.audio.tts import is_muted as _tts_is_muted
         _is_muted = _tts_is_muted()
     except Exception:
-        _is_muted = os.path.exists(CLAUDE_TTS_MUTE_FLAG) or os.path.exists(HERALD_MUTE_FLAG)
+        _is_muted = os.path.exists(HERALD_MUTE_FLAG)
 
     try:
         from heyvox.audio.tts import get_verbosity

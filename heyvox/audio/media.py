@@ -215,36 +215,6 @@ end tell'''],
     return _chrome_js_available
 
 
-def _browser_has_media_tab(app_name: str) -> bool:
-    """Check if a browser has any audible tab (no JS needed).
-
-    Uses Chrome tab audible state rather than URL whitelisting, so it
-    works for any site playing audio/video.
-    """
-    script = f'''
-tell application "System Events"
-    if not (exists process "{app_name}") then return "no-app"
-end tell
-tell application "{app_name}"
-    repeat with w in every window
-        repeat with t from 1 to count of tabs of window w
-            -- Chrome doesn't expose audible via AppleScript, so check title
-            -- for common audio indicators or just return true if tabs exist
-            return "has-tabs"
-        end repeat
-    end repeat
-    return "no-tabs"
-end tell'''
-
-    try:
-        r = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=1.5,
-        )
-        return r.stdout.strip() == "has-tabs"
-    except Exception:
-        return False
-
 
 def _browser_video_state_js(app_name: str) -> str | None:
     """Check if a browser has playing media via AppleScript + JavaScript.
@@ -462,40 +432,12 @@ def pause_media() -> bool:
                 return False
             continue
 
-        # Fallback: check if video tab exists + use media key
-        # DISABLED: media key is a blind toggle — it can START paused media.
-        # Only use this path if we can confirm media is actually playing,
-        # which requires Chrome JS access. Log a warning instead.
-        if _browser_has_media_tab(app_name):
-            _log(f"pause_media: {app_name} has tabs but JS is disabled — "
-                 f"cannot detect play state. Skipping (enable Chrome JS: "
-                 f"View → Developer → Allow JavaScript from Apple Events)")
-
     # Nothing playing — cache this result so subsequent TTS sentences
     # skip the slow detection chain (Hush + nowplaying + Chrome JS).
     _no_media_cache_until = time.monotonic() + _NO_MEDIA_CACHE_TTL
     _log(f"pause_media: no playing media found (native or browser) ({time.time()-t0:.2f}s), "
          f"caching for {_NO_MEDIA_CACHE_TTL:.0f}s")
     return False
-
-
-def _send_rewind(secs: int = 4):
-    """Rewind browser media by sending left-arrow keys.
-
-    Each left-arrow = 5 seconds back in YouTube. Only targets
-    browsers (Chrome, Safari, Arc) since native apps use MediaRemote.
-    """
-    presses = max(1, (secs + 4) // 5)
-    try:
-        for _ in range(presses):
-            subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to key code 123'],
-                capture_output=True, timeout=1,
-            )
-            time.sleep(0.1)
-    except Exception:
-        pass
 
 
 # Delay before resuming media (seconds). Gives natural breathing room.

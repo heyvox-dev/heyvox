@@ -203,8 +203,8 @@ def set_muted(muted: bool) -> None:
     global _muted
     with _tts_lock:
         _muted = muted
-        from heyvox.constants import CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG
-        _MUTE_FLAGS = [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]
+        from heyvox.constants import HERALD_MUTE_FLAG
+        _MUTE_FLAGS = [HERALD_MUTE_FLAG]
         if muted:
             for flag in _MUTE_FLAGS:
                 try:
@@ -236,8 +236,8 @@ def _is_system_muted() -> bool:
 
 def is_muted() -> bool:
     """Return current mute state (in-memory flag, file flag, or macOS system mute)."""
-    from heyvox.constants import CLAUDE_TTS_MUTE_FLAG
-    return _muted or os.path.exists(CLAUDE_TTS_MUTE_FLAG) or _is_system_muted()
+    from heyvox.constants import HERALD_MUTE_FLAG
+    return _muted or os.path.exists(HERALD_MUTE_FLAG) or _is_system_muted()
 
 
 def set_verbosity(level: str) -> None:
@@ -264,8 +264,8 @@ def set_verbosity(level: str) -> None:
         except OSError as e:
             log.warning(f"Failed to write verbosity file: {e}")
         # Sync legacy mute flags and in-memory state
-        from heyvox.constants import CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG
-        _MUTE_FLAGS = [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]
+        from heyvox.constants import HERALD_MUTE_FLAG
+        _MUTE_FLAGS = [HERALD_MUTE_FLAG]
         if level == "skip":
             _muted = True
             for flag in _MUTE_FLAGS:

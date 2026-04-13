@@ -55,11 +55,14 @@ class TestIsMediaPlaying:
 class TestPauseMedia:
     """pause_media() should create flag file and use correct method."""
 
+    def setup_method(self):
+        # Reset no-media cache from previous tests
+        media._no_media_cache_until = 0.0
+
     @patch("heyvox.audio.media._hush_command", return_value=None)
     @patch("heyvox.audio.media._is_media_playing_native", return_value=None)
-    @patch("heyvox.audio.media._browser_has_media_tab", return_value=False)
     @patch("heyvox.audio.media._test_chrome_js_access", return_value=False)
-    def test_noop_when_no_session(self, mock_js, mock_video, mock_state, mock_hush):
+    def test_noop_when_no_session(self, mock_js, mock_state, mock_hush):
         """No native session and no browser media → returns False, no flag created."""
         result = media.pause_media()
         assert result is False
@@ -94,11 +97,10 @@ class TestPauseMedia:
         mock_key.assert_not_called()
 
     @patch("heyvox.audio.media._hush_command", return_value=None)
-    @patch("heyvox.audio.media._browser_has_media_tab", return_value=False)
     @patch("heyvox.audio.media._test_chrome_js_access", return_value=False)
     @patch("heyvox.audio.media._get_mr", return_value=None)
     @patch("heyvox.audio.media._is_media_playing_native", return_value=True)
-    def test_falls_back_gracefully_when_mr_unavailable(self, mock_state, mock_mr, mock_js, mock_video, mock_hush):
+    def test_falls_back_gracefully_when_mr_unavailable(self, mock_state, mock_mr, mock_js, mock_hush):
         """When MediaRemote unavailable and no browser video, pause returns False."""
         result = media.pause_media()
         # MediaRemote unavailable + no browser media → cannot pause → False

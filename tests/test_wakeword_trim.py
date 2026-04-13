@@ -132,7 +132,7 @@ class TestEnergyThreshold:
 
     def test_audio_rms_on_silence(self):
         """Pure silence should return very low dBFS."""
-        from heyvox.main import _audio_rms
+        from heyvox.recording import _audio_rms
 
         silent_chunks = [np.zeros(DEFAULT_CHUNK_SIZE, dtype=np.int16)]
         db = _audio_rms(silent_chunks, DEFAULT_SAMPLE_RATE)
@@ -140,7 +140,7 @@ class TestEnergyThreshold:
 
     def test_audio_rms_on_speech(self):
         """Normal speech-level audio should be above threshold."""
-        from heyvox.main import _audio_rms
+        from heyvox.recording import _audio_rms
 
         # Simulate speech: sine wave at ~1000 amplitude (typical speech RMS)
         t = np.arange(DEFAULT_CHUNK_SIZE * 10) / DEFAULT_SAMPLE_RATE
@@ -152,13 +152,13 @@ class TestEnergyThreshold:
 
     def test_audio_rms_empty_chunks(self):
         """Empty chunk list should return minimum dBFS."""
-        from heyvox.main import _audio_rms
+        from heyvox.recording import _audio_rms
 
         db = _audio_rms([], DEFAULT_SAMPLE_RATE)
         assert db == -96.0
 
     def test_threshold_value(self):
         """Energy threshold should be -60 dBFS (allows quiet speech)."""
-        from heyvox.main import _MIN_AUDIO_DBFS
+        from heyvox.recording import _MIN_AUDIO_DBFS
 
         assert _MIN_AUDIO_DBFS == -60.0, f"Threshold should be -60.0, got {_MIN_AUDIO_DBFS}"

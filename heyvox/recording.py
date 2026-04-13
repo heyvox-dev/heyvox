@@ -138,7 +138,6 @@ class RecordingStateMachine:
 
     # Constants
     _INJECT_DEDUP_SECS = 2.0    # Suppress duplicate injections within this window
-    _MIN_AUDIO_DBFS = -60.0     # Energy gate for STT
     _BUSY_TIMEOUT = 60.0        # Force-reset busy after this many seconds
     _ZOMBIE_FAIL_THRESHOLD = 2  # Force reinit after N consecutive failed recordings
 
@@ -669,65 +668,58 @@ class RecordingStateMachine:
                 f"target pid={target_pid}"
             )
 
-            # NOTE: Conductor sidecar socket injection is disabled. The sidecar
-            # registers the "query" method on an internal tunnel (Electron ↔ sidecar),
-            # not on the external Unix socket. Direct socket calls return result:null
-            # but don't actually deliver messages. Kept conductor.py for future use
-            # if Conductor exposes a public API.
-            _injected_via_conductor = False
             paste_ok = True  # Default to True; set to False if type_text fails
             combined_enter = 0
 
-            if not _injected_via_conductor:
-                adapter = self.ctx.adapter
-                auto_send = not ptt and adapter.should_auto_send()
-                combined_enter = adapter.enter_count if auto_send else 0
+            adapter = self.ctx.adapter
+            auto_send = not ptt and adapter.should_auto_send()
+            combined_enter = adapter.enter_count if auto_send else 0
 
-                # Conductor fast path: Cmd+L + Cmd+V + Enter in ONE osascript
-                # call. Skips restore_target() and type_text() entirely.
-                is_conductor = (
-                    recording_target
-                    and (recording_target.conductor_workspace
-                         or (target_app and "conductor" in target_app.lower()))
+            # Conductor fast path: Cmd+L + Cmd+V + Enter in ONE osascript
+            # call. Skips restore_target() and type_text() entirely.
+            is_conductor = (
+                recording_target
+                and (recording_target.conductor_workspace
+                     or (target_app and "conductor" in target_app.lower()))
+            )
+            if is_conductor:
+                self._log(
+                    f"[inject] Conductor fast path: "
+                    f"Cmd+L → Cmd+V → Enter x{combined_enter}"
                 )
-                if is_conductor:
-                    self._log(
-                        f"[inject] Conductor fast path: "
-                        f"Cmd+L → Cmd+V → Enter x{combined_enter}"
-                    )
-                    # conductor_paste_and_send handles activation via
-                    # 'set frontmost to true' in the same osascript — no
-                    # separate restore_target() needed.
-                    paste_ok = conductor_paste_and_send(
-                        paste_text, enter_count=combined_enter,
-                    )
-                else:
-                    # Generic path: restore target + type_text
-                    if recording_target:
-                        restore_target(recording_target)
-                        self._log(f"[inject] Restored target: {recording_target.app_name}")
+                # conductor_paste_and_send handles activation via
+                # 'set frontmost to true' in the same osascript — no
+                # separate restore_target() needed.
+                paste_ok = conductor_paste_and_send(
+                    paste_text, enter_count=combined_enter,
+                )
+            else:
+                # Generic path: restore target + type_text
+                if recording_target:
+                    restore_target(recording_target)
+                    self._log(f"[inject] Restored target: {recording_target.app_name}")
 
-                    injection_cfg = getattr(self.config, "injection", None)
-                    if injection_cfg:
-                        settle = _settle_delay_for(
-                            target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
-                        )
-                        max_retries = injection_cfg.max_retries
-                    else:
-                        settle = 0.1
-                        max_retries = 2
-                    self._log(
-                        f"[inject] generic path: auto_send={auto_send}, "
-                        f"combined_enter={combined_enter}"
+                injection_cfg = getattr(self.config, "injection", None)
+                if injection_cfg:
+                    settle = _settle_delay_for(
+                        target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
                     )
-                    paste_ok = type_text(
-                        paste_text,
-                        app_name=target_app,
-                        snap=recording_target,
-                        settle_secs=settle,
-                        max_retries=max_retries,
-                        enter_count=combined_enter,
-                    )
+                    max_retries = injection_cfg.max_retries
+                else:
+                    settle = 0.1
+                    max_retries = 2
+                self._log(
+                    f"[inject] generic path: auto_send={auto_send}, "
+                    f"combined_enter={combined_enter}"
+                )
+                paste_ok = type_text(
+                    paste_text,
+                    app_name=target_app,
+                    snap=recording_target,
+                    settle_secs=settle,
+                    max_retries=max_retries,
+                    enter_count=combined_enter,
+                )
 
             if paste_ok:
                 if combined_enter > 0:
