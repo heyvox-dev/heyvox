@@ -117,6 +117,8 @@ class TestLastAgentAdapterEnter:
 
         adapter = LastAgentAdapter.__new__(LastAgentAdapter)
         adapter._enter_count = 2
+        adapter._last_injected_via_socket = False
+        adapter._last_agent_name = None
         assert adapter.should_auto_send() is True
 
 
