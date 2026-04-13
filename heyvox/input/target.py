@@ -17,6 +17,7 @@ Fallback logic when no text field was focused at recording start:
 
 import os
 import sys
+import time as _time
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,7 +78,7 @@ def _detect_conductor_workspace(pid: int) -> str:
 
     Returns the workspace city name (directory_name) or empty string.
     """
-    import subprocess
+    _t0_detect = _time.time()
 
     # Step 1: Walk the AX tree to find the branch name shown in the right panel
     branch_name = ""
@@ -101,7 +102,8 @@ def _detect_conductor_workspace(pid: int) -> str:
             if err == 0 and windows and len(windows) > 0:
                 win = windows[0]
         if win is None:
-            _log(f"conductor workspace: no window found for pid={pid}")
+            _log(f"conductor workspace: no window found for pid={pid} "
+                 f"({(_time.time() - _t0_detect)*1000:.0f}ms)")
             return ""
 
         # Flatten the tree looking for the first AXStaticText after the first AXSplitter
@@ -135,37 +137,43 @@ def _detect_conductor_workspace(pid: int) -> str:
                 break
 
     except Exception as e:
-        _log(f"conductor workspace AX detection failed: {e}")
+        _log(f"conductor workspace AX detection failed: {e} "
+             f"({(_time.time() - _t0_detect)*1000:.0f}ms)")
         return ""
 
+    _ax_ms = (_time.time() - _t0_detect) * 1000
     if not branch_name:
+        _log(f"conductor workspace: no branch found ({_ax_ms:.0f}ms AX walk)")
         return ""
 
     # Step 2: Map branch name to workspace city name via DB.
     # The AX tree shows the Conductor branch (workspaces.branch column),
     # e.g. "review-main-files" → san-jose, "start-heyvox-v1" → seattle.
+    # Uses Python's sqlite3 module directly (no subprocess overhead).
     try:
-        db = os.path.expanduser(
+        import sqlite3 as _sqlite3
+        _t0_db = _time.time()
+        db_path = os.path.expanduser(
             "~/Library/Application Support/com.conductor.app/conductor.db"
         )
-        result = subprocess.run(
-            ["sqlite3", db,
-             "SELECT directory_name, branch FROM workspaces "
-             "WHERE state = 'ready'"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode != 0:
-            return ""
-        for line in result.stdout.strip().splitlines():
-            parts = line.split("|")
-            if len(parts) >= 2:
-                city, db_branch = parts[0], parts[1]
-                if db_branch == branch_name:
-                    _log(f"conductor workspace detected: '{city}' (branch={branch_name!r})")
-                    return city
-        _log(f"conductor workspace: branch {branch_name!r} not matched in DB")
-    except Exception:
-        pass
+        conn = _sqlite3.connect(db_path, timeout=2)
+        try:
+            rows = conn.execute(
+                "SELECT directory_name, branch FROM workspaces WHERE state = 'ready'"
+            ).fetchall()
+        finally:
+            conn.close()
+        _db_ms = (_time.time() - _t0_db) * 1000
+        for city, db_branch in rows:
+            if db_branch == branch_name:
+                _total_ms = (_time.time() - _t0_detect) * 1000
+                _log(f"[TIMING] conductor workspace detected: '{city}' "
+                     f"(AX={_ax_ms:.0f}ms, db={_db_ms:.0f}ms, total={_total_ms:.0f}ms)")
+                return city
+        _log(f"conductor workspace: branch {branch_name!r} not matched in DB "
+             f"(AX={_ax_ms:.0f}ms, db={_db_ms:.0f}ms)")
+    except Exception as e:
+        _log(f"conductor workspace DB error: {e}")
 
     return ""
 
@@ -321,8 +329,6 @@ def restore_target(snap: TargetSnapshot) -> bool:
     if snap is None:
         return False
 
-    import time as _time
-
     try:
         from ApplicationServices import (
             AXUIElementCreateApplication,
@@ -332,37 +338,81 @@ def restore_target(snap: TargetSnapshot) -> bool:
     except ImportError:
         return False
 
-    # Step 0: For Conductor, switch back to the workspace that was active
-    # when recording started (before activating the app).
-    if snap.conductor_workspace:
-        _log(f"restore: switching Conductor to workspace '{snap.conductor_workspace}'")
-        _switch_conductor_workspace(snap.conductor_workspace)
-        _time.sleep(0.3)
-
-    # Step 1: Activate the app — this is the critical step
-    _log(f"restore: activating {snap.app_name} (pid={snap.app_pid})")
-    _activate_app(snap.app_pid, snap.app_name)
-    _time.sleep(0.3)
-
-    # Verify activation worked
+    # Fast path: check if we're already on the right app
+    _already_frontmost = False
     try:
         import AppKit
         ws = AppKit.NSWorkspace.sharedWorkspace()
         actual = ws.frontmostApplication()
-        actual_name = actual.localizedName() if actual else "?"
+        actual_name = actual.localizedName() if actual else ""
         actual_pid = actual.processIdentifier() if actual else -1
-        if actual_pid != snap.app_pid:
-            _log(f"restore: WARNING: wanted {snap.app_name} (pid={snap.app_pid}) "
-                 f"but frontmost is {actual_name} (pid={actual_pid})")
-        else:
-            _log(f"restore: activated {actual_name} (pid={actual_pid}) OK")
+        # Match by PID or by app name (handles Chrome stealing focus briefly)
+        _already_frontmost = (
+            actual_pid == snap.app_pid
+            or (actual_name and actual_name.lower() == (snap.app_name or "").lower())
+        )
     except Exception:
-        _log("restore: activated (couldn't verify)")
+        pass
 
-    # Step 2: Try to refocus the captured element directly.
-    # Skip AXWebArea — in Electron/Tauri apps (e.g. Conductor) this is the
-    # conversation content area, not the text input. Pasting there silently
-    # fails. Go straight to the text field search instead.
+    # Step 0: For Conductor, trust the snapshot workspace — the AX tree walk
+    # to detect current workspace costs ~1s and is rarely needed since the
+    # user doesn't typically switch workspaces during a 5-10s recording.
+    _t0_restore = _time.time()
+    if snap.conductor_workspace:
+        if _already_frontmost:
+            _log(f"restore: already on Conductor, trusting workspace "
+                 f"'{snap.conductor_workspace}' (skipped AX re-detection)")
+        else:
+            # Not frontmost — activate, then trust snapshot workspace.
+            # Skip _detect_conductor_workspace() — the AX tree walk + DB query
+            # costs ~1s and the workspace almost never changes during recording.
+            _log(f"restore: activating {snap.app_name} (pid={snap.app_pid}), "
+                 f"trusting snapshot workspace '{snap.conductor_workspace}'")
+            _activate_app(snap.app_pid, snap.app_name)
+            _time.sleep(0.2)
+            _already_frontmost = True  # We just activated it
+        _log(f"[TIMING] restore Conductor: {(_time.time() - _t0_restore)*1000:.0f}ms")
+
+    # Step 1: Activate the app (skip if already frontmost)
+    if _already_frontmost:
+        _log(f"restore: {snap.app_name} already frontmost, skipping activate")
+    else:
+        _log(f"restore: activating {snap.app_name} (pid={snap.app_pid})")
+        _activate_app(snap.app_pid, snap.app_name)
+        _time.sleep(0.2)
+
+        # Verify activation worked
+        try:
+            actual = ws.frontmostApplication()
+            actual_name = actual.localizedName() if actual else "?"
+            actual_pid = actual.processIdentifier() if actual else -1
+            if actual_pid != snap.app_pid:
+                _log(f"restore: WARNING: wanted {snap.app_name} (pid={snap.app_pid}) "
+                     f"but frontmost is {actual_name} (pid={actual_pid})")
+            else:
+                _log(f"restore: activated {actual_name} (pid={actual_pid}) OK")
+        except Exception:
+            _log("restore: activated (couldn't verify)")
+
+    # Step 2: For Conductor (Electron/Tauri), use Cmd+L to focus the text
+    # input field. Cmd+L always lands in the right place — without it,
+    # focus may be on the conversation view, not the input field.
+    if snap.conductor_workspace or (snap.app_name and "conductor" in snap.app_name.lower()):
+        _log(f"restore: sending Cmd+L to focus Conductor text input")
+        import subprocess as _sp
+        _sp.run(
+            ["osascript", "-e",
+             'tell application "System Events"\n'
+             '    keystroke "l" using command down\n'
+             'end tell'],
+            capture_output=True, timeout=3,
+        )
+        _time.sleep(0.1)
+        return True
+
+    # Step 2b: Try to refocus the captured element directly (non-Conductor apps).
+    # Skip AXWebArea — in Electron/Tauri apps this is the conversation content
+    # area, not the text input. Go straight to the text field search instead.
     is_web_area = snap.element_role == "AXWebArea"
     if snap.ax_element is not None and snap.element_role in _TEXT_ROLES and not is_web_area:
         err = AXUIElementSetAttributeValue(snap.ax_element, "AXFocused", kCFBooleanTrue)

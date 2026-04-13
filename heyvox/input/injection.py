@@ -186,6 +186,15 @@ def _ax_inject_text(snap, text: str) -> bool:
         return False
     if snap.ax_element is None:
         return False
+    # Skip for Electron/Tauri apps — AXValue set returns success but doesn't
+    # update the web framework's internal state, so Enter submits empty text.
+    app_name = getattr(snap, "app_name", None)
+    conductor_ws = getattr(snap, "conductor_workspace", None)
+    if (isinstance(conductor_ws, str) and conductor_ws) or (
+        isinstance(app_name, str) and "conductor" in app_name.lower()
+    ):
+        _log(f"AX fast-path: skipping for Electron app ({app_name})")
+        return False
     try:
         from ApplicationServices import AXUIElementSetAttributeValue
         err = AXUIElementSetAttributeValue(snap.ax_element, "AXValue", text)
@@ -245,8 +254,9 @@ def _osascript_type_text(
     settle_secs: float = 0.1,
     expected_bundle_id: str | None = None,
     max_retries: int = 2,
+    enter_count: int = 0,
 ) -> bool:
-    """Paste text via clipboard + Cmd-V (osascript).
+    """Paste text via clipboard + Cmd-V (osascript), optionally followed by Enter.
 
     When app_name is provided, targets that process directly. Briefly
     activates the target for the paste, then restores the previously
@@ -261,12 +271,16 @@ def _osascript_type_text(
 
     max_retries: number of times to retry if clipboard is stolen during settle.
 
+    enter_count: if > 0, appends Enter keystrokes after Cmd-V in the same
+    osascript call — avoids a separate subprocess spawn (~0.2s savings).
+
     Returns:
         True on successful paste, False on any failure.
 
     Requirement: PASTE-02, PASTE-03, PASTE-05
     """
-    _log(f"paste: target={app_name or 'frontmost'}, text={len(text)} chars: {text[:60]!r}")
+    _log(f"paste: target={app_name or 'frontmost'}, text={len(text)} chars"
+         f"{f' + Enter x{enter_count}' if enter_count else ''}: {text[:60]!r}")
 
     # Step 1: Proactive focus verification before touching clipboard (PASTE-05)
     if not _verify_target_focused(expected_bundle_id):
@@ -314,6 +328,18 @@ def _osascript_type_text(
     # case-sensitive (e.g., "conductor" not "Conductor").
     process_name = frontmost_before if frontmost_before and frontmost_before != "?" else app_name
     already_frontmost = process_name and frontmost_before and process_name.lower() == _get_frontmost_app().lower()
+
+    # Build keystrokes: Cmd+V paste, then optional Enter(s) in the same script
+    # to avoid a separate subprocess spawn (~0.2s savings).
+    keystrokes = ['keystroke "v" using command down']
+    if enter_count > 0:
+        keystrokes.append("delay 0.05")  # Brief settle after paste
+        for i in range(enter_count):
+            keystrokes.append("keystroke return")
+            if i < enter_count - 1:
+                keystrokes.append("delay 0.05")
+    keystroke_block = "\n        ".join(keystrokes)
+
     if process_name:
         safe_name = process_name.replace('\\', '\\\\').replace('"', '\\"')
         if already_frontmost:
@@ -323,7 +349,7 @@ def _osascript_type_text(
             script = (
                 f'tell application "System Events"\n'
                 f'    tell process "{safe_name}"\n'
-                f'        keystroke "v" using command down\n'
+                f'        {keystroke_block}\n'
                 f'    end tell\n'
                 f'end tell'
             )
@@ -334,12 +360,12 @@ def _osascript_type_text(
                 f'    tell process "{safe_name}"\n'
                 f'        set frontmost to true\n'
                 f'        delay 0.2\n'
-                f'        keystroke "v" using command down\n'
+                f'        {keystroke_block}\n'
                 f'    end tell\n'
                 f'end tell'
             )
     else:
-        script = 'tell application "System Events"\n    keystroke "v" using command down\nend tell'
+        script = f'tell application "System Events"\n    {keystroke_block}\nend tell'
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT + 2,
@@ -363,8 +389,9 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
     """Press Enter via osascript.
 
     When app_name is provided, targets that process directly via
-    `tell process`. Must set frontmost briefly because macOS only
-    delivers keystrokes to the frontmost process.
+    `tell process`. Skips `set frontmost to true` when the app is already
+    frontmost — calling it redundantly disrupts web view element focus in
+    Electron/Tauri apps (e.g. Conductor), causing Enter to miss the input field.
     """
     _log(f"enter: count={count}, target={app_name or 'frontmost'}")
 
@@ -378,15 +405,28 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
     target_name = process_name or app_name
     if target_name:
         safe_name = target_name.replace('\\', '\\\\').replace('"', '\\"')
-        script = (
-            f'tell application "System Events"\n'
-            f'    tell process "{safe_name}"\n'
-            f'        set frontmost to true\n'
-            f'        delay 0.2\n'
-            f'        {enter_script}\n'
-            f'    end tell\n'
-            f'end tell'
-        )
+        # Check if already frontmost — skip set frontmost to avoid disrupting
+        # Electron/Tauri web view element focus (same pattern as _osascript_type_text)
+        already_frontmost = process_name and process_name.lower() == _get_frontmost_app().lower()
+        if already_frontmost:
+            _log(f"enter: {target_name} already frontmost, skipping set frontmost")
+            script = (
+                f'tell application "System Events"\n'
+                f'    tell process "{safe_name}"\n'
+                f'        {enter_script}\n'
+                f'    end tell\n'
+                f'end tell'
+            )
+        else:
+            script = (
+                f'tell application "System Events"\n'
+                f'    tell process "{safe_name}"\n'
+                f'        set frontmost to true\n'
+                f'        delay 0.2\n'
+                f'        {enter_script}\n'
+                f'    end tell\n'
+                f'end tell'
+            )
     else:
         script = f'tell application "System Events"\n    {enter_script}\nend tell'
     result = subprocess.run(
@@ -419,8 +459,9 @@ def type_text(
     snap=None,
     settle_secs: float = 0.1,
     max_retries: int = 2,
+    enter_count: int = 0,
 ) -> bool:
-    """Insert text into an app.
+    """Insert text into an app, optionally pressing Enter to submit.
 
     When app_name is provided, targets that specific process for paste.
     This prevents pasting into the wrong app if focus changed during STT.
@@ -430,25 +471,35 @@ def type_text(
     2. AX fast-path (AXTextField/AXTextArea via AXValue) — native AppKit only
     3. Clipboard + Cmd-V via osascript — universal fallback
 
+    When enter_count > 0, the Enter keystrokes are combined into the same
+    osascript call as the paste — avoids a separate subprocess spawn.
+
     Args:
         text: Text to inject.
         app_name: Target app process name (for osascript targeting).
         snap: TargetSnapshot (or None). Used for AX fast-path and focus verification.
         settle_secs: Focus settle delay before Cmd-V (per-app tuned via InjectionConfig).
         max_retries: Number of retries on clipboard theft.
+        enter_count: Number of Enter keystrokes after paste (0 = no auto-send).
 
     Returns:
         True on success, False on failure. Error cue is played on failure.
     """
     if _chrome_type_text(text):
         _log(f"type_text: done via Chrome extension ({len(text)} chars)")
+        if enter_count > 0:
+            _chrome_press_enter(enter_count)
         return True
 
     if _ax_inject_text(snap, text):
         _log(f"type_text: done via AX fast-path ({len(text)} chars)")
+        # AX path doesn't support combined Enter — fall through to separate call
+        if enter_count > 0:
+            _osascript_press_enter(enter_count, app_name)
         return True
 
-    _log(f"type_text: using osascript → {app_name or 'frontmost'}")
+    _log(f"type_text: using osascript → {app_name or 'frontmost'}"
+         f"{f' + Enter x{enter_count}' if enter_count else ''}")
     expected_bundle_id = getattr(snap, "app_bundle_id", None) if snap is not None else None
     return _osascript_type_text(
         text,
@@ -456,6 +507,7 @@ def type_text(
         settle_secs=settle_secs,
         expected_bundle_id=expected_bundle_id,
         max_retries=max_retries,
+        enter_count=enter_count,
     )
 
 
@@ -490,6 +542,71 @@ def focus_input(app_name: str, shortcuts: dict[str, str] | None = None) -> None:
              f'tell application "System Events"\n    keystroke "{key}" using command down\nend tell'],
             capture_output=True, timeout=SUBPROCESS_TIMEOUT,
         )
+
+
+def conductor_paste_and_send(text: str, enter_count: int = 1) -> bool:
+    """One-shot Conductor injection: Cmd+L → Cmd+V → Enter in a single osascript.
+
+    Combines focus-input + clipboard-paste + submit into one subprocess call,
+    saving ~0.3s over the multi-step approach. Clipboard is set via NSPasteboard
+    (no subprocess) before the osascript runs.
+
+    Returns True on success, False on failure.
+    """
+    _t0 = time.time()
+    _log(f"conductor_paste_and_send: {len(text)} chars + Enter x{enter_count}")
+
+    ok, expected_count = _set_clipboard(text)
+    if not ok:
+        _log("ERROR: failed to set clipboard")
+        audio_cue("error")
+        return False
+
+    verify = get_clipboard_text()
+    if verify != text:
+        _log(f"ERROR: clipboard verify failed ({len(text)} vs {len(verify)} chars)")
+        audio_cue("error")
+        return False
+
+    # Build single script: Cmd+L (focus input) → brief delay → Cmd+V (paste) → Enter(s)
+    keystrokes = [
+        'keystroke "l" using command down',  # Focus text input
+        "delay 0.1",                          # Let input field focus
+        'keystroke "v" using command down',   # Paste
+    ]
+    if enter_count > 0:
+        keystrokes.append("delay 0.05")       # Brief settle after paste
+        for i in range(enter_count):
+            keystrokes.append("keystroke return")
+            if i < enter_count - 1:
+                keystrokes.append("delay 0.05")
+
+    keystroke_block = "\n        ".join(keystrokes)
+
+    # Always target "conductor" — System Events process name is lowercase.
+    # Include 'set frontmost to true' to ensure Conductor has focus before
+    # keystrokes, in case another app (e.g. Chrome) briefly stole focus.
+    script = (
+        f'tell application "System Events"\n'
+        f'    tell process "conductor"\n'
+        f'        set frontmost to true\n'
+        f'        delay 0.1\n'
+        f'        {keystroke_block}\n'
+        f'    end tell\n'
+        f'end tell'
+    )
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, timeout=SUBPROCESS_TIMEOUT + 2,
+    )
+    if result.returncode != 0:
+        _log(f"conductor_paste_and_send: FAILED (rc={result.returncode}): "
+             f"{result.stderr.decode().strip()}")
+        audio_cue("error")
+        return False
+
+    _log(f"[TIMING] conductor_paste_and_send: OK in {(time.time() - _t0)*1000:.0f}ms")
+    return True
 
 
 def clipboard_is_image() -> bool:

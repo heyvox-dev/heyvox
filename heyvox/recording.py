@@ -179,23 +179,14 @@ class RecordingStateMachine:
             # Pre-roll: prepend recent audio so first words aren't clipped
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
-            # Snapshot which app/text field is focused right now, so we can
-            # restore it at injection time even if the user clicks away.
-            from heyvox.input.target import snapshot_target
-            self.ctx.recording_target = snapshot_target()
-            if self.ctx.recording_target:
-                ws_info = (
-                    f", conductor_workspace={self.ctx.recording_target.conductor_workspace!r}"
-                    if self.ctx.recording_target.conductor_workspace else ""
-                )
-                self._log(
-                    f"[snapshot] app={self.ctx.recording_target.app_name}, "
-                    f"pid={self.ctx.recording_target.app_pid}, "
-                    f"window={self.ctx.recording_target.window_title!r}, "
-                    f"element={self.ctx.recording_target.element_role}{ws_info}"
-                )
-            else:
-                self._log("[snapshot] WARNING: no target snapshot (AppKit unavailable?)")
+            self.ctx.recording_target = None  # Will be filled by background snapshot
+
+        # === Instant feedback FIRST — before any blocking work ===
+        from heyvox.audio.cues import audio_cue, get_cues_dir
+        cues_dir = get_cues_dir(self.config.cues_dir)
+        audio_cue("listening", cues_dir)
+        self._hud_send({"type": "state", "state": "listening"})
+        self._log("Recording started. Waiting for stop wake word.")
 
         # Preload STT model in background while user speaks — hides the ~1s
         # model load latency behind recording time. No-op if already loaded.
@@ -210,6 +201,32 @@ class RecordingStateMachine:
             _tts_set_rec(True)
         except ImportError:
             pass
+
+        # Snapshot target app/text field in background thread — AX tree walk
+        # can take 5-10s for Conductor workspace detection, and we must not
+        # block the "listening" feedback for that.
+        def _bg_snapshot():
+            try:
+                from heyvox.input.target import snapshot_target
+                snap = snapshot_target()
+                with self.ctx.lock:
+                    self.ctx.recording_target = snap
+                if snap:
+                    ws_info = (
+                        f", conductor_workspace={snap.conductor_workspace!r}"
+                        if snap.conductor_workspace else ""
+                    )
+                    self._log(
+                        f"[snapshot] app={snap.app_name}, "
+                        f"pid={snap.app_pid}, "
+                        f"window={snap.window_title!r}, "
+                        f"element={snap.element_role}{ws_info}"
+                    )
+                else:
+                    self._log("[snapshot] WARNING: no target snapshot (AppKit unavailable?)")
+            except Exception as e:
+                self._log(f"[snapshot] ERROR: {e}")
+        threading.Thread(target=_bg_snapshot, daemon=True, name="vox-snapshot").start()
 
         # Pause browser/native media during recording (YouTube, Spotify, etc.)
         # Run in background thread — pause_media() can block for seconds on
@@ -233,12 +250,6 @@ class RecordingStateMachine:
             update_state({"recording": True})
         except Exception:
             pass
-
-        from heyvox.audio.cues import audio_cue, get_cues_dir
-        cues_dir = get_cues_dir(self.config.cues_dir)
-        audio_cue("listening", cues_dir)
-        self._hud_send({"type": "state", "state": "listening"})
-        self._log("Recording started. Waiting for stop wake word.")
         try:
             print(
                 f"[recording] Started, target="
@@ -270,6 +281,16 @@ class RecordingStateMachine:
             ptt_snapshot = self.ctx.triggered_by_ptt
             target_snapshot = self.ctx.recording_target
 
+        # If background snapshot hasn't finished yet, wait briefly (usually <1s)
+        if target_snapshot is None:
+            for _ in range(50):  # 50 * 0.1s = 5s max
+                time.sleep(0.1)
+                with self.ctx.lock:
+                    target_snapshot = self.ctx.recording_target
+                if target_snapshot is not None:
+                    break
+
+        _stop_t0 = time.time()
         self._log("Stopping recording...")
         self._hud_send({"type": "state", "state": "processing"})
 
@@ -359,6 +380,27 @@ class RecordingStateMachine:
                         f"(start={start_trim_chunks}, end={end_trim_chunks})"
                     )
 
+                    # After trimming, check if enough audio remains for meaningful
+                    # transcription. Very short post-trim audio causes Whisper to
+                    # hallucinate ("Thank you", "Thanks for watching", etc.)
+                    _post_trim_secs = len(recorded_chunks) * self.config.audio.chunk_size / self.config.audio.sample_rate
+                    if _post_trim_secs < 0.8:
+                        self._log(
+                            f"Post-trim audio too short ({_post_trim_secs:.1f}s), "
+                            f"cancelling (Whisper hallucination risk)"
+                        )
+                        _release_recording_guard()
+                        with self.ctx.lock:
+                            self.ctx.busy = False
+                        try:
+                            from heyvox.audio.media import resume_media
+                            resume_media()
+                        except Exception:
+                            pass
+                        audio_cue("paused", cues_dir)
+                        self._hud_send({"type": "state", "state": "idle"})
+                        return
+
                     # Save trimmed audio for comparison
                     _save_debug_audio(
                         "trimmed", recorded_chunks, self.config.audio.sample_rate,
@@ -369,7 +411,8 @@ class RecordingStateMachine:
                 threading.Thread(
                     target=self._send_local,
                     args=(duration, recorded_chunks, raw_rms_db),
-                    kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot},
+                    kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot,
+                            "stop_time": _stop_t0},
                     daemon=True,
                 ).start()
         except Exception as e:
@@ -410,12 +453,16 @@ class RecordingStateMachine:
         *,
         ptt: bool = False,
         recording_target=None,
+        stop_time: float = 0.0,
     ) -> None:
         """Transcribe locally and inject text into target app."""
         import subprocess as _subprocess
         from heyvox.audio.stt import transcribe_audio
         from heyvox.audio.cues import audio_cue, get_cues_dir
-        from heyvox.input.injection import type_text, save_frontmost_pid, restore_frontmost, _settle_delay_for
+        from heyvox.input.injection import (
+            type_text, save_frontmost_pid, restore_frontmost,
+            _settle_delay_for, conductor_paste_and_send,
+        )
         from heyvox.input.target import restore_target
         from heyvox.audio.tts import check_voice_command, execute_voice_command
 
@@ -430,6 +477,9 @@ class RecordingStateMachine:
                 audio_cue("paused", cues_dir)
                 return
 
+            _t_stt_start = time.time()
+            if stop_time:
+                self._log(f"[TIMING] stop→STT start: {_t_stt_start - stop_time:.2f}s")
             self._log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
             try:
                 print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
@@ -460,6 +510,9 @@ class RecordingStateMachine:
                     _unload_mlx_model()
             except (ImportError, Exception) as e:
                 self._log(f"Post-STT memory check error: {e}")
+            _t_stt_done = time.time()
+            if stop_time:
+                self._log(f"[TIMING] stop→STT done: {_t_stt_done - stop_time:.2f}s (STT={elapsed:.1f}s)")
             self._log(
                 f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}"
             )
@@ -588,6 +641,9 @@ class RecordingStateMachine:
                     return
                 self.ctx.last_inject_time = now
 
+            _t_inject_start = time.time()
+            if stop_time:
+                self._log(f"[TIMING] stop→inject start: {_t_inject_start - stop_time:.2f}s")
             target_app = recording_target.app_name if recording_target else None
             target_window = recording_target.window_title if recording_target else None
             self._log(
@@ -620,66 +676,79 @@ class RecordingStateMachine:
             # if Conductor exposes a public API.
             _injected_via_conductor = False
             paste_ok = True  # Default to True; set to False if type_text fails
+            combined_enter = 0
 
             if not _injected_via_conductor:
-                if recording_target:
-                    if recording_target.conductor_workspace:
-                        self._log(
-                            f"[inject] Restoring Conductor workspace "
-                            f"'{recording_target.conductor_workspace}'"
-                        )
-                    restore_target(recording_target)
-                    self._log(f"[inject] Restored target: {recording_target.app_name}")
+                adapter = self.ctx.adapter
+                auto_send = not ptt and adapter.should_auto_send()
+                combined_enter = adapter.enter_count if auto_send else 0
 
-                # Resolve per-app settle delay and max retries from config
-                injection_cfg = getattr(self.config, "injection", None)
-                if injection_cfg:
-                    settle = _settle_delay_for(
-                        target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
+                # Conductor fast path: Cmd+L + Cmd+V + Enter in ONE osascript
+                # call. Skips restore_target() and type_text() entirely.
+                is_conductor = (
+                    recording_target
+                    and (recording_target.conductor_workspace
+                         or (target_app and "conductor" in target_app.lower()))
+                )
+                if is_conductor:
+                    self._log(
+                        f"[inject] Conductor fast path: "
+                        f"Cmd+L → Cmd+V → Enter x{combined_enter}"
                     )
-                    max_retries = injection_cfg.max_retries
+                    # conductor_paste_and_send handles activation via
+                    # 'set frontmost to true' in the same osascript — no
+                    # separate restore_target() needed.
+                    paste_ok = conductor_paste_and_send(
+                        paste_text, enter_count=combined_enter,
+                    )
                 else:
-                    settle = 0.1
-                    max_retries = 2
-                paste_ok = type_text(
-                    paste_text,
-                    app_name=target_app,
-                    snap=recording_target,
-                    settle_secs=settle,
-                    max_retries=max_retries,
-                )
+                    # Generic path: restore target + type_text
+                    if recording_target:
+                        restore_target(recording_target)
+                        self._log(f"[inject] Restored target: {recording_target.app_name}")
 
-            # Auto-send Enter in wake word mode if adapter says so (only on success)
-            adapter = self.ctx.adapter
-            auto_send = not ptt and adapter.should_auto_send()
-            self._log(
-                f"[inject] auto_send={auto_send} (ptt={ptt}, "
-                f"adapter.should_auto_send={adapter.should_auto_send()}, "
-                f"enter_count={adapter.enter_count})"
-            )
-            if paste_ok and auto_send:
-                time.sleep(1.0)
-                from heyvox.input.injection import press_enter as _press_enter
-                self._log(f"Pressing Enter x{adapter.enter_count} -> {target_app or 'frontmost'}...")
-                _press_enter(adapter.enter_count, app_name=target_app)
-                self._log("Sent!")
-            elif not paste_ok:
-                self._log("[inject] skipping auto-Enter — paste failed")
+                    injection_cfg = getattr(self.config, "injection", None)
+                    if injection_cfg:
+                        settle = _settle_delay_for(
+                            target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
+                        )
+                        max_retries = injection_cfg.max_retries
+                    else:
+                        settle = 0.1
+                        max_retries = 2
+                    self._log(
+                        f"[inject] generic path: auto_send={auto_send}, "
+                        f"combined_enter={combined_enter}"
+                    )
+                    paste_ok = type_text(
+                        paste_text,
+                        app_name=target_app,
+                        snap=recording_target,
+                        settle_secs=settle,
+                        max_retries=max_retries,
+                        enter_count=combined_enter,
+                    )
+
+            if paste_ok:
+                if combined_enter > 0:
+                    self._log("Sent!")
+                else:
+                    self._log(f"Injected (paste, {'PTT' if ptt else 'wake word'})")
             else:
-                self._log(f"Injected (paste, {'PTT' if ptt else 'wake word'})")
+                self._log("[inject] paste failed")
 
-            # Only restore focus if the user was already in the target app before injection.
-            if pre_inject_pid and pre_inject_pid == target_pid:
-                time.sleep(0.3)
-                restore_frontmost(pre_inject_pid)
-                self._log(
-                    f"[inject] restored frontmost to pid={pre_inject_pid} (was already on target)"
-                )
-            elif pre_inject_pid and pre_inject_pid != target_pid:
+            # Only restore focus if the user moved to a DIFFERENT app during
+            # transcription. If they're still on the target app, no restore needed.
+            if pre_inject_pid and pre_inject_pid != target_pid:
                 self._log(
                     f"[inject] NOT restoring frontmost (user moved to pid={pre_inject_pid} "
                     "during transcription, staying on target)"
                 )
+            else:
+                self._log(f"[inject] already on target pid={target_pid}, no restore needed")
+
+            if stop_time:
+                self._log(f"[TIMING] stop→done: {time.time() - stop_time:.2f}s")
 
             # Show confirmation in HUD — use paste_ok to decide cue and message
             if not paste_ok:

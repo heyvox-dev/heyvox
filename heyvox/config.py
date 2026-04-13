@@ -286,7 +286,7 @@ class HeyvoxConfig(BaseModel):
     target_mode: str = "always-focused"  # always-focused | pinned-app | last-agent
     agents: list[str] = ["Claude", "Cursor", "Terminal", "iTerm2"]  # App names for last-agent tracking
 
-    enter_count: int = 2
+    enter_count: int = 1
     transcription_prefix: str = ""
 
     stt: STTConfig = STTConfig()
