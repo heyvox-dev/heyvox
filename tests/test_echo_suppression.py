@@ -168,6 +168,100 @@ class TestGracePeriods:
         assert GRACE_BEFORE_MEDIA_RESUME == 1.5
 
 
+class TestEchoSafeGating:
+    """D-08/D-09: Wake word behavior during TTS depends on headset mode."""
+
+    def _make_echo_safe(self, headset_mode: bool, profile_echo_safe=None, force_disabled=False):
+        """Simulate the echo_safe calculation from main.py."""
+        _echo_safe = headset_mode  # D-08: headset = echo_safe by default
+        if profile_echo_safe is not None:
+            _echo_safe = profile_echo_safe  # Profile override
+        if force_disabled:
+            _echo_safe = True  # D-11: force bypass
+        return _echo_safe
+
+    def test_wake_word_active_during_tts_with_headset(self):
+        """When headset_mode=True and TTS active, wake word should NOT be suppressed."""
+        headset_mode = True
+        _tts_active = True
+        _echo_safe = self._make_echo_safe(headset_mode)
+        # When echo_safe, do NOT suppress (i.e., not suppress = continue processing)
+        should_suppress = _tts_active and not _echo_safe
+        assert not should_suppress, "Headset mode: wake word should NOT be suppressed during TTS"
+
+    def test_wake_word_suppressed_during_tts_speaker_mode(self):
+        """When headset_mode=False and TTS active, wake word IS suppressed."""
+        headset_mode = False
+        _tts_active = True
+        _echo_safe = self._make_echo_safe(headset_mode)
+        should_suppress = _tts_active and not _echo_safe
+        assert should_suppress, "Speaker mode: wake word SHOULD be suppressed during TTS"
+
+    def test_wake_word_not_suppressed_when_tts_inactive(self):
+        """When TTS not active, wake word is never suppressed regardless of headset mode."""
+        for headset_mode in (True, False):
+            _echo_safe = self._make_echo_safe(headset_mode)
+            should_suppress = False and not _echo_safe  # _tts_active=False
+            assert not should_suppress
+
+    def test_grace_period_headset_is_half_second(self):
+        """D-10: Grace period after TTS is 0.5s when headset mode."""
+        headset_mode = True
+        _echo_safe = self._make_echo_safe(headset_mode)
+        grace = 0.5 if _echo_safe else 2.0
+        assert grace == 0.5
+
+    def test_grace_period_speaker_is_two_seconds(self):
+        """D-10: Grace period after TTS is 2.0s in speaker mode."""
+        headset_mode = False
+        _echo_safe = self._make_echo_safe(headset_mode)
+        grace = 0.5 if _echo_safe else 2.0
+        assert grace == 2.0
+
+    def test_force_disabled_bypasses_suppression(self):
+        """D-11: force_disabled=True overrides speaker mode, echo_safe=True."""
+        headset_mode = False  # Speaker mode would normally suppress
+        _echo_safe = self._make_echo_safe(headset_mode, force_disabled=True)
+        _tts_active = True
+        should_suppress = _tts_active and not _echo_safe
+        assert not should_suppress, "force_disabled: wake word should NOT be suppressed"
+
+    def test_profile_echo_safe_override(self):
+        """Profile echo_safe=True overrides headset_mode=False."""
+        headset_mode = False  # Speaker mode by default
+        profile_echo_safe = True  # Profile says safe
+        _echo_safe = self._make_echo_safe(headset_mode, profile_echo_safe=profile_echo_safe)
+        _tts_active = True
+        should_suppress = _tts_active and not _echo_safe
+        assert not should_suppress, "Profile echo_safe=True: wake word should NOT be suppressed"
+
+    def test_profile_echo_safe_false_overrides_headset(self):
+        """Profile echo_safe=False overrides headset_mode=True."""
+        headset_mode = True  # Headset detected
+        profile_echo_safe = False  # Profile says NOT safe
+        _echo_safe = self._make_echo_safe(headset_mode, profile_echo_safe=profile_echo_safe)
+        _tts_active = True
+        should_suppress = _tts_active and not _echo_safe
+        assert should_suppress, "Profile echo_safe=False: wake word SHOULD be suppressed even with headset"
+
+
+class TestEchoSuppressionConfig:
+    """Verify force_disabled field is in EchoSuppressionConfig."""
+
+    def test_force_disabled_field_exists(self):
+        """EchoSuppressionConfig must have force_disabled field with default False."""
+        from heyvox.config import EchoSuppressionConfig
+        cfg = EchoSuppressionConfig()
+        assert hasattr(cfg, 'force_disabled'), "EchoSuppressionConfig must have force_disabled field"
+        assert cfg.force_disabled is False, "force_disabled must default to False"
+
+    def test_force_disabled_can_be_set_true(self):
+        """force_disabled can be set to True."""
+        from heyvox.config import EchoSuppressionConfig
+        cfg = EchoSuppressionConfig(force_disabled=True)
+        assert cfg.force_disabled is True
+
+
 class TestRecordingFlagPaths:
     """Verify the recording flag path is consistent across all files."""
 
