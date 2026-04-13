@@ -43,6 +43,7 @@ from heyvox.constants import (
     HERALD_GENERATING_WAV_PREFIX,
     HERALD_PLAYING_PID,
     VERBOSITY_FILE,
+    GRACE_AFTER_TTS,
 )
 from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from heyvox.audio.stt import init_local_stt
