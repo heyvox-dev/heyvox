@@ -32,7 +32,7 @@
 ### 🔧 v1.2 Paste Injection Reliability (Active)
 
 - [x] Phase 12: Paste Injection Reliability (1/3 plans) — in progress (completed 2026-04-13)
-- [ ] Phase 13: Audio Reliability — device profiles, TTS/recording interaction, silence detection robustness
+- [x] Phase 13: Audio Reliability — device profiles, TTS/recording interaction, silence detection robustness (completed 2026-04-13)
   **Goal:** Robust audio pipeline across mic types with per-device profiles, headset-aware echo suppression, and instant TTS interruption
   **Plans:** 4 plans
   Plans:
@@ -60,5 +60,5 @@ Phases TBD — define via `/gsd:new-milestone`
 | 8. IPC Consolidation | v1.1 | 3/3 | Complete | 2026-04-11 |
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
 | 12. Paste Injection Reliability | v1.2 | 1/3 | Complete    | 2026-04-13 |
-| 13. Audio Reliability | v1.2 | 3/4 | In Progress|  |
+| 13. Audio Reliability | v1.2 | 3/4 | Complete    | 2026-04-13 |
 | 14. Distribution & UX Polish | v1.2 | 0/? | Planned | — |
