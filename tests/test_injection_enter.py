@@ -20,16 +20,19 @@ class TestPressEnterTargeting:
         def mock_run(cmd, **kwargs):
             if cmd[0] == "osascript":
                 captured_scripts.append(cmd[2])
-            return MagicMock(returncode=0)
+            mock_result = MagicMock(returncode=0)
+            mock_result.stdout.strip.return_value = "conductor"
+            return mock_result
 
         monkeypatch.setattr("subprocess.run", mock_run)
 
         injection.press_enter(count=1, app_name="Conductor")
 
-        assert len(captured_scripts) == 1
-        script = captured_scripts[0]
-        assert 'tell process "Conductor"' in script, \
-            f"Expected 'tell process \"Conductor\"' in osascript, got: {script}"
+        # 2 scripts: _get_frontmost_app() + the actual Enter keystroke
+        assert len(captured_scripts) == 2
+        script = captured_scripts[1]
+        assert 'tell process "conductor"' in script, \
+            f"Expected 'tell process \"conductor\"' in osascript, got: {script}"
 
     def test_enter_uses_frontmost_when_no_app(self, monkeypatch):
         """press_enter() without app_name must NOT use 'tell process'."""
@@ -60,13 +63,16 @@ class TestPressEnterTargeting:
         def mock_run(cmd, **kwargs):
             if cmd[0] == "osascript":
                 captured_scripts.append(cmd[2])
-            return MagicMock(returncode=0)
+            mock_result = MagicMock(returncode=0)
+            mock_result.stdout.strip.return_value = "Cursor"
+            return mock_result
 
         monkeypatch.setattr("subprocess.run", mock_run)
 
         injection.press_enter(count=3, app_name="Cursor")
 
-        script = captured_scripts[0]
+        # captured_scripts[0] = _get_frontmost_app, [1] = Enter script
+        script = captured_scripts[1]
         assert script.count("keystroke return") == 3
 
     def test_enter_delay_between_keystrokes(self, monkeypatch):
@@ -78,13 +84,16 @@ class TestPressEnterTargeting:
         def mock_run(cmd, **kwargs):
             if cmd[0] == "osascript":
                 captured_scripts.append(cmd[2])
-            return MagicMock(returncode=0)
+            mock_result = MagicMock(returncode=0)
+            mock_result.stdout.strip.return_value = "conductor"
+            return mock_result
 
         monkeypatch.setattr("subprocess.run", mock_run)
 
         injection.press_enter(count=2, app_name="Conductor")
 
-        script = captured_scripts[0]
+        # captured_scripts[0] = _get_frontmost_app, [1] = Enter script
+        script = captured_scripts[1]
         assert "delay" in script, "Must have delay between keystrokes"
 
 
