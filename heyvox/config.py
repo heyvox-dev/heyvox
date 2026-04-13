@@ -168,6 +168,113 @@ class TTSConfig(BaseModel):
         return v
 
 
+class AppProfileConfig(BaseModel):
+    """Per-application behavior profile for text injection.
+
+    HeyVox is a generic voice layer that works with ANY app. All app-specific
+    behavior (focus shortcuts, enter counts, workspace detection) is defined
+    here — never hardcoded in logic branches.
+
+    Users can add profiles for any app in their config.yaml:
+
+        app_profiles:
+          - name: Conductor
+            focus_shortcut: l
+            enter_count: 1
+            is_electron: true
+            has_workspace_detection: true
+            workspace_db: ~/Library/Application Support/com.conductor.app/conductor.db
+            workspace_switch_cmd: ~/.local/bin/conductor-switch-workspace
+          - name: Cursor
+            focus_shortcut: l
+            enter_count: 1
+            is_electron: true
+
+    Requirement: INPT-06 (app profile system)
+    """
+    # Application name as reported by macOS (NSRunningApplication.localizedName)
+    name: str
+
+    # Keyboard shortcut key (single letter) sent with Cmd to focus input field.
+    # Empty = no focus shortcut available for this app.
+    focus_shortcut: str = ""
+
+    # Number of Enter presses after pasting (auto-send). 0 = don't auto-send.
+    enter_count: int = 2
+
+    # Whether this is an Electron/Tauri app (affects AX tree traversal).
+    is_electron: bool = False
+
+    # Delay (seconds) after activating before pasting — Electron apps need more.
+    settle_delay: float = 0.3
+
+    # Whether this app supports workspace/tab detection via AX tree + DB.
+    has_workspace_detection: bool = False
+
+    # Path to the app's SQLite DB for workspace name resolution.
+    # Only used when has_workspace_detection is True.
+    workspace_db: str = ""
+
+    # Path to CLI tool that switches the app to a named workspace/tab.
+    # Only used when has_workspace_detection is True.
+    workspace_switch_cmd: str = ""
+
+    # SQL query to map a branch name to a workspace display name.
+    # Placeholder {branch} is replaced at runtime.
+    # Only used when has_workspace_detection is True.
+    workspace_branch_query: str = ""
+
+    # SQL query to list all workspace directory_name values.
+    workspace_list_query: str = ""
+
+
+# Built-in profiles for common apps. Users can override or add more via config.
+_DEFAULT_APP_PROFILES: list[dict] = [
+    {
+        "name": "Conductor",
+        "focus_shortcut": "l",
+        "enter_count": 1,
+        "is_electron": True,
+        "settle_delay": 0.3,
+        "has_workspace_detection": True,
+        "workspace_db": "~/Library/Application Support/com.conductor.app/conductor.db",
+        "workspace_switch_cmd": "~/.local/bin/conductor-switch-workspace",
+        "workspace_branch_query": (
+            "SELECT directory_name FROM workspaces "
+            "WHERE branch = '{branch}' AND state = 'ready'"
+        ),
+        "workspace_list_query": (
+            "SELECT directory_name, branch FROM workspaces WHERE state = 'ready'"
+        ),
+    },
+    {
+        "name": "Cursor",
+        "focus_shortcut": "l",
+        "enter_count": 1,
+        "is_electron": True,
+        "settle_delay": 0.3,
+    },
+    {
+        "name": "Claude",
+        "focus_shortcut": "",
+        "enter_count": 2,
+        "is_electron": False,
+    },
+    {
+        "name": "Terminal",
+        "focus_shortcut": "",
+        "enter_count": 1,
+        "is_electron": False,
+    },
+    {
+        "name": "iTerm2",
+        "focus_shortcut": "",
+        "enter_count": 1,
+        "is_electron": False,
+    },
+]
+
+
 class PushToTalkConfig(BaseModel):
     """Push-to-talk key binding configuration."""
     enabled: bool = True
@@ -245,6 +352,10 @@ class HeyvoxConfig(BaseModel):
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
 
+    # Per-app behavior profiles — replaces all hardcoded app logic.
+    # Requirement: INPT-06 (app profile system)
+    app_profiles: list[AppProfileConfig] = []
+
     # HUD overlay — floating pill with waveform and state indicator
     hud_enabled: bool = True
     # Show only the menu bar icon (no floating pill)
@@ -265,6 +376,31 @@ class HeyvoxConfig(BaseModel):
         if v not in valid:
             raise ValueError(f"target_mode must be one of {valid}, got '{v}'")
         return v
+
+    @model_validator(mode="after")
+    def merge_default_profiles(self) -> "HeyvoxConfig":
+        """Merge built-in app profiles with user-defined ones.
+
+        User profiles override built-in profiles with the same name (case-insensitive).
+        Built-in profiles not overridden by the user are appended.
+        """
+        user_names = {p.name.lower() for p in self.app_profiles}
+        for default in _DEFAULT_APP_PROFILES:
+            if default["name"].lower() not in user_names:
+                self.app_profiles.append(AppProfileConfig(**default))
+        return self
+
+    def get_app_profile(self, app_name: str) -> AppProfileConfig | None:
+        """Look up an app profile by name (case-insensitive substring match).
+
+        Returns the first profile whose name appears in app_name, or None.
+        This matches the same substring logic used by LastAgentAdapter.
+        """
+        app_lower = app_name.lower()
+        for profile in self.app_profiles:
+            if profile.name.lower() in app_lower:
+                return profile
+        return None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -466,6 +602,20 @@ agents:                    # App names to track in last-agent mode
   - iTerm2
 enter_count: 2             # Number of Enter presses after pasting
 transcription_prefix: ""   # Prepend this text to every transcription
+
+# ---------------------------------------------------------------------------
+# App profiles — per-app injection behavior (focus shortcut, enter count, etc.)
+# Built-in profiles: Conductor, Cursor, Claude, Terminal, iTerm2
+# Override or add your own here:
+# ---------------------------------------------------------------------------
+
+# app_profiles:
+#   - name: MyApp            # App name as shown by macOS
+#     focus_shortcut: l       # Cmd+key to focus input field (empty = none)
+#     enter_count: 1          # Enter presses after pasting (0 = don't auto-send)
+#     is_electron: true       # Electron/Tauri app (affects AX tree traversal)
+#     settle_delay: 0.3       # Seconds to wait after activating before pasting
+#     has_workspace_detection: false  # Supports workspace/tab detection via AX+DB
 
 # ---------------------------------------------------------------------------
 # Push-to-talk
