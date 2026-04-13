@@ -189,11 +189,9 @@ def _ax_inject_text(snap, text: str) -> bool:
     # Skip for Electron/Tauri apps — AXValue set returns success but doesn't
     # update the web framework's internal state, so Enter submits empty text.
     app_name = getattr(snap, "app_name", None)
-    conductor_ws = getattr(snap, "conductor_workspace", None)
-    if (isinstance(conductor_ws, str) and conductor_ws) or (
-        isinstance(app_name, str) and "conductor" in app_name.lower()
-    ):
-        _log(f"AX fast-path: skipping for Electron app ({app_name})")
+    detected_ws = getattr(snap, "detected_workspace", None)
+    if isinstance(detected_ws, str) and detected_ws:
+        _log(f"AX fast-path: skipping for workspace-managed app ({app_name})")
         return False
     try:
         from ApplicationServices import AXUIElementSetAttributeValue

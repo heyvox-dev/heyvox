@@ -19,8 +19,8 @@ if ! mkdir "$CLEANUP_LOCK" 2>/dev/null; then
 fi
 trap 'rm -rf "$CLEANUP_LOCK"' EXIT
 
-# Re-check after the sleep — count all Claude processes
-ACTIVE_CLAUDE=$(pgrep -f "com.conductor.app/bin/claude|claude-code" 2>/dev/null | wc -l | tr -d ' ')
+# Re-check after the sleep -- count all Claude Code processes (any launcher)
+ACTIVE_CLAUDE=$(pgrep -f "claude-code|claude" 2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$ACTIVE_CLAUDE" -gt 0 ]; then
   herald_log "CLEANUP SKIPPED: $ACTIVE_CLAUDE Claude sessions still active"

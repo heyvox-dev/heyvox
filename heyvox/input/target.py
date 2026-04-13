@@ -11,14 +11,14 @@ specific text fields.
 Fallback logic when no text field was focused at recording start:
   1. Activate the original app
   2. Search the focused window for text input elements
-  3. If exactly one text field found → focus it automatically
-  4. If zero or multiple → just activate the app (best effort)
+  3. If exactly one text field found -> focus it automatically
+  4. If zero or multiple -> just activate the app (best effort)
 """
 
 import os
 import sys
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -41,19 +41,22 @@ class TargetSnapshot:
     ax_element: Any = None  # AXUIElement reference (opaque CFType)
     element_role: str = ""
     window_title: str = ""  # AXTitle of focused window (for tab restoration)
-    conductor_workspace: str = ""  # Conductor workspace name (city) for tab switching
+    detected_workspace: str = ""  # Workspace name detected via app profile
 
 
-def _switch_conductor_workspace(workspace: str) -> None:
-    """Switch Conductor to a specific workspace tab.
+def _switch_app_workspace(workspace: str, profile) -> None:
+    """Switch an app to a specific workspace tab using its profile's switch command.
 
-    Uses the conductor-switch-workspace CLI which clicks the sidebar item
-    via Hammerspoon.
+    Uses the workspace_switch_cmd from the app profile (e.g. conductor-switch-workspace
+    CLI which clicks the sidebar item via Hammerspoon).
     """
     import subprocess
-    script = os.path.expanduser("~/.local/bin/conductor-switch-workspace")
+    if not profile or not profile.workspace_switch_cmd:
+        _log(f"restore: no workspace_switch_cmd in profile, skipping workspace switch")
+        return
+    script = os.path.expanduser(profile.workspace_switch_cmd)
     if not os.path.exists(script):
-        _log(f"restore: conductor-switch-workspace not found, skipping workspace switch")
+        _log(f"restore: workspace switch cmd not found ({script}), skipping")
         return
     try:
         result = subprocess.run(
@@ -61,24 +64,30 @@ def _switch_conductor_workspace(workspace: str) -> None:
             capture_output=True, text=True, timeout=3,
         )
         if result.returncode == 0:
-            _log(f"restore: switched Conductor to workspace '{workspace}'")
+            _log(f"restore: switched {profile.name} to workspace '{workspace}'")
         else:
             _log(f"restore: workspace switch failed: {result.stderr.strip()}")
     except Exception as e:
         _log(f"restore: workspace switch error: {e}")
 
 
-def _detect_conductor_workspace(pid: int) -> str:
-    """Detect the currently visible Conductor workspace by reading the AX tree.
+def _detect_app_workspace(pid: int, profile) -> str:
+    """Detect the currently visible workspace by reading the AX tree + app DB.
 
-    Conductor is a Tauri app where the right panel (after the AXSplitter)
-    shows the active workspace's branch name as the first AXStaticText.
-    We read that branch name and map it to the workspace city name via
-    the workspaces.branch column in the Conductor DB.
+    For apps with workspace detection (has_workspace_detection=True in their
+    app profile), walks the AX tree to find the branch name shown in the
+    right panel (after the AXSplitter), then maps it to the workspace
+    display name via the app's SQLite DB.
 
-    Returns the workspace city name (directory_name) or empty string.
+    Returns the workspace name (directory_name) or empty string.
     """
     _t0_detect = _time.time()
+
+    if not profile or not profile.has_workspace_detection:
+        return ""
+
+    if not profile.workspace_db or not profile.workspace_list_query:
+        return ""
 
     # Step 1: Walk the AX tree to find the branch name shown in the right panel
     branch_name = ""
@@ -88,9 +97,9 @@ def _detect_conductor_workspace(pid: int) -> str:
             AXUIElementCopyAttributeValue,
         )
         ax = AXUIElementCreateApplication(pid)
-        # Try AXFocusedWindow first (works when Conductor is frontmost),
+        # Try AXFocusedWindow first (works when app is frontmost),
         # then AXMainWindow, then first of AXWindows (works on dual-monitor
-        # when another app is macOS-frontmost but Conductor is under the mouse).
+        # when another app is macOS-frontmost but target is under the mouse).
         win = None
         for attr in ("AXFocusedWindow", "AXMainWindow"):
             err, w = AXUIElementCopyAttributeValue(ax, attr, None)
@@ -102,7 +111,7 @@ def _detect_conductor_workspace(pid: int) -> str:
             if err == 0 and windows and len(windows) > 0:
                 win = windows[0]
         if win is None:
-            _log(f"conductor workspace: no window found for pid={pid} "
+            _log(f"workspace detect: no window found for pid={pid} "
                  f"({(_time.time() - _t0_detect)*1000:.0f}ms)")
             return ""
 
@@ -137,43 +146,42 @@ def _detect_conductor_workspace(pid: int) -> str:
                 break
 
     except Exception as e:
-        _log(f"conductor workspace AX detection failed: {e} "
+        _log(f"workspace AX detection failed for {profile.name}: {e} "
              f"({(_time.time() - _t0_detect)*1000:.0f}ms)")
         return ""
 
     _ax_ms = (_time.time() - _t0_detect) * 1000
     if not branch_name:
-        _log(f"conductor workspace: no branch found ({_ax_ms:.0f}ms AX walk)")
+        _log(f"workspace: no branch found ({_ax_ms:.0f}ms AX walk)")
         return ""
 
-    # Step 2: Map branch name to workspace city name via DB.
-    # The AX tree shows the Conductor branch (workspaces.branch column),
-    # e.g. "review-main-files" → san-jose, "start-heyvox-v1" → seattle.
+    # Step 2: Map branch name to workspace name via the app's DB.
+    # The AX tree shows the branch name (e.g. "review-main-files"),
+    # which we map to the workspace display name via the app profile's DB.
     # Uses Python's sqlite3 module directly (no subprocess overhead).
     try:
         import sqlite3 as _sqlite3
         _t0_db = _time.time()
-        db_path = os.path.expanduser(
-            "~/Library/Application Support/com.conductor.app/conductor.db"
-        )
+        db_path = os.path.expanduser(profile.workspace_db)
         conn = _sqlite3.connect(db_path, timeout=2)
         try:
-            rows = conn.execute(
-                "SELECT directory_name, branch FROM workspaces WHERE state = 'ready'"
-            ).fetchall()
+            rows = conn.execute(profile.workspace_list_query).fetchall()
         finally:
             conn.close()
         _db_ms = (_time.time() - _t0_db) * 1000
-        for city, db_branch in rows:
-            if db_branch == branch_name:
-                _total_ms = (_time.time() - _t0_detect) * 1000
-                _log(f"[TIMING] conductor workspace detected: '{city}' "
-                     f"(AX={_ax_ms:.0f}ms, db={_db_ms:.0f}ms, total={_total_ms:.0f}ms)")
-                return city
-        _log(f"conductor workspace: branch {branch_name!r} not matched in DB "
+        for row in rows:
+            if len(row) >= 2:
+                city, db_branch = row[0], row[1]
+                if db_branch == branch_name:
+                    _total_ms = (_time.time() - _t0_detect) * 1000
+                    _log(f"[TIMING] workspace detected: '{city}' "
+                         f"(AX={_ax_ms:.0f}ms, db={_db_ms:.0f}ms, total={_total_ms:.0f}ms) "
+                         f"for {profile.name}")
+                    return city
+        _log(f"workspace: branch {branch_name!r} not matched in {profile.name} DB "
              f"(AX={_ax_ms:.0f}ms, db={_db_ms:.0f}ms)")
     except Exception as e:
-        _log(f"conductor workspace DB error: {e}")
+        _log(f"workspace DB error for {profile.name}: {e}")
 
     return ""
 
@@ -236,12 +244,16 @@ def _app_under_mouse() -> tuple[str, int] | None:
     return None
 
 
-def snapshot_target() -> TargetSnapshot | None:
+def snapshot_target(config=None) -> "TargetSnapshot | None":
     """Capture the app and text field the user is interacting with.
 
     On multi-monitor setups, prefers the app under the mouse cursor over
     NSWorkspace.frontmostApplication(), since the latter can return an app
     on a different screen than where the user is actually working.
+
+    Args:
+        config: HeyvoxConfig instance for app profile lookup. If None,
+            workspace detection is skipped.
 
     Returns None if AppKit/Accessibility APIs are unavailable.
     """
@@ -252,7 +264,7 @@ def snapshot_target() -> TargetSnapshot | None:
             AXUIElementCopyAttributeValue,
         )
     except ImportError:
-        _log("WARNING: AppKit/ApplicationServices unavailable — snapshot disabled")
+        _log("WARNING: AppKit/ApplicationServices unavailable -- snapshot disabled")
         return None
 
     # Primary: find the app under the mouse cursor (correct on multi-monitor)
@@ -267,7 +279,7 @@ def snapshot_target() -> TargetSnapshot | None:
         if front_app and front_app.processIdentifier() != app_pid:
             front_name = front_app.localizedName() or "?"
             _log(f"snapshot: mouse is over {app_name} (pid={app_pid}), "
-                 f"frontmost={front_name} (pid={front_app.processIdentifier()}) — using mouse target")
+                 f"frontmost={front_name} (pid={front_app.processIdentifier()}) -- using mouse target")
     elif front_app:
         app_name = front_app.localizedName() or ""
         app_pid = front_app.processIdentifier()
@@ -293,7 +305,7 @@ def snapshot_target() -> TargetSnapshot | None:
     else:
         _log(f"snapshot: {app_name} pid={app_pid}, no focused element")
 
-    # Capture window title — critical for tab-based apps (Chrome, Electron)
+    # Capture window title -- critical for tab-based apps (Chrome, Electron)
     # where the app PID is shared across multiple tabs/workspaces.
     err, window = AXUIElementCopyAttributeValue(ax_app, "AXFocusedWindow", None)
     if err == 0 and window is not None:
@@ -302,29 +314,36 @@ def snapshot_target() -> TargetSnapshot | None:
             snap.window_title = str(title)
             _log(f"snapshot: window='{snap.window_title}'")
 
-    # For Conductor: detect which workspace tab is visible RIGHT NOW (at
-    # recording start). This uses the AX tree (reliable) not DB timestamps.
+    # Detect workspace via app profile (if config available and profile supports it).
+    # Uses the AX tree (reliable) not DB timestamps.
     # On restore, we switch back to this workspace before pasting.
-    if app_name == "Conductor":
-        detected = _detect_conductor_workspace(app_pid)
-        if detected:
-            snap.conductor_workspace = detected
-            _log(f"snapshot: conductor workspace='{detected}'")
+    if config is not None:
+        profile = config.get_app_profile(app_name)
+        if profile and profile.has_workspace_detection:
+            detected = _detect_app_workspace(app_pid, profile)
+            if detected:
+                snap.detected_workspace = detected
+                _log(f"snapshot: workspace='{detected}' (via {profile.name} profile)")
 
     return snap
 
 
-def restore_target(snap: TargetSnapshot) -> bool:
+def restore_target(snap: "TargetSnapshot", config=None) -> bool:
     """Refocus the app and text field from a snapshot.
 
     Returns True if the app was activated (text field focus is best-effort),
     False if activation failed entirely.
 
+    Args:
+        snap: The TargetSnapshot captured at recording start.
+        config: HeyvoxConfig instance for app profile lookup. If None,
+            workspace restoration is skipped.
+
     Strategy: activate the app and give it time to restore its own focus.
     Most apps (including Electron) restore the last-focused text field
     automatically when re-activated. Trying to set AXFocused on a stale
     element (err -25202) is unreliable after app switching, so we only
-    attempt it as a bonus — the app activation is the real fix.
+    attempt it as a bonus -- the app activation is the real fix.
     """
     if snap is None:
         return False
@@ -354,24 +373,14 @@ def restore_target(snap: TargetSnapshot) -> bool:
     except Exception:
         pass
 
-    # Step 0: For Conductor, trust the snapshot workspace — the AX tree walk
-    # to detect current workspace costs ~1s and is rarely needed since the
-    # user doesn't typically switch workspaces during a 5-10s recording.
-    _t0_restore = _time.time()
-    if snap.conductor_workspace:
-        if _already_frontmost:
-            _log(f"restore: already on Conductor, trusting workspace "
-                 f"'{snap.conductor_workspace}' (skipped AX re-detection)")
-        else:
-            # Not frontmost — activate, then trust snapshot workspace.
-            # Skip _detect_conductor_workspace() — the AX tree walk + DB query
-            # costs ~1s and the workspace almost never changes during recording.
-            _log(f"restore: activating {snap.app_name} (pid={snap.app_pid}), "
-                 f"trusting snapshot workspace '{snap.conductor_workspace}'")
-            _activate_app(snap.app_pid, snap.app_name)
-            _time.sleep(0.2)
-            _already_frontmost = True  # We just activated it
-        _log(f"[TIMING] restore Conductor: {(_time.time() - _t0_restore)*1000:.0f}ms")
+    # Step 0: For apps with workspace detection, switch back to the workspace
+    # that was active when recording started (before activating the app).
+    if snap.detected_workspace and config is not None:
+        profile = config.get_app_profile(snap.app_name)
+        if profile:
+            _log(f"restore: switching {profile.name} to workspace '{snap.detected_workspace}'")
+            _switch_app_workspace(snap.detected_workspace, profile)
+            _time.sleep(profile.settle_delay)
 
     # Step 1: Activate the app (skip if already frontmost)
     if _already_frontmost:
@@ -379,47 +388,19 @@ def restore_target(snap: TargetSnapshot) -> bool:
     else:
         _log(f"restore: activating {snap.app_name} (pid={snap.app_pid})")
         _activate_app(snap.app_pid, snap.app_name)
-        _time.sleep(0.2)
+        _time.sleep(0.3)
 
-        # Verify activation worked
-        try:
-            actual = ws.frontmostApplication()
-            actual_name = actual.localizedName() if actual else "?"
-            actual_pid = actual.processIdentifier() if actual else -1
-            if actual_pid != snap.app_pid:
-                _log(f"restore: WARNING: wanted {snap.app_name} (pid={snap.app_pid}) "
-                     f"but frontmost is {actual_name} (pid={actual_pid})")
-            else:
-                _log(f"restore: activated {actual_name} (pid={actual_pid}) OK")
-        except Exception:
-            _log("restore: activated (couldn't verify)")
-
-    # Step 2: For Conductor (Electron/Tauri), use Cmd+L to focus the text
-    # input field. Cmd+L always lands in the right place — without it,
-    # focus may be on the conversation view, not the input field.
-    if snap.conductor_workspace or (snap.app_name and "conductor" in snap.app_name.lower()):
-        _log(f"restore: sending Cmd+L to focus Conductor text input")
-        import subprocess as _sp
-        _sp.run(
-            ["osascript", "-e",
-             'tell application "System Events"\n'
-             '    keystroke "l" using command down\n'
-             'end tell'],
-            capture_output=True, timeout=3,
-        )
-        _time.sleep(0.1)
-        return True
-
-    # Step 2b: Try to refocus the captured element directly (non-Conductor apps).
-    # Skip AXWebArea — in Electron/Tauri apps this is the conversation content
-    # area, not the text input. Go straight to the text field search instead.
+    # Step 2: Try to refocus the captured element directly.
+    # Skip AXWebArea -- in Electron/Tauri apps this is the conversation content
+    # area, not the text input. Pasting there silently fails. Go straight to
+    # the text field search instead.
     is_web_area = snap.element_role == "AXWebArea"
     if snap.ax_element is not None and snap.element_role in _TEXT_ROLES and not is_web_area:
         err = AXUIElementSetAttributeValue(snap.ax_element, "AXFocused", kCFBooleanTrue)
         if err == 0:
             _log(f"restore: refocused text field ({snap.element_role}) in {snap.app_name}")
             return True
-        # -25202 = kAXErrorCannotComplete (stale ref after app switch) — expected
+        # -25202 = kAXErrorCannotComplete (stale ref after app switch) -- expected
         if err != -25202:
             _log(f"restore: WARNING: AX refocus failed (err={err})")
         else:
@@ -427,8 +408,8 @@ def restore_target(snap: TargetSnapshot) -> bool:
     elif is_web_area:
         _log(f"restore: skipping AXWebArea refocus (not an input field), searching for text input")
 
-    # Step 3: Fallback — find text fields in the focused window.
-    # Prefer AXTextArea/AXTextField over AXWebArea — the latter is typically
+    # Step 3: Fallback -- find text fields in the focused window.
+    # Prefer AXTextArea/AXTextField over AXWebArea -- the latter is typically
     # a content view (e.g. chat history) that doesn't accept pasted input.
     ax_app = AXUIElementCreateApplication(snap.app_pid)
     text_fields = _find_window_text_fields(ax_app)
@@ -444,7 +425,7 @@ def restore_target(snap: TargetSnapshot) -> bool:
             _log(f"restore: focused text field ({role}) in {snap.app_name}")
             return True
 
-    # App was activated — even if we couldn't pinpoint the text field,
+    # App was activated -- even if we couldn't pinpoint the text field,
     # the app likely restored its own focus state. Return True so the
     # caller proceeds with pasting into the now-frontmost app.
     _log(f"restore: done (app activated, text field focus = best-effort)")

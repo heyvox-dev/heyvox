@@ -4,7 +4,7 @@ Pure Python replacement for heyvox/herald/lib/orchestrator.sh.
 
 Features:
   - Audio ducking: lowers system volume during playback, then restores
-  - Workspace auto-switch: switches Conductor ONLY if it's the frontmost app
+  - Workspace auto-switch: switches app workspace if it's the frontmost app
   - Hold mode: if user is active, hold messages from other workspaces
   - Media pause/resume (Hush / MediaRemote) during playback
   - Recording watchdog: kills afplay if recording starts mid-playback
@@ -77,10 +77,14 @@ class OrchestratorConfig:
     last_play_file: Path = field(default_factory=lambda: Path(HERALD_LAST_PLAY))
     verbosity_file: Path = field(default_factory=lambda: Path(VERBOSITY_FILE))
 
-    # Herald home (for conductor-switch-workspace and relative paths)
+    # Herald home (for relative paths)
     herald_home: Path = field(
         default_factory=lambda: Path(__file__).parent
     )
+
+    # App profile config for workspace switching (loaded from HeyvoxConfig)
+    workspace_switch_cmd: str = ""  # Path to workspace switch CLI tool
+    workspace_app_name: str = ""     # App name to check if frontmost
 
     # Audio ducking
     duck_enabled: bool = True
@@ -322,14 +326,19 @@ def _user_is_active(cfg: OrchestratorConfig) -> bool:
         return False
 
 
-def _conductor_is_frontmost() -> bool:
-    """Return True if Conductor is the frontmost application."""
+def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
+    """Return True if the workspace-aware app is the frontmost application.
+
+    Uses cfg.workspace_app_name to check. Returns False if no app name configured.
+    """
+    if not cfg.workspace_app_name:
+        return False
     try:
         import AppKit  # type: ignore
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if app is None:
             return False
-        return app.localizedName() == "Conductor"
+        return app.localizedName() == cfg.workspace_app_name
     except Exception:
         pass
     # Fallback: osascript
@@ -339,21 +348,30 @@ def _conductor_is_frontmost() -> bool:
              "tell application \"System Events\" to get name of first application process whose frontmost is true"],
             capture_output=True, text=True, timeout=3.0,
         )
-        return r.stdout.strip() == "Conductor"
+        return r.stdout.strip() == cfg.workspace_app_name
     except Exception:
         return False
 
 
 def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
-    """Switch Conductor to the given workspace name."""
-    conductor_switch = shutil.which("conductor-switch-workspace") or str(
-        Path.home() / ".local/bin/conductor-switch-workspace"
-    )
-    if not Path(conductor_switch).exists():
+    """Switch the workspace-aware app to the given workspace name.
+
+    Uses cfg.workspace_switch_cmd from the app profile. Falls back to
+    searching PATH and ~/.local/bin/ if not explicitly configured.
+    """
+    if not cfg.workspace_switch_cmd:
         return
+    switch_cmd = os.path.expanduser(cfg.workspace_switch_cmd)
+    if not Path(switch_cmd).exists():
+        # Try PATH
+        found = shutil.which(os.path.basename(switch_cmd))
+        if found:
+            switch_cmd = found
+        else:
+            return
     try:
         subprocess.run(
-            [conductor_switch, workspace],
+            [switch_cmd, workspace],
             capture_output=True, timeout=5.0,
         )
     except Exception as e:
@@ -579,16 +597,16 @@ def _play_wav(
         time.sleep(0.3)
 
     if not is_continuation:
-        # Workspace switch — only if Conductor is frontmost
+        # Workspace switch -- only if the workspace-aware app is frontmost
         if workspace_file.exists():
             try:
                 ws = workspace_file.read_text().strip()
                 current_workspace = ws
-                if _conductor_is_frontmost():
+                if _workspace_app_is_frontmost(cfg):
                     _switch_workspace(ws, cfg)
                     time.sleep(0.3)
                 else:
-                    _herald_log("ORCH: skipping workspace switch (Conductor not frontmost)", debug_log)
+                    _herald_log("ORCH: skipping workspace switch (app not frontmost)", debug_log)
                 workspace_file.unlink(missing_ok=True)
             except (OSError, ValueError):
                 pass
@@ -1019,10 +1037,26 @@ def main() -> None:
         stream=sys.stderr,
     )
 
+    # Load app profile config for workspace switching
+    ws_switch_cmd = ""
+    ws_app_name = ""
+    try:
+        from heyvox.config import load_config
+        heyvox_cfg = load_config()
+        for profile in heyvox_cfg.app_profiles:
+            if profile.has_workspace_detection and profile.workspace_switch_cmd:
+                ws_switch_cmd = profile.workspace_switch_cmd
+                ws_app_name = profile.name
+                break
+    except Exception:
+        pass
+
     cfg = OrchestratorConfig(
         queue_dir=Path(args.queue_dir),
         duck_enabled=not args.no_duck,
         media_pause=not args.no_media_pause,
+        workspace_switch_cmd=ws_switch_cmd,
+        workspace_app_name=ws_app_name,
     )
 
     orch = HeraldOrchestrator(config=cfg)

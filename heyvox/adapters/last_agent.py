@@ -1,5 +1,5 @@
 """
-LastAgentAdapter — tracks which AI coding agent was last focused.
+LastAgentAdapter -- tracks which AI coding agent was last focused.
 
 Polls NSWorkspace.frontmostApplication() every second in a daemon thread.
 Used by main._send_local to decide whether to auto-send (Enter) and to
@@ -27,11 +27,14 @@ class LastAgentAdapter:
         agents: List of application names to monitor (e.g. ["Claude", "Cursor"]).
             Matching is case-insensitive and substring-based.
         enter_count: Number of Enter keypresses after pasting (auto-send).
+        config: HeyvoxConfig instance for app profile lookup. If None,
+            direct socket injection and profile-based enter counts are skipped.
     """
 
-    def __init__(self, agents: list[str], enter_count: int = 2) -> None:
+    def __init__(self, agents: list[str], enter_count: int = 2, config=None) -> None:
         self._agents = [a.lower() for a in agents]
         self._enter_count = enter_count
+        self._config = config
         self._last_agent_name: str | None = None
         self._lock = threading.Lock()
         self._start_observer()
