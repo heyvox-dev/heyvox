@@ -51,6 +51,13 @@ class WakeWordConfig(BaseModel):
     also_load: list[str] = []  # Additional models to load as fallback wake words
     model_thresholds: dict[str, float] = {}  # Per-model threshold overrides (e.g. hey_vox: 0.95)
     models_dir: str = ""  # Custom models directory (empty = use default locations)
+    # Hard negative mining: passively save audio clips that contain speech but
+    # are NOT the wake word, for use as training negatives.
+    collect_negatives: bool = False  # Enable passive negative collection
+    negatives_dir: str = ""  # Empty = ~/.config/heyvox/negatives/
+    negatives_max_clips: int = 1000  # Cap on disk (oldest pruned)
+    negatives_score_range: list[float] = [0.1, 0.7]  # Only save clips scoring in this range
+    negatives_interval_secs: float = 10.0  # Min seconds between saves (avoid flooding)
 
     @model_validator(mode="after")
     def set_stop_default(self) -> "WakeWordConfig":
