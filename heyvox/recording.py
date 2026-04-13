@@ -102,7 +102,7 @@ def _save_debug_audio(
 def _release_recording_guard() -> None:
     """Release the recording guard — both in-process event and cross-process file flag.
 
-    Called after STT->paste completes (or on early exit) so Conductor's TTS hook
+    Called after STT->paste completes (or on early exit) so the TTS hook
     knows it's safe to speak again.
     """
     try:
@@ -207,13 +207,13 @@ class RecordingStateMachine:
         def _bg_snapshot():
             try:
                 from heyvox.input.target import snapshot_target
-                snap = snapshot_target()
+                snap = snapshot_target(config=self.config)
                 with self.ctx.lock:
                     self.ctx.recording_target = snap
                 if snap:
                     ws_info = (
-                        f", conductor_workspace={snap.conductor_workspace!r}"
-                        if snap.conductor_workspace else ""
+                        f", workspace={snap.detected_workspace!r}"
+                        if snap.detected_workspace else ""
                     )
                     self._log(
                         f"[snapshot] app={snap.app_name}, "
@@ -312,7 +312,7 @@ class RecordingStateMachine:
 
         # NOTE: Recording flag (RECORDING_FLAG) stays set through the STT->paste pipeline.
         # It is released in _send_local's finally block (or in the early-exit paths below).
-        # This prevents Conductor's TTS hook from firing and stealing focus while we're
+        # This prevents the TTS hook from firing and stealing focus while we're
         # still transcribing/pasting.
 
         from heyvox.audio.cues import audio_cue, get_cues_dir
@@ -460,7 +460,7 @@ class RecordingStateMachine:
         from heyvox.audio.cues import audio_cue, get_cues_dir
         from heyvox.input.injection import (
             type_text, save_frontmost_pid, restore_frontmost,
-            _settle_delay_for, conductor_paste_and_send,
+            _settle_delay_for,
         )
         from heyvox.input.target import restore_target
         from heyvox.audio.tts import check_voice_command, execute_voice_command
@@ -675,29 +675,15 @@ class RecordingStateMachine:
             auto_send = not ptt and adapter.should_auto_send()
             combined_enter = adapter.enter_count if auto_send else 0
 
-            # Conductor fast path: Cmd+L + Cmd+V + Enter in ONE osascript
-            # call. Skips restore_target() and type_text() entirely.
-            is_conductor = (
-                recording_target
-                and (recording_target.conductor_workspace
-                     or (target_app and "conductor" in target_app.lower()))
-            )
-            if is_conductor:
-                self._log(
-                    f"[inject] Conductor fast path: "
-                    f"Cmd+L → Cmd+V → Enter x{combined_enter}"
-                )
-                # conductor_paste_and_send handles activation via
-                # 'set frontmost to true' in the same osascript — no
-                # separate restore_target() needed.
-                paste_ok = conductor_paste_and_send(
-                    paste_text, enter_count=combined_enter,
-                )
-            else:
-                # Generic path: restore target + type_text
-                if recording_target:
-                    restore_target(recording_target)
-                    self._log(f"[inject] Restored target: {recording_target.app_name}")
+            if recording_target:
+                if recording_target.detected_workspace:
+                    self._log(
+                        f"[inject] Restoring workspace "
+                        f"'{recording_target.detected_workspace}'"
+                        f" for {recording_target.app_name}"
+                    )
+                restore_target(recording_target, config=self.config)
+                self._log(f"[inject] Restored target: {recording_target.app_name}")
 
                 injection_cfg = getattr(self.config, "injection", None)
                 if injection_cfg:

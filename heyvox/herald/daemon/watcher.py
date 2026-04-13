@@ -44,13 +44,42 @@ def log(msg):
         pass
 
 
+def _load_workspace_db_path():
+    """Load the workspace DB path from the app profile config.
+
+    Returns the expanded DB path, or empty string if no profile has workspace detection.
+    """
+    try:
+        from heyvox.config import load_config
+        cfg = load_config()
+        for profile in cfg.app_profiles:
+            if profile.has_workspace_detection and profile.workspace_db:
+                return os.path.expanduser(profile.workspace_db)
+    except Exception:
+        pass
+    return ""
+
+
+# Cache the DB path at module level (loaded once on first use)
+_cached_ws_db_path = None
+
+
+def _get_workspace_db_path():
+    """Get the cached workspace DB path."""
+    global _cached_ws_db_path
+    if _cached_ws_db_path is None:
+        _cached_ws_db_path = _load_workspace_db_path()
+    return _cached_ws_db_path
+
+
 def get_tts_label(workspace_name):
-    """Get workspace TTS label from Conductor DB."""
+    """Get workspace TTS label from the workspace-aware app's DB."""
     if not workspace_name:
         return workspace_name
+    db_path = _get_workspace_db_path()
+    if not db_path:
+        return workspace_name
     try:
-        db_path = os.path.expanduser(
-            "~/Library/Application Support/com.conductor.app/conductor.db")
         # Escape single quotes to prevent SQL injection from workspace names
         safe_name = workspace_name.replace("'", "''")
         r = subprocess.run(
@@ -86,19 +115,20 @@ def detect_workspace_from_path(jsonl_path):
     """Extract workspace name from the JSONL path.
 
     Claude Code stores transcripts in paths like:
-      ~/.claude/projects/-Users-<user>-conductor-workspaces-<workspace>/...
-    We match against known Conductor workspace names from the DB.
+      ~/.claude/projects/-Users-<user>-<app>-workspaces-<workspace>/...
+    We match against known workspace names from the workspace-aware app's DB.
     """
     import re
+    db_path = _get_workspace_db_path()
+    if not db_path:
+        return ""
     parts = jsonl_path.split("/")
     for part in parts:
-        # Match any user's Conductor workspace path (not just a specific username)
-        match = re.search(r"-Users-[^-]+-conductor-workspaces-(.+)", part)
+        # Match any workspace path pattern (not hardcoded to a specific app)
+        match = re.search(r"-Users-[^-]+-\w+-workspaces-(.+)", part)
         if match:
             remainder = match.group(1)
             try:
-                db_path = os.path.expanduser(
-                    "~/Library/Application Support/com.conductor.app/conductor.db")
                 r = subprocess.run(
                     ["sqlite3", db_path,
                      "SELECT directory_name FROM workspaces"],
