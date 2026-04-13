@@ -108,7 +108,7 @@ class TestOrchestratorConfig:
 
     def test_default_poll_interval(self):
         cfg = OrchestratorConfig()
-        assert cfg.poll_interval == pytest.approx(0.3)
+        assert cfg.poll_interval == pytest.approx(0.1)
 
     def test_default_duck_level(self):
         cfg = OrchestratorConfig()
