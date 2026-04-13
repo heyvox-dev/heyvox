@@ -44,6 +44,7 @@ from heyvox.constants import (
     CLAUDE_TTS_PLAYING_PID,
     HERALD_PLAYING_PID,
     VERBOSITY_FILE,
+    GRACE_AFTER_TTS,
 )
 from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from heyvox.audio.stt import init_local_stt
@@ -804,7 +805,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 continue  # Suppress wake word during TTS playback
 
             # ECHO-01: Post-TTS cooldown
-            _echo_grace = config.echo_suppression.grace_after_tts
+            _echo_grace = GRACE_AFTER_TTS
             if _echo_grace > 0 and _tts_last_seen > 0:
                 since_tts = time.time() - _tts_last_seen
                 if since_tts < _echo_grace:
