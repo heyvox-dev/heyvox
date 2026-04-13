@@ -39,6 +39,7 @@ from heyvox.constants import (
     HERALD_DEBUG_LOG,
     HERALD_QUEUE_DIR,
     HERALD_ORCH_PID,
+    HERALD_CLAIM_DIR,
     KOKORO_DAEMON_PID,
     KOKORO_DAEMON_SOCK,
     VERBOSITY_FILE,
@@ -283,6 +284,18 @@ class HeraldWorker:
                 speech = speech[:100]
         # 'full' and 'summary' (legacy) both play everything
 
+        # Claim dedup — prevent watcher from generating a duplicate
+        speech_hash = hashlib.md5(speech.encode()).hexdigest()[:16]
+        os.makedirs(HERALD_CLAIM_DIR, exist_ok=True)
+        claim_file = os.path.join(HERALD_CLAIM_DIR, speech_hash)
+        try:
+            fd = os.open(claim_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, b"hook")
+            os.close(fd)
+        except FileExistsError:
+            log.debug("TTS already claimed by watcher (%s) — skipping", speech_hash)
+            return True
+
         # Voice/language/mood selection
         mood = self._detect_mood(speech)
         lang, lang_voice = self._detect_language(speech)
@@ -437,6 +450,13 @@ class HeraldWorker:
                 except OSError as exc:
                     log.warning("Failed to enqueue part %d: %s", part_num, exc)
 
+        # Remove parts manifest now that all parts are enqueued
+        parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
+        try:
+            os.unlink(parts_file)
+        except FileNotFoundError:
+            pass
+
         # Clean up temp file if not moved by watcher
         try:
             os.unlink(temp_wav)
@@ -451,30 +471,72 @@ class HeraldWorker:
         timestamp: str,
         stop: threading.Event,
     ) -> None:
-        """Watch for part 1 WAV to appear and enqueue it immediately.
+        """Stream-enqueue WAV parts as they appear during Kokoro generation.
 
-        Ports the background watcher subshell from worker.sh lines 183-196.
-        Runs in a daemon thread during Kokoro generation.
+        Runs in a daemon thread. Enqueues part 1 as soon as it appears, then
+        continues watching for parts 2+ so they reach the queue while part 1
+        is still playing (instead of waiting for generation to finish).
+
+        Also writes a .parts manifest when part 1 is enqueued, signaling the
+        orchestrator that more parts may be coming. The manifest is removed
+        by the main thread after all parts are enqueued.
         """
-        wav_name = f"{timestamp}-01.wav"
-        dest = os.path.join(HERALD_QUEUE_DIR, wav_name)
-        enqueued = False
+        os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
+        base = temp_wav.replace(".wav", "")
+        enqueued_parts: set[int] = set()
 
-        for _ in range(100):  # Up to 10 seconds (100 × 0.1s)
-            if stop.is_set() and not enqueued:
-                # Generation finished before we could enqueue — let main thread handle
+        for _ in range(300):  # Up to 30 seconds (300 × 0.1s)
+            if stop.is_set():
+                # Generation finished — do one final sweep then exit
+                self._sweep_parts(base, timestamp, enqueued_parts)
                 break
-            if os.path.isfile(temp_wav) and os.path.getsize(temp_wav) > 0:
+
+            # Part 1: main temp_wav file
+            if 1 not in enqueued_parts and os.path.isfile(temp_wav) and os.path.getsize(temp_wav) > 0:
+                wav_name = f"{timestamp}-01.wav"
+                dest = os.path.join(HERALD_QUEUE_DIR, wav_name)
                 try:
-                    os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
                     shutil.copy2(temp_wav, dest)
                     self._write_workspace_sidecar(dest)
-                    log.debug("Early-enqueued part 1 -> %s", wav_name)
-                    enqueued = True
+                    enqueued_parts.add(1)
+                    log.debug("Stream-enqueued part 1 -> %s", wav_name)
+                    # Write parts manifest — tells orchestrator more parts may follow
+                    parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
+                    Path(parts_file).write_text(timestamp)
                 except OSError as exc:
-                    log.warning("Early-enqueue failed: %s", exc)
-                break
+                    log.warning("Stream-enqueue part 1 failed: %s", exc)
+
+            # Parts 2+: look for .partN.wav files from Kokoro daemon
+            self._sweep_parts(base, timestamp, enqueued_parts)
+
             time.sleep(0.1)
+
+    def _sweep_parts(
+        self,
+        base: str,
+        timestamp: str,
+        enqueued_parts: set[int],
+    ) -> None:
+        """Sweep for any new .partN.wav files and enqueue them."""
+        part_num = 2
+        while True:
+            if part_num in enqueued_parts:
+                part_num += 1
+                continue
+            part_path = f"{base}.part{part_num}.wav"
+            if os.path.isfile(part_path) and os.path.getsize(part_path) > 0:
+                wav_name = f"{timestamp}-{part_num:02d}.wav"
+                dest = os.path.join(HERALD_QUEUE_DIR, wav_name)
+                try:
+                    shutil.move(part_path, dest)
+                    self._write_workspace_sidecar(dest)
+                    enqueued_parts.add(part_num)
+                    log.debug("Stream-enqueued part %d -> %s", part_num, wav_name)
+                except OSError:
+                    pass
+                part_num += 1
+            else:
+                break
 
     def _generate_piper(
         self,
@@ -600,14 +662,20 @@ class HeraldWorker:
     def _find_kokoro_python(self) -> str:
         """Find the Python executable to use for the Kokoro daemon.
 
-        Prefers the uv tool venv (which has mlx-audio installed).
+        Prefers system python3 (which has mlx-audio for Metal GPU TTS).
+        Falls back to uv tool venv (kokoro-onnx CPU only).
         """
         # Check env var first (set by config.sh KOKORO_DAEMON_PYTHON)
         env_python = os.environ.get("KOKORO_DAEMON_PYTHON", "")
         if env_python and os.path.isfile(env_python):
             return env_python
 
-        # Check uv tool venv
+        # Prefer system python3 — has mlx-audio for Metal GPU acceleration
+        pyenv_python = os.path.expanduser("~/.pyenv/shims/python3")
+        if os.path.isfile(pyenv_python):
+            return pyenv_python
+
+        # Fallback to uv tool venv (kokoro-onnx CPU only)
         uv_python = os.path.expanduser("~/.local/share/uv/tools/kokoro-tts/bin/python")
         if os.path.isfile(uv_python):
             return uv_python

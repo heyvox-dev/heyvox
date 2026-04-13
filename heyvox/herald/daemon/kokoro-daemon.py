@@ -140,12 +140,13 @@ def load_model():
 # --- Sentence splitting ---
 
 def split_sentences(text):
-    """Split into 2 parts: first sentence (for fast start) + rest."""
+    """Split text into individual sentences for per-sentence streaming.
+
+    Each sentence becomes a separate WAV part so playback of earlier
+    sentences overlaps with generation of later ones.
+    """
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
-    parts = [p.strip() for p in parts if p.strip()]
-    if len(parts) <= 1:
-        return parts
-    return [parts[0], " ".join(parts[1:])]
+    return [p.strip() for p in parts if p.strip()]
 
 
 # --- WAV writing ---
@@ -362,6 +363,13 @@ def cleanup():
 
 
 def main():
+    # Own process group so idle-timeout shutdown doesn't take out the orchestrator
+    # (shared PGID lets resource_tracker signals bleed across daemons).
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
     cleanup()
 
     model = load_model()

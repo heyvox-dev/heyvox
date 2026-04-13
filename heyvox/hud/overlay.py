@@ -307,6 +307,29 @@ def _apply_state(
     }
     if status_item is not None:
         icon, label = _STATUS_LABELS.get(state_str, _STATUS_LABELS["idle"])
+        # When idle, check for crashed daemons and show warning in menu bar
+        if state_str == "idle":
+            from heyvox.constants import HERALD_ORCH_PID, KOKORO_DAEMON_PID, KOKORO_DAEMON_SOCK
+            crashed = []
+            for name, pid_path, sock_path in [
+                ("TTS", KOKORO_DAEMON_PID, KOKORO_DAEMON_SOCK),
+                ("Orch", HERALD_ORCH_PID, None),
+            ]:
+                has_pid = os.path.exists(pid_path)
+                has_sock = os.path.exists(sock_path) if sock_path else False
+                pid_alive = False
+                if has_pid:
+                    try:
+                        pid = int(open(pid_path).read().strip())
+                        os.kill(pid, 0)
+                        pid_alive = True
+                    except (ValueError, ProcessLookupError, PermissionError, OSError):
+                        pass
+                if (has_pid or has_sock) and not pid_alive:
+                    crashed.append(name)
+            if crashed:
+                icon = "\u26a0\ufe0f"
+                label = f" {'+'.join(crashed)} crashed"
         status_item.button().setTitle_(f"{icon}{label}")
         # Refresh menu on state change (updates transcript list, mute state)
         if update_status_menu is not None:
@@ -1040,13 +1063,62 @@ def _build_transcript_menu(handler):
         except Exception:
             return False
 
-    orch_ok = _pid_alive(HERALD_ORCH_PID)
-    kokoro_ok = os.path.exists(KOKORO_DAEMON_SOCK) and _pid_alive(KOKORO_DAEMON_PID)
+    def _daemon_state(pid_path, sock_path=None):
+        """Return 'running', 'idle', or 'error' for an on-demand daemon.
+
+        'error' = PID file or socket exists but process is dead (crashed).
+        'idle'  = no PID file, no socket — daemon simply hasn't started yet.
+        'running' = PID alive and (if sock_path given) socket exists.
+        """
+        has_pid = os.path.exists(pid_path)
+        has_sock = os.path.exists(sock_path) if sock_path else False
+        pid_alive = _pid_alive(pid_path)
+
+        if pid_alive and (not sock_path or has_sock):
+            return "running"
+        if has_pid or has_sock:
+            # Stale PID or socket — daemon crashed
+            return "error"
+        return "idle"
+
+    orch_state = _daemon_state(HERALD_ORCH_PID)
+    kokoro_state = _daemon_state(KOKORO_DAEMON_PID, KOKORO_DAEMON_SOCK)
+    orch_ok = orch_state == "running"
+    kokoro_ok = kokoro_state == "running"
     hud_ok = os.path.exists(HUD_SOCKET_PATH)
 
-    def _status_item(name, ok):
-        icon = "\U0001f7e2" if ok else "\U0001f534"
-        label = "running" if ok else "stopped"
+    # Ping Kokoro daemon for engine info
+    kokoro_engine = None
+    if kokoro_ok:
+        try:
+            import socket as _sock
+            with _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM) as _s:
+                _s.settimeout(1.0)
+                _s.connect(KOKORO_DAEMON_SOCK)
+                _s.sendall(b'{"action":"ping"}')
+                _s.shutdown(_sock.SHUT_WR)
+                _resp = b""
+                while True:
+                    _chunk = _s.recv(4096)
+                    if not _chunk:
+                        break
+                    _resp += _chunk
+                import json as _json
+                kokoro_engine = _json.loads(_resp).get("engine")
+        except Exception:
+            pass
+
+    def _status_label(name, state):
+        """Build a status menu item from daemon state ('running'/'idle'/'error')."""
+        if state == "running":
+            icon = "\U0001f7e2"
+            label = "running"
+        elif state == "error":
+            icon = "\U0001f534"
+            label = "crashed"
+        else:
+            icon = "\u26aa"
+            label = "idle"
         title = f"  {icon} {name}: {label}"
         attrs = NSDictionary.dictionaryWithObjects_forKeys_(
             [_font_small, NSColor.labelColor()],
@@ -1057,9 +1129,26 @@ def _build_transcript_menu(handler):
         item.setEnabled_(True)
         return item
 
-    settings_sub.addItem_(_status_item("Orchestrator", orch_ok))
-    settings_sub.addItem_(_status_item("Kokoro TTS", kokoro_ok))
-    settings_sub.addItem_(_status_item("HUD", hud_ok))
+    settings_sub.addItem_(_status_label("Orchestrator", orch_state))
+
+    # Kokoro TTS — show engine with warning if on ONNX (CPU fallback)
+    if kokoro_ok and kokoro_engine:
+        if kokoro_engine == "mlx":
+            kokoro_title = "  \U0001f7e2 Kokoro TTS: Metal GPU"
+        else:
+            kokoro_title = "  \u26a0\ufe0f Kokoro TTS: CPU fallback (slow)"
+        _kokoro_attrs = NSDictionary.dictionaryWithObjects_forKeys_(
+            [_font_small, NSColor.labelColor()],
+            [NSFontAttributeName, NSForegroundColorAttributeName],
+        )
+        _kokoro_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(kokoro_title, None, "")
+        _kokoro_item.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(kokoro_title, _kokoro_attrs))
+        _kokoro_item.setEnabled_(True)
+        settings_sub.addItem_(_kokoro_item)
+    else:
+        settings_sub.addItem_(_status_label("Kokoro TTS", kokoro_state))
+
+    settings_sub.addItem_(_status_label("HUD", "running" if hud_ok else "idle"))
 
     if queue_count > 0 or hold_count > 0:
         q_title = f"  Queue: {queue_count} queued, {hold_count} held"

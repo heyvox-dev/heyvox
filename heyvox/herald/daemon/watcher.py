@@ -197,6 +197,14 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
 
         os.makedirs(QUEUE_DIR, exist_ok=True)
         tts_end_ms = int(time.time() * 1000)
+
+        # Check if multi-part — write manifest so orchestrator waits for all parts
+        parts_count = data.get("parts", 1)
+        parts_file = f"{QUEUE_DIR}/{timestamp}.parts"
+        if parts_count > 1:
+            with open(parts_file, "w") as f:
+                f.write(str(parts_count))
+
         wav_name = f"{timestamp}-01.wav"
         os.rename(temp_wav, f"{QUEUE_DIR}/{wav_name}")
         if workspace:
@@ -219,6 +227,12 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             with open(f"{QUEUE_DIR}/{part_name.replace('.wav', '.timing')}", "w") as f:
                 f.write(f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{part_ms}")
             part += 1
+
+        # Remove parts manifest — all parts are enqueued
+        try:
+            os.unlink(parts_file)
+        except FileNotFoundError:
+            pass
 
         log(f"TIMING: watcher tts={tts_end_ms - watcher_start_ms}ms, hook->enqueue={tts_end_ms - hook_epoch_ms}ms")
         log(f"Enqueued {part - 1} part(s) in {data['duration']:.2f}s, ws={workspace}")
@@ -328,6 +342,12 @@ def process_new_lines(filepath):
 
 
 def main():
+    # Own process group so other daemon restarts don't kill us
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
     try:
         with open(PID_FILE) as _f:
             old_pid = int(_f.read().strip())
