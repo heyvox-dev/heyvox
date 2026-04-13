@@ -674,6 +674,31 @@ def main():
     )
     sub_register.set_defaults(func=_cmd_register)
 
+    # calibrate -- calibrate mic noise floor and silence threshold (AUDIO-01, D-04)
+    sub_calibrate = subparsers.add_parser(
+        "calibrate",
+        help="Calibrate microphone noise floor and silence threshold",
+    )
+    sub_calibrate.add_argument(
+        "--device", "-d",
+        default=None,
+        metavar="NAME",
+        help="Device name substring to calibrate (e.g. 'G435'). Default: system default input.",
+    )
+    sub_calibrate.add_argument(
+        "--duration", "-t",
+        type=int,
+        default=3,
+        metavar="SECS",
+        help="Duration of ambient noise recording in seconds (default: 3)",
+    )
+    sub_calibrate.add_argument(
+        "--show", "-s",
+        action="store_true",
+        help="Show current calibration cache without recording",
+    )
+    sub_calibrate.set_defaults(func=_cmd_calibrate)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -685,3 +710,178 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Calibrate helpers (injectable for testing)
+# ---------------------------------------------------------------------------
+
+def _calibrate_open_pa():
+    """Open a PyAudio instance. Separated for testability."""
+    import pyaudio
+    return pyaudio.PyAudio()
+
+
+def _calibrate_get_cache_dir():
+    """Return the heyvox cache directory Path. Separated for testability."""
+    from pathlib import Path
+    try:
+        from platformdirs import user_cache_dir
+        return Path(user_cache_dir("heyvox"))
+    except ImportError:
+        return Path.home() / ".cache" / "heyvox"
+
+
+# ---------------------------------------------------------------------------
+# Calibrate command
+# ---------------------------------------------------------------------------
+
+# Default sample rate and chunk size for calibration (matches mic.py defaults)
+_CALIB_SAMPLE_RATE = 16000
+_CALIB_CHUNK_SIZE = 1280
+
+
+def _cmd_calibrate(args):
+    """Calibrate microphone noise floor and silence threshold.
+
+    Records ambient noise for ``--duration`` seconds and computes
+    per-device silence detection thresholds using MicProfileManager.
+    Results are persisted to ``~/.cache/heyvox/mic-profiles.json``.
+
+    With ``--show``: display cached calibration data without recording.
+
+    Requirement: AUDIO-01, D-04
+    """
+    import json
+    import time
+    from pathlib import Path
+
+    import numpy as np
+
+    from heyvox.audio.profile import MicProfileManager
+    from heyvox.config import MicProfileEntryConfig
+
+    cache_dir = _calibrate_get_cache_dir()
+
+    # --show: display cached profiles and exit
+    if getattr(args, "show", False):
+        cache_file = cache_dir / "mic-profiles.json"
+        if not cache_file.exists():
+            print("No calibration cache found. Run 'heyvox calibrate' to calibrate your mic.")
+            return
+
+        try:
+            data = json.loads(cache_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error reading cache: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if not data:
+            print("Calibration cache is empty. Run 'heyvox calibrate' to calibrate your mic.")
+            return
+
+        print("Calibration cache:")
+        for dev_name, entry in data.items():
+            calibrated_at = entry.get("calibrated_at", 0)
+            age_hours = (time.time() - calibrated_at) / 3600
+            expires_days = 30 - age_hours / 24
+            noise_floor = entry.get("noise_floor", "?")
+            silence_threshold = entry.get("silence_threshold", "?")
+            print(
+                f"  {dev_name}:\n"
+                f"    noise_floor:        {noise_floor}\n"
+                f"    silence_threshold:  {silence_threshold}\n"
+                f"    age:                {age_hours:.1f}h (expires in {expires_days:.1f} days)\n"
+            )
+        return
+
+    # --- Find target device ---
+    pa = _calibrate_open_pa()
+    device_filter = getattr(args, "device", None)
+    duration = getattr(args, "duration", 3)
+
+    target_index = None
+    target_name = None
+
+    try:
+        if device_filter:
+            # Find first input device matching the filter substring
+            for i in range(pa.get_device_count()):
+                d = pa.get_device_info_by_index(i)
+                if d["maxInputChannels"] <= 0:
+                    continue
+                if device_filter.lower() in d["name"].lower():
+                    target_index = d.get("index", i)
+                    target_name = d["name"]
+                    break
+
+            if target_index is None:
+                print(
+                    f"ERROR: No input device matching '{device_filter}' found.",
+                    file=sys.stderr,
+                )
+                print("Available input devices:", file=sys.stderr)
+                for i in range(pa.get_device_count()):
+                    d = pa.get_device_info_by_index(i)
+                    if d["maxInputChannels"] > 0:
+                        print(f"  [{i}] {d['name']}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # Use the default input device
+            try:
+                default = pa.get_default_input_device_info()
+                target_index = default.get("index", 0)
+                target_name = default["name"]
+            except OSError as e:
+                # No default input device — try any input device
+                found = False
+                for i in range(pa.get_device_count()):
+                    d = pa.get_device_info_by_index(i)
+                    if d["maxInputChannels"] > 0:
+                        target_index = d.get("index", i)
+                        target_name = d["name"]
+                        found = True
+                        break
+                if not found:
+                    print(
+                        "ERROR: No input devices found. Connect a microphone and try again.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+        # --- Record ambient noise ---
+        chunk_count = duration * _CALIB_SAMPLE_RATE // _CALIB_CHUNK_SIZE
+        print(f"Calibrating: {target_name}")
+        print(f"Recording {duration}s of ambient noise ({chunk_count} chunks)...")
+        print("Please stay quiet during calibration.", flush=True)
+
+        chunks = []
+        import pyaudio as _pyaudio
+        with pa.open(
+            format=_pyaudio.paInt16,
+            channels=1,
+            rate=_CALIB_SAMPLE_RATE,
+            input=True,
+            input_device_index=target_index,
+            frames_per_buffer=_CALIB_CHUNK_SIZE,
+        ) as stream:
+            for _ in range(chunk_count):
+                raw = stream.read(_CALIB_CHUNK_SIZE, exception_on_overflow=False)
+                chunk = np.frombuffer(raw, dtype=np.int16)
+                chunks.append(chunk)
+
+        # --- Run calibration ---
+        mgr = MicProfileManager(config_profiles={}, cache_dir=cache_dir)
+        noise_floor, silence_threshold = mgr.run_calibration(chunks)
+        mgr.save_calibration(target_name, noise_floor, silence_threshold)
+
+        print(f"\nCalibration complete:")
+        print(f"  Device:             {target_name}")
+        print(f"  Noise floor:        {noise_floor}")
+        print(f"  Silence threshold:  {silence_threshold}")
+        print(f"  Cache:              {cache_dir / 'mic-profiles.json'}")
+        print()
+        print("Restart heyvox to apply the new silence threshold.")
+
+    finally:
+        pa.terminate()
