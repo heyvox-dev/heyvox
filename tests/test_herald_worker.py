@@ -35,7 +35,9 @@ from heyvox.herald.worker import (
 def worker(tmp_path):
     """Create a HeraldWorker with workspace environment cleared."""
     env = {"CONDUCTOR_WORKSPACE_NAME": "", "KOKORO_VOICE": ""}
-    with patch.dict(os.environ, env, clear=False):
+    claim_dir = str(tmp_path / "claims")
+    with patch.dict(os.environ, env, clear=False), \
+         patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir):
         yield HeraldWorker()
 
 
