@@ -39,7 +39,7 @@
   - [x] 13-01-PLAN.md — Device profiles: MicProfileManager, config model, cache, calibration
   - [x] 13-02-PLAN.md — TTS interruption: fix herald stop, add interrupt, fix Escape handler
   - [x] 13-03-PLAN.md — Integration: wire profiles into main loop, echo suppression gate, auto-calibration
-  - [ ] 13-04-PLAN.md — CLI: add heyvox calibrate command
+  - [x] 13-04-PLAN.md — CLI: add heyvox calibrate command
 - [ ] Phase 14: Distribution & UX Polish — PyPI, Homebrew, HUD mic display
 
 ### 📋 v2.0 Cross-Platform & Polish (Planned)

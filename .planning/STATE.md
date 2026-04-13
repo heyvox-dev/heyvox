@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Paste Injection Reliability
 status: executing
-stopped_at: Completed 13-audio-reliability-03-PLAN.md
-last_updated: "2026-04-13T10:47:45.253Z"
+stopped_at: Completed 13-audio-reliability-04-PLAN.md
+last_updated: "2026-04-13T10:49:00.997Z"
 last_activity: 2026-04-13
 progress:
   total_phases: 13
@@ -64,6 +64,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 13-audio-reliability]: Echo suppression gate now checks headset_mode first, then profile.echo_safe override, then force_disabled — last wins, all can override
 - [Phase 13-audio-reliability]: Grace period constants are device-aware (0.5s headset / 2.0s speaker) per D-10, no longer configurable
 - [Phase 13-audio-reliability]: RECORDING_FLAG written before tts.interrupt() so orchestrator sees recording before purging (Pitfall 3)
+- [Phase 13-audio-reliability]: _calibrate_open_pa() and _calibrate_get_cache_dir() injectable helpers enable testing heyvox calibrate without real hardware
 
 ### Pending Todos
 
@@ -75,6 +76,6 @@ None — milestone complete.
 
 ## Session Continuity
 
-Last session: 2026-04-13T10:47:45.250Z
-Stopped at: Completed 13-audio-reliability-03-PLAN.md
+Last session: 2026-04-13T10:49:00.994Z
+Stopped at: Completed 13-audio-reliability-04-PLAN.md
 Resume file: None
