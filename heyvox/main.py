@@ -14,11 +14,13 @@ import os
 import sys
 import time
 import signal
+import threading
 import numpy as np
 
 from heyvox.config import load_config, HeyvoxConfig
 from heyvox.app_context import AppContext
 from heyvox.device_manager import DeviceManager
+from heyvox.audio.profile import MicProfileManager
 from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
@@ -454,8 +456,16 @@ def _setup(config: HeyvoxConfig):
     _safe_stderr(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}")
     log(f"Wake word models loaded: {_loaded_models}")
 
+    # Create MicProfileManager — per-device audio profiles (Plan 13-01)
+    from pathlib import Path
+    from platformdirs import user_cache_dir
+    _cache_dir = Path(user_cache_dir("heyvox"))
+    _cache_dir.mkdir(parents=True, exist_ok=True)
+    profile_manager = MicProfileManager(config.mic_profiles, _cache_dir)
+
     # Open audio stream -- delegate to DeviceManager
-    devices = DeviceManager(ctx=ctx, config=config, log_fn=log, hud_send=hud_send)
+    devices = DeviceManager(ctx=ctx, config=config, log_fn=log, hud_send=hud_send,
+                            profile_manager=profile_manager)
     devices.init()
 
     # ECHO-05: Initialize WebRTC AEC if configured and in speaker mode
@@ -476,7 +486,7 @@ def _setup(config: HeyvoxConfig):
     else:
         log(f"Ready! Say '{start_word}' to start/stop voice input.")
 
-    return ctx, devices, recording, model, use_separate_words, hud_send, _aec_active
+    return ctx, devices, recording, model, use_separate_words, hud_send, _aec_active, profile_manager
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +494,8 @@ def _setup(config: HeyvoxConfig):
 # ---------------------------------------------------------------------------
 
 def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingStateMachine,
-              config: HeyvoxConfig, model, use_separate_words: bool, hud_send, aec_active: bool) -> None:
+              config: HeyvoxConfig, model, use_separate_words: bool, hud_send, aec_active: bool,
+              profile_manager: "MicProfileManager | None" = None) -> None:
     """Main audio processing event loop.
 
     Reads audio from the microphone, runs wake word detection, manages device
@@ -499,6 +510,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         use_separate_words: Whether start/stop words differ.
         hud_send: HUD send closure.
         aec_active: Whether WebRTC AEC is active.
+        profile_manager: MicProfileManager for per-device profiles and calibration.
     """
     # Local aliases for frequently read config values (avoid attribute lookups in hot loop)
     threshold = config.threshold
@@ -507,6 +519,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     chunk_size = config.audio.chunk_size
     silence_timeout = config.silence_timeout_secs
     silence_threshold = config.silence_threshold
+    # Override silence_threshold from device profile if available
+    if devices.active_profile and devices.active_profile.silence_threshold is not None:
+        silence_threshold = devices.active_profile.silence_threshold
     max_recording_secs = getattr(config, 'max_recording_secs', 30.0)
     start_word = config.wake_words.start
     stop_word = config.wake_words.stop
@@ -538,6 +553,20 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Busy watchdog state
     _busy_since: float = 0.0
 
+    # Auto-calibration state (D-04): collect ~50 chunks from new device without blocking wake word
+    _calibration_chunks: list = []
+    _calibrating = False
+    _last_calibrated_device = ""
+    # Trigger calibration for initial device if no noise_floor data exists
+    if (profile_manager
+            and devices.active_profile
+            and devices.active_profile.noise_floor is None):
+        _calibrating = True
+
+    # Silence timeout: tracks when user first speaks during recording
+    _first_speech_time: float = 0.0
+    _is_rec: bool = False
+
     def _hud_ensure_connected() -> None:
         """Attempt periodic reconnect if the HUD connection was lost."""
         if ctx.hud_client is None:
@@ -551,6 +580,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 ctx.hud_client.reconnect()
             except Exception:
                 pass
+
+    ctx.last_read_time = time.monotonic()
 
     try:
         while not ctx.shutdown.is_set():
@@ -573,15 +604,59 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     log("Recording cancelled via signal.")
 
             try:
+                # Check if audio data is available before blocking read.
+                # Bluetooth streams can stall indefinitely in stream.read()
+                # without raising IOError, holding the GIL and freezing
+                # the entire process (watchdog threads can't run either).
+                _read_avail = devices.stream.get_read_available()
+                if _read_avail < 1:
+                    # No data ready — check for prolonged stall.
+                    # Must check < 1, not < chunk_size: Bluetooth SCO
+                    # delivers in 1024-frame periods (< chunk_size 1280)
+                    # but stream.read() accumulates internally.
+                    _stall = time.monotonic() - ctx.last_read_time
+                    if _stall > 5.0:
+                        log(f"WARNING: No audio data for {_stall:.1f}s, forcing mic recovery")
+                        try:
+                            print(f"[mic] No audio data for {_stall:.1f}s, recovering", file=sys.stderr, flush=True)
+                        except (BrokenPipeError, OSError):
+                            pass
+                        if not devices.handle_io_error():
+                            ctx.last_read_time = time.monotonic()
+                            continue
+                        model.reset()
+                        consecutive_errors = 0
+                        ctx.last_read_time = time.monotonic()
+                        continue
+                    time.sleep(0.01)  # Brief yield, don't spin
+                    continue
+
                 audio = np.frombuffer(
                     devices.stream.read(chunk_size, exception_on_overflow=False),
                     dtype=np.int16,
                 )
                 consecutive_errors = 0
+                ctx.last_read_time = time.monotonic()
 
                 # AUDIO-13: track last time we saw real audio (level >= 10)
                 if int(np.abs(audio).max()) >= 10:
                     ctx.last_good_audio_time = time.time()
+
+                # Auto-calibration: collect chunks in parallel with normal processing (D-04)
+                # IMPORTANT: do NOT gate wake word during calibration (Pitfall 4)
+                if _calibrating:
+                    _calibration_chunks.append(np.frombuffer(audio, dtype=np.int16).copy()
+                                               if not isinstance(audio, np.ndarray)
+                                               else audio.copy())
+                    if len(_calibration_chunks) >= 50:
+                        nf, st = profile_manager.run_calibration(_calibration_chunks)
+                        profile_manager.save_calibration(devices.dev_name, nf, st)
+                        devices.active_profile = profile_manager.get_profile(devices.dev_name)
+                        silence_threshold = devices.active_profile.silence_threshold or config.silence_threshold
+                        _last_calibrated_device = devices.dev_name
+                        _calibrating = False
+                        _calibration_chunks = []
+                        log(f"Auto-calibrated {devices.dev_name}: noise_floor={nf}, silence_threshold={st}")
 
             except IOError as e:
                 consecutive_errors += 1
@@ -604,12 +679,25 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 ctx.zombie_mic_reinit = False
                 if not devices.reinit(require_audio=True):
                     continue
+                # Update silence_threshold from new device profile after reinit
+                if devices.active_profile and devices.active_profile.silence_threshold is not None:
+                    silence_threshold = devices.active_profile.silence_threshold
+                else:
+                    silence_threshold = config.silence_threshold
+                # Trigger calibration if new device has no noise_floor data
+                if (devices.dev_name != _last_calibrated_device
+                        and profile_manager
+                        and devices.active_profile
+                        and devices.active_profile.noise_floor is None):
+                    _calibrating = True
+                    _calibration_chunks = []
                 model.reset()
                 consecutive_errors = 0
                 continue
 
             # Buffer audio during recording (for local STT)
             with ctx.lock:
+                _was_rec = _is_rec
                 _is_rec = ctx.is_recording
                 _is_busy = ctx.busy
                 _is_ptt = ctx.triggered_by_ptt
@@ -618,6 +706,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 elif not _is_rec and not _is_busy:
                     # Feed pre-roll buffer when idle -- captures audio before wake word
                     _preroll_buffer.append(audio.copy())
+
+            # Reset first-speech tracker when recording starts
+            if _is_rec and not _was_rec:
+                _first_speech_time = 0.0
 
             # Send live audio level to HUD at ~20fps during recording (HUD-08)
             if _is_rec:
@@ -680,6 +772,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # Device hotplug -- delegated to DeviceManager
             devices.scan()
 
+            # After scan, update silence_threshold if device changed
+            if devices.active_profile and devices.active_profile.silence_threshold is not None:
+                silence_threshold = devices.active_profile.silence_threshold
+            else:
+                silence_threshold = config.silence_threshold
+            # Start calibration for new device with no noise_floor data
+            if (devices.dev_name != _last_calibrated_device
+                    and profile_manager
+                    and devices.active_profile
+                    and devices.active_profile.noise_floor is None):
+                _calibrating = True
+                _calibration_chunks = []
+
             # Max recording duration -- safety cap to prevent runaway recordings
             if _is_rec and not _is_ptt and max_recording_secs > 0:
                 elapsed = time.time() - ctx.recording_start_time
@@ -688,27 +793,51 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     recording.stop()
                     continue
 
-            # Silence watchdog -- end recording after silence_timeout seconds of quiet
+            # Track when user first starts speaking during recording
+            if _is_rec and not _is_ptt:
+                _level = int(np.abs(audio).max())
+                if _level >= silence_threshold and _first_speech_time == 0.0:
+                    _first_speech_time = time.time()
+
+            # Silence watchdog — two modes:
+            # 1) No speech yet: cancel after 5s (false wake word trigger)
+            # 2) After speech: stop+transcribe after silence_timeout (4s)
+            _NO_SPEECH_CANCEL_SECS = 5.0
             if _is_rec and not _is_ptt and silence_timeout > 0:
-                elapsed = time.time() - ctx.recording_start_time
-                if elapsed > silence_timeout:
-                    with ctx.lock:
-                        recent_chunks = ctx.audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
-                        all_chunks = list(ctx.audio_buffer)
-                    if recent_chunks:
-                        max_recent = max(int(np.abs(c).max()) for c in recent_chunks)
-                        if max_recent < silence_threshold:
-                            max_overall = max(int(np.abs(c).max()) for c in all_chunks) if all_chunks else 0
-                            if max_overall < silence_threshold:
-                                # Entire recording is silent -- discard (false trigger)
-                                log(f"Silence timeout ({silence_timeout}s, all silent max={max_overall}), cancelling")
-                                recording.cancel()
-                                log("Ready for next wake word.")
-                                continue
-                            else:
-                                # Speech was captured before silence -- transcribe it
-                                log(f"Silence timeout ({silence_timeout}s, max_recent={max_recent}), "
-                                    f"but speech detected (max_overall={max_overall}), transcribing")
+                _elapsed = time.time() - ctx.recording_start_time
+
+                if _first_speech_time == 0.0:
+                    # No speech detected yet — cancel if too long (false trigger).
+                    # Use percentage-based check to handle Bluetooth noise spikes.
+                    if _elapsed > _NO_SPEECH_CANCEL_SECS:
+                        with ctx.lock:
+                            all_chunks = list(ctx.audio_buffer)
+                        if all_chunks:
+                            quiet_count = sum(1 for c in all_chunks if int(np.abs(c).max()) < silence_threshold)
+                            quiet_pct = quiet_count / len(all_chunks)
+                        else:
+                            quiet_pct = 1.0
+                        if quiet_pct >= 0.85:
+                            log(f"No speech after {_NO_SPEECH_CANCEL_SECS}s ({quiet_pct:.0%} quiet), cancelling (false trigger)")
+                            recording.cancel()
+                            log("Ready for next wake word.")
+                            continue
+                        else:
+                            # Sustained audio above threshold — real speech
+                            _first_speech_time = time.time()
+                else:
+                    # Speech was detected — timeout on post-speech silence.
+                    # Use percentage of quiet chunks (not single-spike max)
+                    # to handle Bluetooth mics with occasional noise spikes.
+                    elapsed_since_speech = time.time() - _first_speech_time
+                    if elapsed_since_speech > silence_timeout:
+                        with ctx.lock:
+                            recent_chunks = ctx.audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
+                        if recent_chunks:
+                            quiet_count = sum(1 for c in recent_chunks if int(np.abs(c).max()) < silence_threshold)
+                            quiet_pct = quiet_count / len(recent_chunks)
+                            if quiet_pct >= 0.85:
+                                log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet), transcribing")
                                 recording.stop()
                                 continue
 
@@ -835,12 +964,13 @@ def main() -> None:
     """Main event loop -- loads config, starts PTT, runs wake word detection."""
     config = load_config()
 
-    ctx, devices, recording, model, use_separate_words, hud_send, aec_active = _setup(config)
+    ctx, devices, recording, model, use_separate_words, hud_send, aec_active, profile_manager = _setup(config)
 
     from heyvox.audio.tts import shutdown as _shutdown_tts
 
     try:
-        _run_loop(ctx, devices, recording, config, model, use_separate_words, hud_send, aec_active)
+        _run_loop(ctx, devices, recording, config, model, use_separate_words, hud_send, aec_active,
+                  profile_manager=profile_manager)
     finally:
         log("Cleaning up...")
         # Always clean up flag files to avoid blocking TTS orchestrator
