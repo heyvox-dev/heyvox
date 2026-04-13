@@ -69,8 +69,9 @@ class TestCalibrateFlow:
         fake_chunk_bytes = np.full(1280, 120, dtype=np.int16).tobytes()
         mock_stream = MagicMock()
         mock_stream.read.return_value = fake_chunk_bytes
-        mock_pa.open.return_value.__enter__ = MagicMock(return_value=mock_stream)
-        mock_pa.open.return_value.__exit__ = MagicMock(return_value=False)
+        # pa.open() returns the stream directly (no context manager — PyAudio Stream
+        # does not support the context manager protocol)
+        mock_pa.open.return_value = mock_stream
 
         with patch("heyvox.cli._calibrate_open_pa", return_value=mock_pa), \
              patch("heyvox.cli._calibrate_get_cache_dir", return_value=tmp_path):
@@ -102,8 +103,8 @@ class TestCalibrateFlow:
         fake_chunk_bytes = np.full(1280, 200, dtype=np.int16).tobytes()
         mock_stream = MagicMock()
         mock_stream.read.return_value = fake_chunk_bytes
-        mock_pa.open.return_value.__enter__ = MagicMock(return_value=mock_stream)
-        mock_pa.open.return_value.__exit__ = MagicMock(return_value=False)
+        # pa.open() returns the stream directly (no context manager)
+        mock_pa.open.return_value = mock_stream
 
         with patch("heyvox.cli._calibrate_open_pa", return_value=mock_pa), \
              patch("heyvox.cli._calibrate_get_cache_dir", return_value=tmp_path):
@@ -171,8 +172,8 @@ class TestCalibrateFlow:
         fake_chunk_bytes = np.full(1280, 50, dtype=np.int16).tobytes()
         mock_stream = MagicMock()
         mock_stream.read.return_value = fake_chunk_bytes
-        mock_pa.open.return_value.__enter__ = MagicMock(return_value=mock_stream)
-        mock_pa.open.return_value.__exit__ = MagicMock(return_value=False)
+        # pa.open() returns the stream directly (no context manager)
+        mock_pa.open.return_value = mock_stream
 
         with patch("heyvox.cli._calibrate_open_pa", return_value=mock_pa), \
              patch("heyvox.cli._calibrate_get_cache_dir", return_value=tmp_path):
