@@ -199,38 +199,22 @@ def normalize_wav(path: Path, target_rms: int = 3000, scale_cap: float = 3.0,
                   peak_limit: int = 24000) -> None:
     """Normalize WAV loudness in-place via RMS matching.
 
+    Thin wrapper around heyvox.audio.normalize.normalize_wav_int16.
     Legacy fallback for externally-generated WAVs. Primary normalization
-    happens in kokoro-daemon.py normalize_samples() at generation time (HERALD-02).
-    Skips files with RMS < 50 (silence / already quiet).
+    happens in kokoro-daemon.py at generation time (HERALD-02).
     """
+    from heyvox.audio.normalize import normalize_wav_int16
+
     try:
         with wave.open(str(path), "rb") as wf:
             params = wf.getparams()
             raw_frames = wf.readframes(params.nframes)
 
-        n = params.nframes
-        samples = list(struct.unpack(f"<{n}h", raw_frames))
-        if not samples:
-            return
-
-        rms = math.sqrt(sum(s * s for s in samples) / len(samples))
-        if rms < 50:
-            return
-
-        scale = min(target_rms / rms if rms > 0 else 1.0, scale_cap)
-        out: list[int] = []
-        for s in samples:
-            fs = s * scale
-            if fs > peak_limit:
-                fs = peak_limit + (fs - peak_limit) * 0.2
-            elif fs < -peak_limit:
-                fs = -peak_limit + (fs + peak_limit) * 0.2
-            out.append(max(-32768, min(32767, int(fs))))
-
-        normalized = struct.pack(f"<{len(out)}h", *out)
-        with wave.open(str(path), "wb") as wf:
-            wf.setparams(params)
-            wf.writeframes(normalized)
+        normalized = normalize_wav_int16(raw_frames, target_rms, scale_cap, peak_limit)
+        if normalized is not raw_frames:
+            with wave.open(str(path), "wb") as wf:
+                wf.setparams(params)
+                wf.writeframes(normalized)
     except Exception as e:
         log.debug("normalize_wav(%s) failed: %s", path, e)
 

@@ -153,29 +153,29 @@ def split_sentences(text):
 def normalize_samples(samples, target_rms=3000, scale_cap=3.0, peak_limit=24000):
     """RMS-normalize float32 samples before int16 conversion.
 
-    Operates on float32 array (range approx -1.0 to 1.0).
-    target_rms, scale_cap, peak_limit are in int16 scale (matching orchestrator constants).
-    Converts to int16 scale internally for RMS calculation, applies scale, converts back.
-
+    Thin wrapper around heyvox.audio.normalize.normalize_samples_float32.
     Requirement: HERALD-02 (WAV normalization at generation time)
     """
-    if len(samples) < 1000:
-        return samples
-    # Work in int16 scale for RMS calculation (consistent with orchestrator values)
-    int16_view = samples * 32767.0
-    rms = np.sqrt(np.mean(int16_view ** 2))
-    if rms < 50:
-        return samples  # silence, skip
-    scale = min(target_rms / rms if rms > 0 else 1.0, scale_cap)
-    scaled = int16_view * scale
-    # Soft clip above peak_limit
-    above = scaled > peak_limit
-    below = scaled < -peak_limit
-    scaled[above] = peak_limit + (scaled[above] - peak_limit) * 0.2
-    scaled[below] = -peak_limit + (scaled[below] + peak_limit) * 0.2
-    # Clamp and convert back to float32
-    scaled = np.clip(scaled, -32768, 32767)
-    return scaled / 32767.0
+    # Import inline — daemon may run in a separate venv where heyvox is on sys.path
+    try:
+        from heyvox.audio.normalize import normalize_samples_float32
+        return normalize_samples_float32(samples, target_rms, scale_cap, peak_limit)
+    except ImportError:
+        # Fallback for standalone daemon execution without heyvox package
+        if len(samples) < 1000:
+            return samples
+        int16_view = samples * 32767.0
+        rms = np.sqrt(np.mean(int16_view ** 2))
+        if rms < 50:
+            return samples
+        scale = min(target_rms / rms if rms > 0 else 1.0, scale_cap)
+        scaled = int16_view * scale
+        above = scaled > peak_limit
+        below = scaled < -peak_limit
+        scaled[above] = peak_limit + (scaled[above] - peak_limit) * 0.2
+        scaled[below] = -peak_limit + (scaled[below] + peak_limit) * 0.2
+        scaled = np.clip(scaled, -32768, 32767)
+        return scaled / 32767.0
 
 
 def write_wav(path, samples, sample_rate):

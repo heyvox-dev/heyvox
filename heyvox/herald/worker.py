@@ -79,47 +79,21 @@ DEFAULT_SPEED = 1.2
 def normalize_wav_in_place(path: str) -> None:
     """RMS-based WAV loudness normalization (in-place).
 
-    Ports the normalize_wav() bash/python embedded script from orchestrator.sh.
-    Uses wave + struct (no numpy) — suitable for running outside the daemon.
-
-    Target RMS: 3000 (out of 32767 max for int16).
-    Scale cap: 3x (prevents boosting near-silent clips to distortion).
-    Soft-clip at 24000 (peak limit with gentle compression above).
-
+    Thin wrapper around heyvox.audio.normalize.normalize_wav_int16.
     Used by the Piper TTS fallback path (HERALD-02).
     """
+    from heyvox.audio.normalize import normalize_wav_int16
+
     try:
         with wave.open(path, "rb") as w:
             params = w.getparams()
             raw_frames = w.readframes(params.nframes)
 
-        samples = list(struct.unpack(f"<{params.nframes}h", raw_frames))
-        if not samples:
-            return
-
-        rms = math.sqrt(sum(s * s for s in samples) / len(samples))
-        if rms < 50:
-            # Near-silent — don't amplify noise floor
-            return
-
-        target_rms = 3000
-        scale = target_rms / rms if rms > 0 else 1.0
-        scale = min(scale, 3.0)
-        peak_limit = 24000
-
-        out: list[int] = []
-        for s in samples:
-            s_scaled = s * scale
-            if s_scaled > peak_limit:
-                s_scaled = peak_limit + (s_scaled - peak_limit) * 0.2
-            elif s_scaled < -peak_limit:
-                s_scaled = -peak_limit + (s_scaled + peak_limit) * 0.2
-            out.append(max(-32768, min(32767, int(s_scaled))))
-
-        normalized = struct.pack(f"<{len(out)}h", *out)
-        with wave.open(path, "wb") as w:
-            w.setparams(params)
-            w.writeframes(normalized)
+        normalized = normalize_wav_int16(raw_frames)
+        if normalized is not raw_frames:
+            with wave.open(path, "wb") as w:
+                w.setparams(params)
+                w.writeframes(normalized)
     except Exception as exc:
         log.warning("normalize_wav_in_place failed for %s: %s", path, exc)
 
