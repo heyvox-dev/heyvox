@@ -17,7 +17,7 @@ import signal
 import threading
 import numpy as np
 
-from heyvox.config import load_config, HeyvoxConfig
+from heyvox.config import load_config, HeyvoxConfig, CONFIG_DIR
 from heyvox.app_context import AppContext
 from heyvox.device_manager import DeviceManager
 from heyvox.audio.profile import MicProfileManager
@@ -324,6 +324,26 @@ def _setup(config: HeyvoxConfig):
         except OSError:
             pass
 
+    # Clean up stale daemon PID/socket files from previous instance.
+    # These cause the HUD to show "TTS crashed" after a restart.
+    from heyvox.constants import HERALD_ORCH_PID, KOKORO_DAEMON_PID, KOKORO_DAEMON_SOCK
+    for _daemon_file in (HERALD_ORCH_PID, KOKORO_DAEMON_PID, KOKORO_DAEMON_SOCK):
+        if os.path.exists(_daemon_file):
+            _pid_alive = False
+            if _daemon_file.endswith(".pid"):
+                try:
+                    _dpid = int(open(_daemon_file).read().strip())
+                    os.kill(_dpid, 0)
+                    _pid_alive = True
+                except (ValueError, ProcessLookupError, PermissionError, OSError):
+                    pass
+            if not _pid_alive:
+                try:
+                    os.unlink(_daemon_file)
+                    log(f"Removed stale daemon file: {_daemon_file}")
+                except OSError:
+                    pass
+
     # B6: Clean up orphaned media-pause flags
     import glob as _glob_b6
     for _mp_pattern in (HERALD_MEDIA_PAUSED_PREFIX + "*", HEYVOX_MEDIA_PAUSED_PREFIX + "*"):
@@ -512,6 +532,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         aec_active: Whether WebRTC AEC is active.
         profile_manager: MicProfileManager for per-device profiles and calibration.
     """
+    # Threaded audio read: protects against stream.read() blocking after AUHAL errors
+    import concurrent.futures as _cf
+    _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
+
     # Local aliases for frequently read config values (avoid attribute lookups in hot loop)
     threshold = config.threshold
     cooldown = config.cooldown_secs
@@ -529,6 +553,22 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     cues_dir = get_cues_dir(config.cues_dir)
     last_trigger = 0.0
     consecutive_errors = 0
+
+    # Hard negative mining: passively collect audio clips for wake word training
+    _neg_collector = None
+    if config.wake_words.collect_negatives:
+        from heyvox.audio.negative_collector import NegativeCollector
+        neg_dir = config.wake_words.negatives_dir
+        if not neg_dir:
+            neg_dir = str(Path(str(CONFIG_DIR)) / "negatives")
+        _neg_collector = NegativeCollector(
+            negatives_dir=neg_dir,
+            max_clips=config.wake_words.negatives_max_clips,
+            score_range=tuple(config.wake_words.negatives_score_range),
+            interval_secs=config.wake_words.negatives_interval_secs,
+            sample_rate=sample_rate,
+        )
+        log(f"Negative mining enabled → {neg_dir} (max {config.wake_words.negatives_max_clips} clips)")
 
     # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
     # so the first words of the command aren't clipped.
@@ -621,6 +661,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             print(f"[mic] No audio data for {_stall:.1f}s, recovering", file=sys.stderr, flush=True)
                         except (BrokenPipeError, OSError):
                             pass
+                        _read_executor.shutdown(wait=False, cancel_futures=True)
+                        _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
                         if not devices.handle_io_error():
                             ctx.last_read_time = time.monotonic()
                             continue
@@ -631,10 +673,27 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     time.sleep(0.01)  # Brief yield, don't spin
                     continue
 
-                audio = np.frombuffer(
-                    devices.stream.read(chunk_size, exception_on_overflow=False),
-                    dtype=np.int16,
-                )
+                # Guarded read: get_read_available() can lie after AUHAL
+                # errors, causing stream.read() to block indefinitely.
+                # Use a thread with timeout to prevent main loop freeze.
+                try:
+                    _raw = _read_executor.submit(
+                        devices.stream.read, chunk_size, False
+                    ).result(timeout=3.0)
+                except (_cf.TimeoutError, TimeoutError):
+                    _stall = time.monotonic() - ctx.last_read_time
+                    log(f"WARNING: stream.read() blocked for 3s (stall={_stall:.1f}s), recovering")
+                    # Kill the stuck executor and create a fresh one
+                    _read_executor.shutdown(wait=False, cancel_futures=True)
+                    _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
+                    if not devices.handle_io_error():
+                        ctx.last_read_time = time.monotonic()
+                        continue
+                    model.reset()
+                    consecutive_errors = 0
+                    ctx.last_read_time = time.monotonic()
+                    continue
+                audio = np.frombuffer(_raw, dtype=np.int16)
                 consecutive_errors = 0
                 ctx.last_read_time = time.monotonic()
 
@@ -648,6 +707,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     _calibration_chunks.append(np.frombuffer(audio, dtype=np.int16).copy()
                                                if not isinstance(audio, np.ndarray)
                                                else audio.copy())
+                    if len(_calibration_chunks) == 1:
+                        log(f"[calibration] Collecting {devices.dev_name}...")
                     if len(_calibration_chunks) >= 50:
                         nf, st = profile_manager.run_calibration(_calibration_chunks)
                         profile_manager.save_calibration(devices.dev_name, nf, st)
@@ -664,6 +725,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     log(f"Audio read error ({consecutive_errors}/2): {e}")
                     time.sleep(0.1)
                     continue
+                # Replace executor: old thread may be blocked on dead stream
+                _read_executor.shutdown(wait=False, cancel_futures=True)
+                _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
                 if not devices.handle_io_error():
                     continue
                 model.reset()  # Clear corrupted wake word state (AUDIO-12)
@@ -677,6 +741,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # or time-based dead mic timeout (AUDIO-13)
             if ctx.zombie_mic_reinit:
                 ctx.zombie_mic_reinit = False
+                # Replace executor: old thread may be blocked on dead stream
+                _read_executor.shutdown(wait=False, cancel_futures=True)
+                _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
                 if not devices.reinit(require_audio=True):
                     continue
                 # Update silence_threshold from new device profile after reinit
@@ -778,7 +845,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             else:
                 silence_threshold = config.silence_threshold
             # Start calibration for new device with no noise_floor data
-            if (devices.dev_name != _last_calibrated_device
+            # Only trigger on actual device change (not every scan iteration)
+            if (not _calibrating
+                    and devices.dev_name != _last_calibrated_device
                     and profile_manager
                     and devices.active_profile
                     and devices.active_profile.noise_floor is None):
@@ -909,6 +978,15 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 audio = process_mic_frame(audio, sample_rate=sample_rate)
 
             model.predict(audio)
+
+            # Hard negative mining: feed audio and check scores
+            if _neg_collector is not None and not _is_rec:
+                _neg_collector.feed(audio)
+                _neg_max_score = max(
+                    (score[-1] for score in model.prediction_buffer.values()),
+                    default=0.0,
+                )
+                _neg_collector.maybe_save(_neg_max_score)
 
             # ECHO-02: Dynamic threshold in speaker mode
             _speaker_mult = (
