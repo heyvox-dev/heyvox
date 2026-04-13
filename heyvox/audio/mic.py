@@ -16,7 +16,7 @@ import pyaudio
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 
 # Re-export for use by hotplug scan in main.py
-__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "add_device_cooldown", "is_device_cooled_down"]
+__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down"]
 
 # ---------------------------------------------------------------------------
 # Device cooldown — prevents re-selecting a dead Bluetooth device every cycle
@@ -25,8 +25,19 @@ __all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input
 # Maps lowercase device name → timestamp of last failure (time.time()).
 _device_cooldowns: dict[str, float] = {}
 
-# How long to skip a device after it produces zero audio (seconds).
-_DEVICE_COOLDOWN_SECS = 120
+# Maps lowercase device name → consecutive failure count (for adaptive cooldown).
+_device_failure_counts: dict[str, int] = {}
+
+# Adaptive cooldown tiers (seconds) — indexed by failure count (0-based, capped).
+_COOLDOWN_TIERS = [120, 300, 600, 1800]  # 2min, 5min, 10min, 30min cap
+
+
+def _get_adaptive_cooldown(device_key: str) -> float:
+    """Return the current cooldown duration for a device based on failure count."""
+    count = _device_failure_counts.get(device_key, 0)
+    # count is 1-based (incremented before calling), so subtract 1 for 0-based tier index
+    tier = min(max(0, count - 1), len(_COOLDOWN_TIERS) - 1)
+    return _COOLDOWN_TIERS[tier]
 
 
 # ---------------------------------------------------------------------------
@@ -284,23 +295,29 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             # Skip devices that failed recently — prevents tight infinite loop
             # when a dead Bluetooth device (e.g. Jabra) stays highest-priority.
             cooldown_ts = _device_cooldowns.get(dev_key)
-            if cooldown_ts is not None and now - cooldown_ts < _DEVICE_COOLDOWN_SECS:
-                remaining = int(_DEVICE_COOLDOWN_SECS - (now - cooldown_ts))
-                _log(f"  [{index}] {dev_name}: skipping (cooldown, {remaining}s remaining)")
+            adaptive_secs = _get_adaptive_cooldown(dev_key)
+            if cooldown_ts is not None and now - cooldown_ts < adaptive_secs:
+                remaining = int(adaptive_secs - (now - cooldown_ts))
+                failures = _device_failure_counts.get(dev_key, 0)
+                _log(f"  [{index}] {dev_name}: skipping (cooldown, {remaining}s remaining, failures={failures})")
                 continue
 
             _log(f"Testing {dev_name}...")
             max_level = test_mic(index, dev_name)
 
             if max_level >= MIN_AUDIO_LEVEL:
-                # Device is producing real audio — clear any prior cooldown.
+                # Device is producing real audio — clear any prior cooldown and
+                # reset failure count (sustained audio proves it's working).
                 _device_cooldowns.pop(dev_key, None)
+                _device_failure_counts.pop(dev_key, None)
                 return index
 
             if max_level == 0:
-                # Silent device — put it in cooldown so we don't hammer it.
+                # Silent device — increment failure count and put in adaptive cooldown.
+                _device_failure_counts[dev_key] = _device_failure_counts.get(dev_key, 0) + 1
                 _device_cooldowns[dev_key] = now
-                _log(f"  [{index}] {dev_name}: zero audio, adding to cooldown for {_DEVICE_COOLDOWN_SECS}s")
+                adaptive_secs = _get_adaptive_cooldown(dev_key)
+                _log(f"  [{index}] {dev_name}: zero audio, cooldown {adaptive_secs}s (failure #{_device_failure_counts[dev_key]})")
 
             # First-priority device: accept even at zero level if stream opened OK.
             # This supports virtual devices (BlackHole) that have no ambient audio.
@@ -320,24 +337,39 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
     for index, dev_name in other_devices:
         dev_key = dev_name.lower()
         cooldown_ts = _device_cooldowns.get(dev_key)
-        if cooldown_ts is not None and now - cooldown_ts < _DEVICE_COOLDOWN_SECS:
-            remaining = int(_DEVICE_COOLDOWN_SECS - (now - cooldown_ts))
-            _log(f"  [{index}] {dev_name}: skipping (cooldown, {remaining}s remaining)")
+        adaptive_secs = _get_adaptive_cooldown(dev_key)
+        if cooldown_ts is not None and now - cooldown_ts < adaptive_secs:
+            remaining = int(adaptive_secs - (now - cooldown_ts))
+            failures = _device_failure_counts.get(dev_key, 0)
+            _log(f"  [{index}] {dev_name}: skipping (cooldown, {remaining}s remaining, failures={failures})")
             continue
 
         _log(f"Testing fallback {dev_name}...")
         max_level = test_mic(index, dev_name)
         if max_level >= MIN_AUDIO_LEVEL:
             _device_cooldowns.pop(dev_key, None)
+            _device_failure_counts.pop(dev_key, None)
             return index
         if max_level == 0:
+            _device_failure_counts[dev_key] = _device_failure_counts.get(dev_key, 0) + 1
             _device_cooldowns[dev_key] = now
-            _log(f"  [{index}] {dev_name}: zero audio, adding to cooldown for {_DEVICE_COOLDOWN_SECS}s")
+            adaptive_secs = _get_adaptive_cooldown(dev_key)
+            _log(f"  [{index}] {dev_name}: zero audio, cooldown {adaptive_secs}s (failure #{_device_failure_counts[dev_key]})")
 
     try:
-        default = pa.get_default_input_device_info()['index']
-        _log("All mics failed level test, using system default as last resort")
-        return default
+        default_info = pa.get_default_input_device_info()
+        default_name = default_info.get('name', '')
+        if default_name and require_audio:
+            # When require_audio is set (recovery path), respect cooldown —
+            # caller will retry or fall back to a second find_best_mic() without it.
+            default_key = default_name.lower()
+            cooldown_ts = _device_cooldowns.get(default_key)
+            if cooldown_ts is not None and now - cooldown_ts < _get_adaptive_cooldown(default_key):
+                remaining = int(_get_adaptive_cooldown(default_key) - (now - cooldown_ts))
+                _log(f"System default '{default_name}' is in cooldown ({remaining}s remaining), skipping (require_audio=True)")
+                return None
+        _log(f"All mics failed level test, using system default as last resort: {default_name or 'unknown'}")
+        return default_info['index']
     except IOError:
         _log("ERROR: No input devices available")
         return None
@@ -410,25 +442,46 @@ def detect_headset(pa, selected_input_index: int) -> bool:
 def add_device_cooldown(device_name: str) -> None:
     """Add a device to cooldown after it was detected as silent/dead.
 
+    Increments the failure count for adaptive cooldown escalation.
     Call this from the silent mic recovery path so that the hotplug scanner
     doesn't immediately re-select the dead device.
     """
     key = device_name.lower()
+    _device_failure_counts[key] = _device_failure_counts.get(key, 0) + 1
     _device_cooldowns[key] = time.time()
-    _log(f"Device '{device_name}' added to cooldown for {_DEVICE_COOLDOWN_SECS}s")
+    cooldown_secs = _get_adaptive_cooldown(key)
+    _log(f"Device '{device_name}' added to cooldown for {cooldown_secs}s (failure #{_device_failure_counts[key]})")
 
 
 def is_device_cooled_down(device_name: str) -> bool:
-    """Check if a device is currently in cooldown (recently failed)."""
+    """Check if a device is currently in cooldown (recently failed).
+
+    Uses adaptive cooldown duration based on how many times the device
+    has failed consecutively.
+    """
     key = device_name.lower()
     ts = _device_cooldowns.get(key)
     if ts is None:
         return False
-    return (time.time() - ts) < _DEVICE_COOLDOWN_SECS
+    return (time.time() - ts) < _get_adaptive_cooldown(key)
+
+
+def clear_device_cooldown(device_name: str) -> None:
+    """Clear cooldown for a single device after it produced real audio.
+
+    Call this when a device is confirmed working (e.g. successful PTT recording)
+    to allow hotplug scan to select it again immediately.
+    """
+    key = device_name.lower()
+    had_cooldown = key in _device_cooldowns
+    _device_cooldowns.pop(key, None)
+    _device_failure_counts.pop(key, None)
+    if had_cooldown:
+        _log(f"Device '{device_name}' cooldown cleared (confirmed working)")
 
 
 def clear_device_cooldowns() -> None:
-    """Clear all device cooldowns.
+    """Clear all device cooldowns and failure counts.
 
     Call this when Bluetooth state changes (connect/disconnect event) so that
     newly-connected devices are tested immediately rather than waiting for the
@@ -441,6 +494,7 @@ def clear_device_cooldowns() -> None:
     """
     count = len(_device_cooldowns)
     _device_cooldowns.clear()
+    _device_failure_counts.clear()
     if count:
         _log(f"Device cooldowns cleared ({count} device(s) released)")
 
