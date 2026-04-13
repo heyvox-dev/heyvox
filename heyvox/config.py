@@ -323,9 +323,6 @@ class EchoSuppressionConfig(BaseModel):
     """
     enabled: bool = True
 
-    # ECHO-01: Grace period (seconds) after TTS ends before re-enabling wake word.
-    grace_after_tts: float = 0.6
-
     # ECHO-02: Wake word threshold multiplier in speaker mode (no headset).
     speaker_threshold_multiplier: float = 1.4
 
@@ -750,7 +747,6 @@ log_max_bytes: 1000000     # 1 MB — rotate to heyvox.log.1 when exceeded
 # Echo suppression — auto-mutes mic during TTS when no headset detected
 echo_suppression:
   enabled: true
-  grace_after_tts: 0.6            # Seconds of wake word silence after TTS ends (reverb tail)
   speaker_threshold_multiplier: 1.4  # Wake word threshold boost in speaker mode (no headset)
   stt_echo_filter: true           # Strip recently spoken TTS text from STT output
   aec_enabled: false              # WebRTC AEC via livekit (pip install heyvox[aec])
