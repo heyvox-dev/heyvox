@@ -214,11 +214,14 @@ def transcribe_audio(
     samples = audio.astype(np.float32) / 32768.0
 
     if engine == "mlx":
-        # Cap audio at 30s to prevent MLX Whisper memory ballooning on long recordings
+        # Split long audio into <=30s segments to prevent MLX Whisper memory
+        # ballooning. Each segment is transcribed separately and concatenated,
+        # matching the sherpa-onnx approach. Max recording is config-driven
+        # (default 300s / 5 minutes).
         max_samples = 30 * sample_rate
-        if len(samples) > max_samples:
-            _log(f"WARNING: Audio too long ({len(samples)/sample_rate:.1f}s), capping at 30s for MLX")
-            samples = samples[:max_samples]
+        segments = [samples[i:i + max_samples] for i in range(0, len(samples), max_samples)]
+        if len(segments) > 1:
+            _log(f"Long recording ({len(samples)/sample_rate:.1f}s), splitting into {len(segments)} segments for MLX")
 
         # Ensure model is loaded (blocks if preload hasn't finished yet).
         # B1: Always go through _mlx_loaded.wait() so the total block is
@@ -246,12 +249,19 @@ def transcribe_audio(
         # the model to reclaim memory.
         global _mlx_transcribing
         _timed_out = False
+        parts = []
         with _mlx_lock:
             _mlx_transcribing = True
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(mlx_whisper.transcribe, samples, **kwargs)
-                result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+            for seg_idx, segment in enumerate(segments):
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(mlx_whisper.transcribe, segment, **kwargs)
+                    result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+                text = result["text"].strip()
+                if text:
+                    parts.append(text)
+                if len(segments) > 1:
+                    _log(f"Segment {seg_idx+1}/{len(segments)}: {len(text)} chars")
         except FuturesTimeout:
             _timed_out = True
             _log(f"ERROR: MLX transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
@@ -261,10 +271,11 @@ def transcribe_audio(
                 mx.metal.clear_cache()
             except Exception:
                 pass
-            return ""
+            # Return whatever we transcribed so far
+            return " ".join(parts)
         except Exception as e:
             _log(f"ERROR: MLX transcription failed: {e}")
-            return ""
+            return " ".join(parts)
         finally:
             with _mlx_lock:
                 _mlx_transcribing = False
@@ -272,7 +283,7 @@ def transcribe_audio(
         with _mlx_lock:
             _mlx_last_use = time.time()
             _schedule_unload()  # Reset the idle timer
-        return result["text"].strip()
+        return " ".join(parts)
     else:
         # sherpa-onnx: split into <=30s segments (Whisper's input limit).
         # B2: Wrap the entire sherpa transcription loop in a thread with
