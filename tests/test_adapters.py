@@ -61,7 +61,7 @@ class TestLastAgentAdapter:
         adapter._last_agent_name = "Claude"
         with patch("heyvox.input.injection.type_text") as mock_type, \
              patch("heyvox.input.injection.focus_app") as mock_focus, \
-             patch("heyvox.adapters.last_agent.LastAgentAdapter._try_conductor_injection", return_value=False), \
+             patch("heyvox.adapters.last_agent.LastAgentAdapter._try_socket_injection", return_value=False), \
              patch("heyvox.adapters.last_agent.time.sleep"):
             adapter.inject_text("test text")
             mock_focus.assert_called_once_with("Claude")
