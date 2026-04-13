@@ -102,7 +102,7 @@ def _save_debug_audio(
 def _release_recording_guard() -> None:
     """Release the recording guard — both in-process event and cross-process file flag.
 
-    Called after STT->paste completes (or on early exit) so Conductor's TTS hook
+    Called after STT->paste completes (or on early exit) so the TTS hook
     knows it's safe to speak again.
     """
     try:
@@ -182,11 +182,11 @@ class RecordingStateMachine:
             # Snapshot which app/text field is focused right now, so we can
             # restore it at injection time even if the user clicks away.
             from heyvox.input.target import snapshot_target
-            self.ctx.recording_target = snapshot_target()
+            self.ctx.recording_target = snapshot_target(config=self.config)
             if self.ctx.recording_target:
                 ws_info = (
-                    f", conductor_workspace={self.ctx.recording_target.conductor_workspace!r}"
-                    if self.ctx.recording_target.conductor_workspace else ""
+                    f", workspace={self.ctx.recording_target.detected_workspace!r}"
+                    if self.ctx.recording_target.detected_workspace else ""
                 )
                 self._log(
                     f"[snapshot] app={self.ctx.recording_target.app_name}, "
@@ -289,7 +289,7 @@ class RecordingStateMachine:
 
         # NOTE: Recording flag (RECORDING_FLAG) stays set through the STT->paste pipeline.
         # It is released in _send_local's finally block (or in the early-exit paths below).
-        # This prevents Conductor's TTS hook from firing and stealing focus while we're
+        # This prevents the TTS hook from firing and stealing focus while we're
         # still transcribing/pasting.
 
         from heyvox.audio.cues import audio_cue, get_cues_dir
@@ -604,21 +604,21 @@ class RecordingStateMachine:
                 f"target pid={target_pid}"
             )
 
-            # NOTE: Conductor sidecar socket injection is disabled. The sidecar
-            # registers the "query" method on an internal tunnel (Electron ↔ sidecar),
-            # not on the external Unix socket. Direct socket calls return result:null
-            # but don't actually deliver messages. Kept conductor.py for future use
-            # if Conductor exposes a public API.
+            # NOTE: Direct socket injection (e.g. Conductor sidecar) is disabled.
+            # The sidecar registers methods on an internal tunnel, not the external
+            # Unix socket. Kept heyvox/input/conductor.py for future use if an
+            # app-specific injection API becomes available.
             _injected_via_conductor = False
 
             if not _injected_via_conductor:
                 if recording_target:
-                    if recording_target.conductor_workspace:
+                    if recording_target.detected_workspace:
                         self._log(
-                            f"[inject] Restoring Conductor workspace "
-                            f"'{recording_target.conductor_workspace}'"
+                            f"[inject] Restoring workspace "
+                            f"'{recording_target.detected_workspace}'"
+                            f" for {recording_target.app_name}"
                         )
-                    restore_target(recording_target)
+                    restore_target(recording_target, config=self.config)
                     self._log(f"[inject] Restored target: {recording_target.app_name}")
 
                 type_text(paste_text, app_name=target_app)
