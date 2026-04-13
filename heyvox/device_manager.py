@@ -22,9 +22,11 @@ from heyvox.audio.mic import (
     detect_headset,
     get_dead_input_device_names,
     add_device_cooldown,
+    clear_device_cooldown,
     is_device_cooled_down,
 )
 from heyvox.audio.cues import device_change_cue
+from heyvox.audio.profile import MicProfileManager, MicProfileEntry
 from heyvox.constants import ACTIVE_MIC_FILE, MIC_SWITCH_REQUEST_FILE
 
 if TYPE_CHECKING:
@@ -74,11 +76,19 @@ class DeviceManager:
     # Construction
     # -------------------------------------------------------------------------
 
-    def __init__(self, ctx: "AppContext", config: "HeyvoxConfig", log_fn, hud_send) -> None:
+    def __init__(
+        self,
+        ctx: "AppContext",
+        config: "HeyvoxConfig",
+        log_fn,
+        hud_send,
+        profile_manager: "MicProfileManager | None" = None,
+    ) -> None:
         self.ctx = ctx
         self.config = config
         self._log = log_fn
         self._hud_send = hud_send
+        self.profile_manager = profile_manager
 
         # Device state — private to DeviceManager
         self.pa: pyaudio.PyAudio | None = None
@@ -86,6 +96,7 @@ class DeviceManager:
         self.dev_index: int | None = None
         self.dev_name: str = ""
         self.headset_mode: bool = False
+        self.active_profile: MicProfileEntry | None = None
 
         # Hotplug / pin state
         self._mic_pinned: bool = False
@@ -97,6 +108,7 @@ class DeviceManager:
         self._health_cv_history: deque = deque(maxlen=6)  # Last 30s of CV values
         self._zero_streak: int = 0
         self._silent_recover_count: int = 0  # For exponential backoff
+        self._last_resort_until: float = 0.0  # Suppress health checks until this time
 
         # Cooldown tracking (per-DeviceManager, separate from module-level in mic.py)
         self._cooldown: dict[str, float] = {}
@@ -136,6 +148,8 @@ class DeviceManager:
         )
         self._write_active_mic(self.dev_name)
         self.headset_mode = detect_headset(self.pa, self.dev_index)
+        if self.profile_manager:
+            self.active_profile = self.profile_manager.get_profile(self.dev_name)
         self._log(
             f"Headset detected: {self.headset_mode} "
             f"(echo suppression {'inactive' if self.headset_mode else 'active'})"
@@ -192,6 +206,9 @@ class DeviceManager:
         self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
         self._mic_pinned = False
 
+        # Cooldown the zombie device so find_best_mic and hotplug scan skip it
+        add_device_cooldown(self.dev_name)
+
         try:
             self.stream.stop_stream()
             self.stream.close()
@@ -208,6 +225,7 @@ class DeviceManager:
             chunk_size=chunk_size,
             require_audio=True,
         )
+        _was_last_resort = False
         if dev_index is None:
             dev_index = find_best_mic(
                 self.pa,
@@ -215,6 +233,7 @@ class DeviceManager:
                 sample_rate=sample_rate,
                 chunk_size=chunk_size,
             )
+            _was_last_resort = dev_index is not None  # Got it from non-require_audio fallback
         if dev_index is None:
             self._log("No mic found after zombie reinit, retrying in 2s...")
             time.sleep(2)
@@ -222,17 +241,35 @@ class DeviceManager:
 
         self.dev_index = dev_index
         self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
-        self._log(f"Zombie reinit recovered: [{dev_index}] {self.dev_name}")
-        try:
-            print(f"[mic] Zombie reinit recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
-        except (BrokenPipeError, OSError):
-            pass
+
+        # If this is a last-resort pick (all others in cooldown), suppress
+        # health check recovery for 60s to prevent flap loops.
+        if _was_last_resort and is_device_cooled_down(self.dev_name):
+            grace = 60
+            self._last_resort_until = time.time() + grace
+            self._log(
+                f"Zombie reinit: last-resort device [{dev_index}] {self.dev_name} "
+                f"(in cooldown), suppressing recovery for {grace}s"
+            )
+            try:
+                print(f"[mic] Last-resort fallback: {self.dev_name}, grace {grace}s", file=sys.stderr, flush=True)
+            except (BrokenPipeError, OSError):
+                pass
+        else:
+            self._log(f"Zombie reinit recovered: [{dev_index}] {self.dev_name}")
+            try:
+                print(f"[mic] Zombie reinit recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
+            except (BrokenPipeError, OSError):
+                pass
+
         self.stream = open_mic_stream(
             self.pa, dev_index,
             sample_rate=sample_rate,
             chunk_size=chunk_size,
         )
         self.headset_mode = detect_headset(self.pa, dev_index)
+        if self.profile_manager:
+            self.active_profile = self.profile_manager.get_profile(self.dev_name)
         self._write_active_mic(self.dev_name)
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
@@ -268,6 +305,16 @@ class DeviceManager:
 
         level = int(np.abs(audio).max())
 
+        # Last-resort grace period: when we're stuck on the only available
+        # device (all others in cooldown), suppress recovery to prevent flapping.
+        if now < self._last_resort_until:
+            if level >= 10:
+                # Real audio detected — device woke up, cancel grace period
+                self._last_resort_until = 0.0
+                self._zero_streak = 0
+                self._silent_recover_count = 0
+            return
+
         # Variance-based zombie stream detection (AUDIO-12)
         if level >= 10:
             abs_audio = np.abs(audio.astype(np.float32))
@@ -293,36 +340,36 @@ class DeviceManager:
                             pass
                         self._zero_streak = 2  # Force recovery path below
 
-        if level < 10 or self._zero_streak >= 2:  # Dead mic OR zombie stream
-            if level < 10:
-                self._zero_streak += 1
-            if self._zero_streak >= 2:  # 2 × 5s = 10s to detect (or forced by zombie check)
-                self._silent_recover_count += 1
-                _dead_mic_name = self.pa.get_device_info_by_index(self.dev_index)['name']
-                # Exponential backoff: 1s, 2.5s, 5s (cap 5s — runs on main thread,
-                # longer sleeps freeze wake word + PTT)
-                _backoff = min(5, max(1, 5 * (2 ** (self._silent_recover_count - 2))))
-                self._log(
-                    f"WARNING: Silent mic detected ({_dead_mic_name}), re-scanning devices... "
-                    f"(attempt {self._silent_recover_count}, backoff {_backoff}s)"
+        # Silence (level < 10) means a quiet room, not a dead mic.
+        # Only trigger recovery on zombie stream detection (CV check above
+        # sets _zero_streak = 2) or actual IOErrors (handled separately).
+        if self._zero_streak >= 2:  # Zombie stream forced by CV check
+            self._silent_recover_count += 1
+            _dead_mic_name = self.pa.get_device_info_by_index(self.dev_index)['name']
+            _backoff = min(5, max(1, 5 * (2 ** (self._silent_recover_count - 2))))
+            self._log(
+                f"WARNING: Zombie stream detected ({_dead_mic_name}), re-scanning devices... "
+                f"(attempt {self._silent_recover_count}, backoff {_backoff}s)"
+            )
+            try:
+                print(
+                    f"[mic] Zombie stream detected ({_dead_mic_name}), re-scanning...",
+                    file=sys.stderr, flush=True,
                 )
-                try:
-                    print(
-                        f"[mic] Silent mic detected ({_dead_mic_name}), re-scanning...",
-                        file=sys.stderr, flush=True,
-                    )
-                except BrokenPipeError:
-                    pass  # stderr closed (e.g. launchd pipe gone)
-                self._hud_send({"type": "error", "text": f"Mic silent: {_dead_mic_name}"})
-                self._zero_streak = 0
-                self._mic_pinned = False  # Allow priority-based re-selection
-                self._recover_silent_mic(_dead_mic_name, _backoff)
-        else:
+            except BrokenPipeError:
+                pass
+            self._hud_send({"type": "error", "text": f"Mic zombie: {_dead_mic_name}"})
             self._zero_streak = 0
-            # Reset recovery backoff when we see real audio — proves the mic
-            # is working, so next silence detection should start fresh.
+            self._mic_pinned = False
+            self._recover_silent_mic(_dead_mic_name, _backoff)
+        else:
+            # Reset recovery backoff when we see real audio.
             if self._silent_recover_count > 0:
                 self._silent_recover_count = 0
+            # Clear this device's cooldown — it's producing audio, so
+            # hotplug scan shouldn't skip it on the next cycle.
+            if level >= 10:
+                clear_device_cooldown(self.dev_name)
 
     def _recover_silent_mic(self, dead_mic_name: str, backoff: float) -> None:
         """Internal: close stream, sleep backoff, try to re-open a working mic.
@@ -374,19 +421,34 @@ class DeviceManager:
             return
 
         self.dev_index = dev_index
-        self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
-        self._log(f"Mic recovered: [{dev_index}] {self.dev_name}")
-        try:
-            print(f"[mic] Recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
-        except (BrokenPipeError, OSError):
-            pass
-        self._silent_recover_count = 0  # Reset backoff on any successful recovery
+        new_name = self.pa.get_device_info_by_index(dev_index)['name']
+
+        # If we recovered to the SAME device that was just dead, don't reset
+        # backoff — this isn't a real recovery, it's the system default fallback
+        # returning the only available device.
+        if new_name.lower() == dead_mic_name.lower():
+            self._log(f"Mic recovered to SAME device: [{dev_index}] {new_name} (not resetting backoff)")
+            try:
+                print(f"[mic] Recovered to same device: [{dev_index}] {new_name}", file=sys.stderr, flush=True)
+            except (BrokenPipeError, OSError):
+                pass
+        else:
+            self._log(f"Mic recovered: [{dev_index}] {new_name}")
+            try:
+                print(f"[mic] Recovered: [{dev_index}] {new_name}", file=sys.stderr, flush=True)
+            except (BrokenPipeError, OSError):
+                pass
+            self._silent_recover_count = 0  # Reset backoff only on genuine device switch
+
+        self.dev_name = new_name
         self.stream = open_mic_stream(
             self.pa, dev_index,
             sample_rate=sample_rate,
             chunk_size=chunk_size,
         )
         self.headset_mode = detect_headset(self.pa, dev_index)
+        if self.profile_manager:
+            self.active_profile = self.profile_manager.get_profile(self.dev_name)
         self._write_active_mic(self.dev_name)
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
@@ -407,6 +469,8 @@ class DeviceManager:
         if not self.ctx.last_good_audio_time:
             return
         if self.ctx.zombie_mic_reinit:
+            return
+        if time.time() < self._last_resort_until:
             return
         dead_secs = time.time() - self.ctx.last_good_audio_time
         if dead_secs > self._DEAD_MIC_TIMEOUT:
@@ -440,8 +504,13 @@ class DeviceManager:
         sample_rate = self.config.audio.sample_rate if self.config else 16000
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
-        self._log("Mic appears disconnected, searching for new mic...")
+        _dead_name = self.dev_name
+        self._log(f"Mic appears disconnected ({_dead_name}), searching for new mic...")
         self._mic_pinned = False  # Pinned device gone — allow priority-based selection
+
+        # Cooldown the stalled/dead device so find_best_mic skips it
+        add_device_cooldown(_dead_name)
+
         try:
             self.stream.stop_stream()
             self.stream.close()
@@ -456,6 +525,7 @@ class DeviceManager:
             mic_priority=mic_priority,
             sample_rate=sample_rate,
             chunk_size=chunk_size,
+            require_audio=True,
         )
         if dev_index is None:
             self._log("No mic found, retrying in 2s...")
@@ -465,6 +535,14 @@ class DeviceManager:
         self.dev_index = dev_index
         self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
         self._log(f"Switched to: [{dev_index}] {self.dev_name}")
+
+        # If the only available device is in cooldown (last resort), suppress
+        # health check recovery for 60s to prevent flap loops.
+        if is_device_cooled_down(self.dev_name):
+            grace = 60
+            self._last_resort_until = time.time() + grace
+            self._log(f"IO recovery: last-resort device (in cooldown), suppressing recovery for {grace}s")
+
         self.stream = open_mic_stream(
             self.pa, dev_index,
             sample_rate=sample_rate,
@@ -573,6 +651,8 @@ class DeviceManager:
                         chunk_size=chunk_size,
                     )
                     self.headset_mode = detect_headset(self.pa, dev_index)
+                    if self.profile_manager:
+                        self.active_profile = self.profile_manager.get_profile(self.dev_name)
                     self._log(f"Headset mode: {self.headset_mode}")
                     self._write_active_mic(self.dev_name)
                     device_change_cue(self.dev_name, "input")
@@ -621,6 +701,8 @@ class DeviceManager:
                                 chunk_size=chunk_size,
                             )
                             self.headset_mode = detect_headset(self.pa, target_index)
+                            if self.profile_manager:
+                                self.active_profile = self.profile_manager.get_profile(self.dev_name)
                             self._mic_pinned = True  # Suppress auto-switch back to priority mic
                             self._write_active_mic(self.dev_name)
                             device_change_cue(self.dev_name, "input")
