@@ -109,7 +109,7 @@ class TestMultiAppInjection:
         assert mock_run.call_count >= 1
 
     def test_conductor_osascript_targets_process(self):
-        """osascript script targets 'Conductor' process when app_name is set."""
+        """osascript script targets actual process name (case-sensitive) when app_name is set."""
         snap = _make_snap("Conductor", app_bundle_id="com.conductor.app")
         mock_appkit, _ = _make_appkit("hello")
         with patch.dict("sys.modules", {"AppKit": mock_appkit}):
@@ -117,15 +117,17 @@ class TestMultiAppInjection:
                 with patch("heyvox.input.injection.time.sleep"):
                     with patch("heyvox.input.injection._clipboard_still_ours", return_value=True):
                         with patch("heyvox.input.injection._verify_target_focused", return_value=True):
-                            mock_run.return_value = MagicMock(returncode=0)
-                            type_text("hello", app_name="Conductor", snap=snap, settle_secs=0.3)
+                            with patch("heyvox.input.injection._get_frontmost_app", return_value="conductor"):
+                                mock_run.return_value = MagicMock(returncode=0)
+                                type_text("hello", app_name="Conductor", snap=snap, settle_secs=0.3)
         # Find the Cmd-V call (contains "keystroke")
         cmdv_calls = [
             c for c in mock_run.call_args_list
             if "keystroke" in str(c)
         ]
         assert len(cmdv_calls) == 1
-        assert "Conductor" in str(cmdv_calls[0])
+        # Uses actual process name "conductor" (lowercase), not display name "Conductor"
+        assert "conductor" in str(cmdv_calls[0])
 
     # --- Cursor ---
 
@@ -285,6 +287,7 @@ class TestMultiAppInjection:
                                     with patch("heyvox.input.injection.audio_cue") as mock_cue:
                                         mock_run.side_effect = [
                                             MagicMock(returncode=0),  # get_frontmost_before
+                                            MagicMock(returncode=0),  # already_frontmost check
                                             MagicMock(returncode=1, stderr=b"osascript: error"),  # Cmd-V fails
                                             MagicMock(returncode=0),  # get_frontmost_after
                                         ]

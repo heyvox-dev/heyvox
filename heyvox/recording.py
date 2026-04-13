@@ -632,7 +632,7 @@ class RecordingStateMachine:
                     self._log(f"[inject] Restored target: {recording_target.app_name}")
 
                 # Resolve per-app settle delay and max retries from config
-                injection_cfg = getattr(self.ctx.config, "injection", None)
+                injection_cfg = getattr(self.config, "injection", None)
                 if injection_cfg:
                     settle = _settle_delay_for(
                         target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs

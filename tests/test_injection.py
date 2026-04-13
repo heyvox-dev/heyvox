@@ -51,10 +51,10 @@ class TestTypeText:
                 with patch("heyvox.input.injection.time.sleep"):
                     mock_run.return_value = MagicMock(returncode=0)
                     type_text("hello")
-        # Subprocess calls: get_frontmost_before + Cmd-V + get_frontmost_after = 3.
+        # Subprocess calls: get_frontmost_before + already_frontmost_check + Cmd-V + get_frontmost_after = 4.
         # No additional call to write clipboard content back (no restore).
         # NSPasteboard.setString_forType_ is never called a second time.
-        assert mock_run.call_count == 3
+        assert mock_run.call_count == 4
         # Verify NSPasteboard was only written once (no restore write)
         mock_pb.setString_forType_.assert_called_once()
 
@@ -410,9 +410,10 @@ class TestErrorCue:
                 with patch("heyvox.input.injection.time.sleep"):
                     with patch("heyvox.input.injection._clipboard_still_ours", return_value=True):
                         with patch("heyvox.input.injection.audio_cue") as mock_cue:
-                            # First 2 calls (get frontmost before/after) OK, third (Cmd-V) fails
+                            # Calls: get_frontmost_before, already_frontmost_check, Cmd-V (fails), get_frontmost_after
                             mock_run.side_effect = [
                                 MagicMock(returncode=0, stdout="Cursor"),  # get frontmost before
+                                MagicMock(returncode=0, stdout="Cursor"),  # already_frontmost check
                                 MagicMock(returncode=1, stderr=b"error"),  # osascript Cmd-V fails
                                 MagicMock(returncode=0, stdout="Cursor"),  # get frontmost after
                             ]
