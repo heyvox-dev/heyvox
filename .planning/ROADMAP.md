@@ -35,7 +35,7 @@ Phases TBD — define via `/gsd:new-milestone`
 
 ### 🔧 v1.2 Paste Injection Reliability (Active)
 
-- [ ] Phase 12: Paste Injection Reliability (1/3 plans) — in progress
+- [x] Phase 12: Paste Injection Reliability (1/3 plans) — in progress (completed 2026-04-13)
 
 ## Progress
 
@@ -50,4 +50,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | 7. Herald Python Port | v1.1 | 5/5 | Complete | 2026-04-11 |
 | 8. IPC Consolidation | v1.1 | 3/3 | Complete | 2026-04-11 |
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
-| 12. Paste Injection Reliability | v1.2 | 1/3 | In Progress | — |
+| 12. Paste Injection Reliability | v1.2 | 1/3 | Complete    | 2026-04-13 |
