@@ -28,9 +28,10 @@ class TestPressEnterTargeting:
 
         injection.press_enter(count=1, app_name="Conductor")
 
-        # 2 scripts: _get_frontmost_app() + the actual Enter keystroke
-        assert len(captured_scripts) == 2
-        script = captured_scripts[1]
+        # Find the actual Enter script (contains "keystroke return")
+        enter_scripts = [s for s in captured_scripts if "keystroke return" in s]
+        assert len(enter_scripts) == 1, f"Expected 1 Enter script, got {len(enter_scripts)}"
+        script = enter_scripts[0]
         assert 'tell process "conductor"' in script, \
             f"Expected 'tell process \"conductor\"' in osascript, got: {script}"
 
@@ -71,8 +72,10 @@ class TestPressEnterTargeting:
 
         injection.press_enter(count=3, app_name="Cursor")
 
-        # captured_scripts[0] = _get_frontmost_app, [1] = Enter script
-        script = captured_scripts[1]
+        # Find the actual Enter script (contains "keystroke return")
+        enter_scripts = [s for s in captured_scripts if "keystroke return" in s]
+        assert len(enter_scripts) == 1
+        script = enter_scripts[0]
         assert script.count("keystroke return") == 3
 
     def test_enter_delay_between_keystrokes(self, monkeypatch):
@@ -92,8 +95,10 @@ class TestPressEnterTargeting:
 
         injection.press_enter(count=2, app_name="Conductor")
 
-        # captured_scripts[0] = _get_frontmost_app, [1] = Enter script
-        script = captured_scripts[1]
+        # Find the actual Enter script (contains "keystroke return")
+        enter_scripts = [s for s in captured_scripts if "keystroke return" in s]
+        assert len(enter_scripts) == 1
+        script = enter_scripts[0]
         assert "delay" in script, "Must have delay between keystrokes"
 
 
