@@ -382,6 +382,13 @@ def _send_media_key():
         return False
 
 
+# Cache: when pause_media() finds nothing playing, skip the slow detection
+# for this many seconds.  Worst case: media started during the window gets
+# missed for one TTS utterance, then detected on the next.
+_NO_MEDIA_CACHE_TTL = 15.0
+_no_media_cache_until = 0.0  # monotonic timestamp
+
+
 def pause_media() -> bool:
     """Pause system media and set flag so we know we did it.
 
@@ -393,11 +400,17 @@ def pause_media() -> bool:
        a. If Chrome JS enabled → use video.pause() (precise)
        b. If Chrome JS disabled → detect video tab + send media key (toggle)
     """
+    global _no_media_cache_until
     t0 = time.time()
 
     if os.path.exists(_PAUSE_FLAG):
         _log("pause_media: already paused by us (flag exists)")
         return True  # Already paused by us
+
+    # Fast path: recently confirmed nothing was playing — skip slow detection
+    if time.monotonic() < _no_media_cache_until:
+        _log("pause_media: skipped (no-media cache hit)")
+        return False
 
     # --- Tier 1: Try Hush for browser media (most reliable) ---
     hush_resp = _hush_command("pause")
@@ -458,7 +471,11 @@ def pause_media() -> bool:
                  f"cannot detect play state. Skipping (enable Chrome JS: "
                  f"View → Developer → Allow JavaScript from Apple Events)")
 
-    _log(f"pause_media: no playing media found (native or browser) ({time.time()-t0:.2f}s)")
+    # Nothing playing — cache this result so subsequent TTS sentences
+    # skip the slow detection chain (Hush + nowplaying + Chrome JS).
+    _no_media_cache_until = time.monotonic() + _NO_MEDIA_CACHE_TTL
+    _log(f"pause_media: no playing media found (native or browser) ({time.time()-t0:.2f}s), "
+         f"caching for {_NO_MEDIA_CACHE_TTL:.0f}s")
     return False
 
 
@@ -495,9 +512,14 @@ def resume_media() -> bool:
     """Resume system media, but only if we were the ones who paused it.
 
     Waits RESUME_DELAY seconds before resuming for natural feel.
+    Invalidates the no-media cache since media is now active again.
     """
+    global _no_media_cache_until
     if not os.path.exists(_PAUSE_FLAG):
         return False  # We didn't pause it, don't resume
+
+    # Media is about to be active again — invalidate the no-media cache
+    _no_media_cache_until = 0.0
 
     # Read which method we used to pause
     try:

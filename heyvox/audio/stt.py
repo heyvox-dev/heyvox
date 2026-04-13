@@ -36,6 +36,7 @@ _mlx_lock = threading.Lock()
 _mlx_last_use: float = 0.0
 _mlx_unload_secs: float = 120.0  # 2 minutes idle → unload
 _mlx_unloader: threading.Timer | None = None
+_mlx_transcribing: bool = False  # Guard: prevents unload during active transcription
 _log_fn: Callable[[str], None] | None = None
 
 
@@ -76,6 +77,10 @@ def _unload_mlx_model() -> None:
     global _mlx_unloader
     with _mlx_lock:
         if not _mlx_loaded.is_set():
+            return
+        if _mlx_transcribing:
+            # Transcription in progress — reschedule, don't unload
+            _schedule_unload()
             return
         idle = time.time() - _mlx_last_use
         if idle < _mlx_unload_secs:
@@ -239,7 +244,10 @@ def transcribe_audio(
         # ensuring MLX memory is released before we continue. On timeout,
         # abandon the thread (it will finish eventually) but force-unload
         # the model to reclaim memory.
+        global _mlx_transcribing
         _timed_out = False
+        with _mlx_lock:
+            _mlx_transcribing = True
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(mlx_whisper.transcribe, samples, **kwargs)
@@ -257,6 +265,9 @@ def transcribe_audio(
         except Exception as e:
             _log(f"ERROR: MLX transcription failed: {e}")
             return ""
+        finally:
+            with _mlx_lock:
+                _mlx_transcribing = False
 
         with _mlx_lock:
             _mlx_last_use = time.time()
