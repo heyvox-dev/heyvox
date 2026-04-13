@@ -123,6 +123,20 @@ Chrome extension + native messaging host. 3-tier fallback:
 - All MCP logging to stderr (stdout reserved for stdio transport)
 - CI via GitHub Actions on macos-14 (Apple Silicon)
 
+### CRITICAL: No app-specific hardcoding
+
+HeyVox is a **generic voice layer** that works with ANY app. Conductor is just one of many possible frontends (others: Cursor, VS Code, Terminal, iTerm2, Claude Desktop, Warp, etc.).
+
+**Rules:**
+- **NEVER hardcode app names** like `"conductor"`, `"cursor"`, etc. in logic branches. All app-specific behavior MUST come from config (e.g., `config.yaml` app_profiles or app_delays).
+- **NEVER use app-specific keyboard shortcuts** (e.g., Cmd+L for Conductor) inline. Shortcuts must be defined in a configurable app profile: `{ name: "Conductor", focus_shortcut: "l", enter_count: 1 }`.
+- **NEVER string-match app names** to decide code paths (`if "conductor" in name.lower()`). Use the app profile system instead.
+- **App profiles** define per-app behavior: focus shortcut, enter count, is_electron flag, settle delays. The config ships with sensible defaults for common apps, but any app can be added by the user.
+- **The fast injection path** (combined focus + paste + enter in one osascript) must work for ANY app that has a profile, not just Conductor.
+- **IPC paths** should be user-scoped (`$TMPDIR` or `~/Library/Caches/heyvox/`) not bare `/tmp/` — avoids multi-user clashes and sandboxing issues.
+
+**Existing violations to fix:** There are ~20 places in the codebase that hardcode `"conductor"` checks. These must be migrated to the app profile system before public release. Search for: `"conductor" in`, `conductor_workspace`, `is_conductor`.
+
 ## Pending
 - [ ] Volume control — respect system volume, stop auto-increasing
 - [ ] Pause/resume recording (Escape pauses, second press resumes)

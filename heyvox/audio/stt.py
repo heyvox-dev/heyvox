@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 import numpy as np
 
 # Timeout for model loading and transcription calls
-_LOAD_TIMEOUT = 60  # seconds — cold load can be slow
+_LOAD_TIMEOUT = 120  # seconds — cold load can be very slow under swap pressure
 _TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
 
 from heyvox.constants import DEFAULT_SAMPLE_RATE  # noqa: E402
@@ -34,7 +34,7 @@ _mlx_language: str = ""
 _mlx_loaded = threading.Event()  # Set when model is ready
 _mlx_lock = threading.Lock()
 _mlx_last_use: float = 0.0
-_mlx_unload_secs: float = 120.0  # 2 minutes idle → unload
+_mlx_unload_secs: float = 600.0  # 10 minutes idle → unload (short timeouts cause slow reloads under swap pressure)
 _mlx_unloader: threading.Timer | None = None
 _mlx_transcribing: bool = False  # Guard: prevents unload during active transcription
 _log_fn: Callable[[str], None] | None = None

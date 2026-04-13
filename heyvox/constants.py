@@ -161,13 +161,6 @@ HEYVOX_HEARTBEAT_FILE = "/tmp/heyvox-heartbeat"
 HEYVOX_RESTART_LOG = "/tmp/heyvox-restart.log"
 
 # ---------------------------------------------------------------------------
-# Legacy compatibility (v1.0 claude-tts paths)
-# ---------------------------------------------------------------------------
-
-CLAUDE_TTS_MUTE_FLAG = "/tmp/claude-tts-mute"
-CLAUDE_TTS_PLAYING_PID = "/tmp/claude-tts-playing.pid"
-
-# ---------------------------------------------------------------------------
 # Herald workspace/ambient (IPC-01)
 # ---------------------------------------------------------------------------
 
