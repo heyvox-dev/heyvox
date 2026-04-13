@@ -86,7 +86,8 @@ class OrchestratorConfig:
     duck_enabled: bool = True
     duck_level: float = 0.03      # 3% — same as orchestrator.sh HERALD_DUCK_LEVEL=3/100
 
-    # Hold queue
+    # Queue caps
+    max_queued: int = 10   # drop oldest messages when queue exceeds this
     max_held: int = 5
 
     # Media pause
@@ -99,7 +100,7 @@ class OrchestratorConfig:
     normalize_peak_limit: int = 24000
 
     # Poll interval
-    poll_interval: float = 0.3
+    poll_interval: float = 0.1
 
     # Recording flag staleness threshold
     recording_flag_max_age: int = 120  # seconds
@@ -164,7 +165,7 @@ def _gc_queue_dirs(cfg: "OrchestratorConfig", debug_log: "Path") -> int:
         (cfg.history_dir, 86400), # 24 hours
         (cfg.claim_dir, 3600),    # 1 hour (replaces inline claim GC)
     ]
-    patterns = ["*.wav", "*.txt", "*.workspace"]
+    patterns = ["*.wav", "*.txt", "*.workspace", "*.parts"]
 
     for directory, max_age in dir_thresholds:
         if not directory.exists():
@@ -191,6 +192,33 @@ def _gc_queue_dirs(cfg: "OrchestratorConfig", debug_log: "Path") -> int:
                 pass
 
     return removed
+
+
+# ---------------------------------------------------------------------------
+# Parts manifest check — prevents premature restore between multi-part TTS
+# ---------------------------------------------------------------------------
+
+
+def _parts_pending(queue_dir: Path, max_age: float = 10.0) -> bool:
+    """Check if any .parts manifest files indicate more WAVs are coming.
+
+    Workers write a {timestamp}.parts file when multi-part generation starts,
+    and remove it after all parts are enqueued. If one exists and is fresh,
+    the orchestrator should not restore volume / resume media yet.
+
+    Stale manifests (> max_age seconds) are cleaned up to prevent hangs
+    from crashed workers.
+    """
+    now = time.time()
+    for pf in queue_dir.glob("*.parts"):
+        try:
+            if now - pf.stat().st_mtime < max_age:
+                return True
+            else:
+                pf.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return False
 
 
 # WAV normalization (legacy fallback — primary normalization is in kokoro-daemon.py)
@@ -398,7 +426,7 @@ def _duck_audio(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
         try:
             saved = float(cfg.original_vol_file.read_text().strip())
             set_system_volume_cached(cfg.duck_level)
-            time.sleep(0.15)
+            time.sleep(0.05)
             return saved
         except (ValueError, OSError):
             pass
@@ -409,7 +437,7 @@ def _duck_audio(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
     except OSError:
         pass
     set_system_volume_cached(cfg.duck_level)
-    time.sleep(0.15)
+    time.sleep(0.05)
     _herald_log(f"ORCH: ducked audio from {original_vol:.2f} to {cfg.duck_level:.2f}", debug_log)
     return original_vol
 
@@ -466,6 +494,61 @@ def _violation_check(context: str, cfg: OrchestratorConfig) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Queue management helpers
+# ---------------------------------------------------------------------------
+
+
+def _purge_message_parts(msg_prefix: str, queue_dir: Path, debug_log: Path) -> int:
+    """Remove all remaining WAV parts for a message prefix from the queue.
+
+    Returns number of files purged.
+    """
+    purged = 0
+    for wav in sorted(queue_dir.glob("*.wav")):
+        prefix = wav.name.split("-")[0] if "-" in wav.name else wav.name
+        if prefix == msg_prefix:
+            wav.unlink(missing_ok=True)
+            wav.with_suffix(".workspace").unlink(missing_ok=True)
+            wav.with_suffix(".timing").unlink(missing_ok=True)
+            purged += 1
+    if purged:
+        _herald_log(f"ORCH: purged {purged} remaining parts of interrupted message {msg_prefix}", debug_log)
+    return purged
+
+
+def _enforce_queue_cap(cfg: "OrchestratorConfig", debug_log: Path) -> int:
+    """Drop oldest complete messages when queue exceeds cap.
+
+    Returns number of files dropped.
+    """
+    queue_wavs = sorted(cfg.queue_dir.glob("*.wav"))
+    if len(queue_wavs) <= cfg.max_queued:
+        return 0
+
+    # Group by message prefix
+    messages: dict[str, list[Path]] = {}
+    for wav in queue_wavs:
+        prefix = wav.name.split("-")[0] if "-" in wav.name else wav.name
+        messages.setdefault(prefix, []).append(wav)
+
+    # Drop oldest complete messages until under cap
+    dropped = 0
+    msg_prefixes = list(messages.keys())  # already sorted (timestamp-based names)
+    for prefix in msg_prefixes:
+        if len(queue_wavs) - dropped <= cfg.max_queued:
+            break
+        parts = messages[prefix]
+        for wav in parts:
+            wav.unlink(missing_ok=True)
+            wav.with_suffix(".workspace").unlink(missing_ok=True)
+            wav.with_suffix(".timing").unlink(missing_ok=True)
+            dropped += 1
+        _herald_log(f"ORCH: dropped {len(parts)} parts of {prefix} (queue cap={cfg.max_queued})", debug_log)
+
+    return dropped
+
+
+# ---------------------------------------------------------------------------
 # WAV playback
 # ---------------------------------------------------------------------------
 
@@ -476,11 +559,11 @@ def _play_wav(
     current_workspace: str,
     original_vol: float | None,
     cfg: OrchestratorConfig,
-) -> tuple[str, str, float | None]:
+) -> tuple[str, str, float | None, bool]:
     """Play a single WAV file, handling ducking, pausing, and workspace switching.
 
     Returns:
-        (new_last_msg_prefix, new_current_workspace, original_vol)
+        (new_last_msg_prefix, new_current_workspace, original_vol, was_interrupted)
     """
     debug_log = cfg.debug_log
     basename = wav_file.name
@@ -610,7 +693,8 @@ def _play_wav(
         pass
 
     # If watchdog killed playback, wait for recording to finish
-    if play_exit != 0 and _is_paused(cfg, debug_log):
+    was_interrupted = play_exit != 0 and _is_paused(cfg, debug_log)
+    if was_interrupted:
         _herald_log("ORCH: playback interrupted, waiting for pause to clear", debug_log)
         while _is_paused(cfg, debug_log):
             time.sleep(0.3)
@@ -629,16 +713,18 @@ def _play_wav(
         pass
 
     # Check if queue and hold are empty → resume media + restore volume
+    # Also check for .parts manifests — a worker may still be generating parts.
     queue_empty = not any(cfg.queue_dir.glob("*.wav"))
     hold_empty = not any(cfg.hold_dir.glob("*.wav"))
-    if queue_empty and hold_empty:
+    parts_coming = _parts_pending(cfg.queue_dir)
+    if queue_empty and hold_empty and not parts_coming:
         if cfg.media_pause:
             _media_resume(cfg)
             _herald_log("ORCH: media RESUMED", debug_log)
         _restore_audio(original_vol, cfg, debug_log)
         original_vol = None
 
-    return last_msg_prefix, current_workspace, original_vol
+    return last_msg_prefix, current_workspace, original_vol, was_interrupted
 
 
 # ---------------------------------------------------------------------------
@@ -729,13 +815,16 @@ class HeraldOrchestrator:
                     if held:
                         next_held = held[0]
                         if next_held.exists():
-                            last_msg_prefix, current_workspace, original_vol = _play_wav(
+                            last_msg_prefix, current_workspace, original_vol, _ = _play_wav(
                                 next_held, last_msg_prefix, current_workspace, original_vol, cfg
                             )
                             remaining = list(cfg.hold_dir.glob("*.wav"))
                             if remaining:
                                 self._show_alert(f"{len(remaining)} more pending")
                             continue
+
+                # Enforce queue cap before picking next file
+                _enforce_queue_cap(cfg, debug_log)
 
                 # Find next WAV in queue (sorted by name = timestamp order)
                 queue_wavs = sorted(cfg.queue_dir.glob("*.wav"))
@@ -801,9 +890,14 @@ class HeraldOrchestrator:
                                 )
                         continue
 
-                    last_msg_prefix, current_workspace, original_vol = _play_wav(
+                    last_msg_prefix, current_workspace, original_vol, interrupted = _play_wav(
                         next_wav, last_msg_prefix, current_workspace, original_vol, cfg
                     )
+
+                    # If recording interrupted playback, drop remaining parts of this message
+                    if interrupted and last_msg_prefix:
+                        _purge_message_parts(last_msg_prefix, cfg.queue_dir, debug_log)
+                        last_msg_prefix = ""  # reset so next message isn't treated as continuation
 
                 else:
                     # Queue empty — check hold queue auto-drain
@@ -813,15 +907,35 @@ class HeraldOrchestrator:
                             f"ORCH: auto-draining held queue ({len(held_wavs)} pending)",
                             debug_log,
                         )
-                        next_held = held_wavs[0]
-                        if next_held.exists():
-                            last_msg_prefix, current_workspace, original_vol = _play_wav(
+                        # Play all consecutive parts of the same message back-to-back
+                        while held_wavs:
+                            next_held = held_wavs[0]
+                            if not next_held.exists():
+                                held_wavs = held_wavs[1:]
+                                continue
+                            last_msg_prefix, current_workspace, original_vol, interrupted = _play_wav(
                                 next_held, last_msg_prefix, current_workspace, original_vol, cfg
                             )
-                            remaining = list(cfg.hold_dir.glob("*.wav"))
-                            if remaining:
-                                self._show_alert(f"{len(remaining)} more pending")
-                                time.sleep(1.0)
+                            if interrupted and last_msg_prefix:
+                                # Purge remaining parts of this message from hold too
+                                for h in list(cfg.hold_dir.glob("*.wav")):
+                                    hp = h.name.split("-")[0] if "-" in h.name else h.name
+                                    if hp == last_msg_prefix:
+                                        h.unlink(missing_ok=True)
+                                        h.with_suffix(".workspace").unlink(missing_ok=True)
+                                _herald_log(f"ORCH: purged held parts of interrupted {last_msg_prefix}", debug_log)
+                                last_msg_prefix = ""
+                                break
+                            # Check if next held file is a continuation of same message
+                            held_wavs = sorted(cfg.hold_dir.glob("*.wav"))
+                            if not held_wavs:
+                                break
+                            next_prefix = held_wavs[0].name.split("-")[0] if "-" in held_wavs[0].name else ""
+                            if next_prefix != last_msg_prefix:
+                                break  # Different message — re-enter main loop for activity check
+                        remaining = list(cfg.hold_dir.glob("*.wav"))
+                        if remaining:
+                            self._show_alert(f"{len(remaining)} more pending")
                     else:
                         time.sleep(cfg.poll_interval)
                         _gc_queue_dirs(cfg, cfg.debug_log)
@@ -877,6 +991,13 @@ def _enforce_singleton(cfg: OrchestratorConfig) -> bool:
 
 def main() -> None:
     """Entry point for `python3 -m heyvox.herald.orchestrator`."""
+    # Own process group so we survive kokoro-daemon restarts/crashes
+    # (shared PGID lets resource_tracker signals bleed across daemons).
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
     import argparse
 
     parser = argparse.ArgumentParser(
