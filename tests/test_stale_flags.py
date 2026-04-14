@@ -8,7 +8,6 @@ Covers bug-audit patterns:
 """
 
 import os
-import tempfile
 import unittest
 
 from heyvox.constants import (
@@ -17,7 +16,9 @@ from heyvox.constants import (
     CLAUDE_TTS_MUTE_FLAG,
     HERALD_MUTE_FLAG,
     VERBOSITY_FILE,
+    ACTIVE_MIC_FILE,
 )
+
 
 # Flags that main.py cleans up on startup
 STARTUP_CLEANUP_FLAGS = [
@@ -72,8 +73,7 @@ class TestFlagAtomicity(unittest.TestCase):
 
     def test_active_mic_atomic_write(self):
         """Writing mic name should be atomic (temp + rename)."""
-        _tmp = tempfile.gettempdir()
-        mic_file = f"{_tmp}/heyvox-test-atomic"
+        mic_file = ACTIVE_MIC_FILE + "-test-atomic"
         tmp_file = mic_file + ".tmp"
         try:
             # This is the atomic write pattern used in overlay.py
@@ -94,8 +94,7 @@ class TestFlagAtomicity(unittest.TestCase):
         """Atomic rename ensures readers never see partial writes."""
         import threading
 
-        _tmp = tempfile.gettempdir()
-        mic_file = f"{_tmp}/heyvox-test-atomic-concurrent"
+        mic_file = ACTIVE_MIC_FILE + "-test-atomic-concurrent"
         results = []
         errors = []
 
