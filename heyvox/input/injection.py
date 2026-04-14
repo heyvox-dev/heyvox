@@ -254,6 +254,7 @@ def _osascript_type_text(
     max_retries: int = 2,
     enter_count: int = 0,
     enter_delay: float = 0.05,
+    focus_shortcut: str = "",
 ) -> bool:
     """Paste text via clipboard + Cmd-V (osascript), optionally followed by Enter.
 
@@ -328,9 +329,17 @@ def _osascript_type_text(
     process_name = frontmost_before if frontmost_before and frontmost_before != "?" else app_name
     already_frontmost = process_name and frontmost_before and process_name.lower() == _get_frontmost_app().lower()
 
-    # Build keystrokes: Cmd+V paste, then optional Enter(s) in the same script
-    # to avoid a separate subprocess spawn (~0.2s savings).
-    keystrokes = ['keystroke "v" using command down']
+    # Build keystrokes: optional Cmd+shortcut (focus input), Cmd+V paste,
+    # then optional Enter(s) — all in one atomic osascript call.
+    # focus_shortcut is used when a workspace switch may have moved focus away
+    # from the text input (e.g. sidebar click). When no switch was needed,
+    # the caller passes focus_shortcut="" and we skip it.
+    keystrokes = []
+    if focus_shortcut:
+        keystrokes.append(f'keystroke "{focus_shortcut}" using command down')
+        keystrokes.append("delay 0.1")  # Let input field focus
+        _log(f"paste: including Cmd+{focus_shortcut} focus shortcut in atomic script")
+    keystrokes.append('keystroke "v" using command down')
     if enter_count > 0:
         keystrokes.append(f"delay {enter_delay}")  # Settle after paste (Electron needs 0.3s)
         for i in range(enter_count):
@@ -460,6 +469,7 @@ def type_text(
     max_retries: int = 2,
     enter_count: int = 0,
     enter_delay: float = 0.05,
+    focus_shortcut: str = "",
 ) -> bool:
     """Insert text into an app, optionally pressing Enter to submit.
 
@@ -511,6 +521,7 @@ def type_text(
         max_retries=max_retries,
         enter_count=enter_count,
         enter_delay=enter_delay,
+        focus_shortcut=focus_shortcut,
     )
 
 

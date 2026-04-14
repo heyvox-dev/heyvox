@@ -89,6 +89,16 @@ def _save_debug_audio(
         if extra_info:
             info.update(extra_info)
         import json
+
+        # Convert numpy types to Python natives for JSON serialization
+        def _jsonable(v):
+            if isinstance(v, (np.integer,)):
+                return int(v)
+            if isinstance(v, (np.floating,)):
+                return float(v)
+            return v
+
+        info = {k: _jsonable(v) for k, v in info.items()}
         with open(STT_DEBUG_LOG, "a") as f:
             f.write(json.dumps(info) + "\n")
 
@@ -706,6 +716,11 @@ class RecordingStateMachine:
                     f"[inject] generic path: auto_send={auto_send}, "
                     f"combined_enter={combined_enter}, enter_delay={enter_delay}"
                 )
+                # Only send focus shortcut if a workspace switch actually happened
+                # (sidebar click steals focus from text input, Cmd+L restores it).
+                # When no switch was needed, focus is already on the text input.
+                ws_switched = getattr(recording_target, '_workspace_switched', False)
+                _focus = profile.focus_shortcut if (profile and ws_switched) else ""
                 paste_ok = type_text(
                     paste_text,
                     app_name=target_app,
@@ -714,6 +729,7 @@ class RecordingStateMachine:
                     max_retries=max_retries,
                     enter_count=combined_enter,
                     enter_delay=enter_delay,
+                    focus_shortcut=_focus,
                 )
 
             if paste_ok:
