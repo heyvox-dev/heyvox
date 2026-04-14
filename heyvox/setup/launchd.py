@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from heyvox.constants import LAUNCHD_LABEL
+from heyvox.constants import LAUNCHD_LABEL, LOG_FILE_DEFAULT
 
 
 PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -63,9 +63,9 @@ def write_plist() -> Path:
     <key>ThrottleInterval</key>
     <integer>5</integer>
     <key>StandardOutPath</key>
-    <string>/tmp/heyvox.log</string>
+    <string>{LOG_FILE_DEFAULT}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/heyvox.log</string>
+    <string>{LOG_FILE_DEFAULT}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -115,7 +115,8 @@ def _kill_heyvox_processes() -> int:
     import time
 
     patterns = ["heyvox.main", "heyvox.cli start", "heyvox.hud.overlay",
-                "herald/lib/orchestrator.sh", "herald/daemon/kokoro-daemon.py"]
+                "herald/lib/orchestrator.sh", "herald/daemon/kokoro-daemon.py",
+                "herald/daemon/watcher.py", "heyvox.herald.cli"]
     killed = 0
 
     for pattern in patterns:
