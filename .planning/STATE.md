@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 Phase: 13
 Plan: Not started
 Status: Ready to execute
-Last activity: 2026-04-13
+Last activity: 2026-04-14 - Completed quick task 260414-cki: Phase 4 dual-write IPC fix
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
 
@@ -79,9 +79,14 @@ None — milestone complete.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260413-j7m | Add BlackHole-based integration tests for Phase 13 audio reliability features | 2026-04-13 | 791ff19 | [260413-j7m-add-blackhole-based-integration-tests-fo](./quick/260413-j7m-add-blackhole-based-integration-tests-fo/) |
+| 260413-o6p | Phase 1: Dead code deletion (~490 lines removed) | 2026-04-13 | 116c9c5 | [260413-o6p-phase-1-dead-code-deletion-remove-500-li](./quick/260413-o6p-phase-1-dead-code-deletion-remove-500-li/) |
+| 260413-os9 | Phase 2: App Profile System — replace hardcoded conductor checks | 2026-04-13 | 81393fa | [260413-os9-phase-2-app-profile-system-replace-all-h](./quick/260413-os9-phase-2-app-profile-system-replace-all-h/) |
+| 260413-rc2 | Phase 5: Simplify abstractions — deduplicate WAV normalization, remove unused echo config | 2026-04-13 | 2792e39 | [260413-rc2-phase-5-simplify-abstractions-adapter-to](./quick/260413-rc2-phase-5-simplify-abstractions-adapter-to/) |
+| 260414-b68 | Phase 3: IPC consolidation — move /tmp paths to user-scoped paths, cleanup function | 2026-04-14 | 314abe2 | [260414-b68-phase-3-ipc-consolidation-move-tmp-paths](./quick/260414-b68-phase-3-ipc-consolidation-move-tmp-paths/) |
+| 260414-cki | Phase 4: Fix dual-write IPC bug — tests import constants, legacy flag refs fixed | 2026-04-14 | 7fdc82f | [260414-cki-phase-4-fix-dual-write-ipc-bug-standalon](./quick/260414-cki-phase-4-fix-dual-write-ipc-bug-standalon/) |
 
 ## Session Continuity
 
-Last session: 2026-04-13T11:49:57.085Z
-Stopped at: Completed quick task 260413-j7m: BlackHole integration tests
+Last session: 2026-04-13T15:50:42.672Z
+Stopped at: Completed quick tasks 260413-o6p (Phase 1) and 260413-os9 (Phase 2)
 Resume file: None
