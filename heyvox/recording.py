@@ -673,7 +673,15 @@ class RecordingStateMachine:
 
             adapter = self.ctx.adapter
             auto_send = not ptt and adapter.should_auto_send()
-            combined_enter = adapter.enter_count if auto_send else 0
+
+            # Look up app profile for enter_count and enter_delay overrides.
+            # Profile values take precedence over adapter defaults.
+            profile = self.config.get_app_profile(target_app) if target_app else None
+            if auto_send:
+                combined_enter = profile.enter_count if profile else adapter.enter_count
+            else:
+                combined_enter = 0
+            enter_delay = profile.enter_delay if profile else 0.05
 
             if recording_target:
                 if recording_target.detected_workspace:
@@ -696,7 +704,7 @@ class RecordingStateMachine:
                     max_retries = 2
                 self._log(
                     f"[inject] generic path: auto_send={auto_send}, "
-                    f"combined_enter={combined_enter}"
+                    f"combined_enter={combined_enter}, enter_delay={enter_delay}"
                 )
                 paste_ok = type_text(
                     paste_text,
@@ -705,6 +713,7 @@ class RecordingStateMachine:
                     settle_secs=settle,
                     max_retries=max_retries,
                     enter_count=combined_enter,
+                    enter_delay=enter_delay,
                 )
 
             if paste_ok:

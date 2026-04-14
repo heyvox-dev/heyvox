@@ -215,6 +215,11 @@ class AppProfileConfig(BaseModel):
     # Delay (seconds) after activating before pasting — Electron apps need more.
     settle_delay: float = 0.3
 
+    # Delay (seconds) between Cmd+V paste and first Enter keystroke.
+    # Electron/Tauri apps may need more under CPU pressure for paste to propagate.
+    # Terminal apps process paste synchronously and need near-zero delay.
+    enter_delay: float = 0.05
+
     # Whether this app supports workspace/tab detection via AX tree + DB.
     has_workspace_detection: bool = False
 
@@ -243,6 +248,7 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "enter_count": 1,
         "is_electron": True,
         "settle_delay": 0.3,
+        "enter_delay": 0.15,
         "has_workspace_detection": True,
         "workspace_db": "~/Library/Application Support/com.conductor.app/conductor.db",
         "workspace_switch_cmd": "~/.local/bin/conductor-switch-workspace",
@@ -260,6 +266,7 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "enter_count": 1,
         "is_electron": True,
         "settle_delay": 0.3,
+        "enter_delay": 0.15,
     },
     {
         "name": "Claude",

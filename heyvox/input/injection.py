@@ -253,6 +253,7 @@ def _osascript_type_text(
     expected_bundle_id: str | None = None,
     max_retries: int = 2,
     enter_count: int = 0,
+    enter_delay: float = 0.05,
 ) -> bool:
     """Paste text via clipboard + Cmd-V (osascript), optionally followed by Enter.
 
@@ -331,7 +332,7 @@ def _osascript_type_text(
     # to avoid a separate subprocess spawn (~0.2s savings).
     keystrokes = ['keystroke "v" using command down']
     if enter_count > 0:
-        keystrokes.append("delay 0.05")  # Brief settle after paste
+        keystrokes.append(f"delay {enter_delay}")  # Settle after paste (Electron needs 0.3s)
         for i in range(enter_count):
             keystrokes.append("keystroke return")
             if i < enter_count - 1:
@@ -458,6 +459,7 @@ def type_text(
     settle_secs: float = 0.1,
     max_retries: int = 2,
     enter_count: int = 0,
+    enter_delay: float = 0.05,
 ) -> bool:
     """Insert text into an app, optionally pressing Enter to submit.
 
@@ -479,6 +481,8 @@ def type_text(
         settle_secs: Focus settle delay before Cmd-V (per-app tuned via InjectionConfig).
         max_retries: Number of retries on clipboard theft.
         enter_count: Number of Enter keystrokes after paste (0 = no auto-send).
+        enter_delay: Delay (seconds) between Cmd+V and first Enter. Electron apps
+            need ~0.3s for paste to propagate through IPC before Enter can submit.
 
     Returns:
         True on success, False on failure. Error cue is played on failure.
@@ -506,6 +510,7 @@ def type_text(
         expected_bundle_id=expected_bundle_id,
         max_retries=max_retries,
         enter_count=enter_count,
+        enter_delay=enter_delay,
     )
 
 
@@ -573,7 +578,7 @@ def conductor_paste_and_send(text: str, enter_count: int = 1) -> bool:
         'keystroke "v" using command down',   # Paste
     ]
     if enter_count > 0:
-        keystrokes.append("delay 0.05")       # Brief settle after paste
+        keystrokes.append("delay 0.15")       # Electron needs time to process paste
         for i in range(enter_count):
             keystrokes.append("keystroke return")
             if i < enter_count - 1:
