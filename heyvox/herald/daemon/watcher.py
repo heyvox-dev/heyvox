@@ -20,16 +20,16 @@ import subprocess
 import sys
 import time
 
-# User-scoped temp dir — matches heyvox.constants._TMP (cannot import package here).
+# User-scoped temp dir (cannot import heyvox.constants — runs as standalone script).
 _TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
-PID_FILE = f"{_TMP}/herald-watcher.pid"  # Must match heyvox.constants.HERALD_WATCHER_PID
-HANDLED_FLAG_DIR = f"{_TMP}/herald-watcher-handled"  # Must match heyvox.constants.HERALD_WATCHER_HANDLED_DIR
-KOKORO_SOCK = f"{_TMP}/kokoro-daemon.sock"  # Must match heyvox.constants.KOKORO_DAEMON_SOCK
-QUEUE_DIR = f"{_TMP}/herald-queue"  # Must match heyvox.constants.HERALD_QUEUE_DIR
-DEBUG_LOG = f"{_TMP}/herald-debug.log"  # Must match heyvox.constants.HERALD_DEBUG_LOG
+PID_FILE = f"{_TMP}/herald-watcher.pid"
+HANDLED_FLAG_DIR = f"{_TMP}/herald-watcher-handled"
+KOKORO_SOCK = f"{_TMP}/kokoro-daemon.sock"
+QUEUE_DIR = f"{_TMP}/herald-queue"
+DEBUG_LOG = f"{_TMP}/herald-debug.log"
 POLL_INTERVAL = 0.3
-CLAIM_DIR = f"{_TMP}/herald-claim"  # Must match heyvox.constants.HERALD_CLAIM_DIR
+CLAIM_DIR = f"{_TMP}/herald-claim"
 
 file_positions = {}
 last_tts_time = 0
@@ -145,7 +145,7 @@ def detect_workspace_from_path(jsonl_path):
     return ""
 
 
-VERBOSITY_FILE = f"{_TMP}/heyvox-verbosity"  # Must match heyvox.constants.VERBOSITY_FILE
+VERBOSITY_FILE = f"{_TMP}/heyvox-verbosity"
 
 
 def _get_verbosity():
@@ -201,7 +201,7 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
 
     voice = detect_mood_voice(speech)
 
-    temp_wav = f"{_TMP}/herald-watcher-{os.getpid()}.wav"  # Must match heyvox.constants.HERALD_WATCHER_PID prefix
+    temp_wav = f"{_TMP}/herald-watcher-{os.getpid()}.wav"
 
     req = json.dumps({
         "text": speech,

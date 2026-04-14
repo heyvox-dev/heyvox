@@ -12,7 +12,8 @@
 
 set -euo pipefail
 
-SOCK_PATH="/tmp/hush.sock"
+HEYVOX_RUN_DIR="${HEYVOX_RUN_DIR:-${TMPDIR:-/tmp}/heyvox}"
+SOCK_PATH="$HEYVOX_RUN_DIR/hush.sock"
 
 # ── Usage ─────────────────────────────────────────────────────────────────────
 usage() {

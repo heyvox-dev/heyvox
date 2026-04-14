@@ -8,11 +8,14 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
 
+HEYVOX_RUN_DIR="${HEYVOX_RUN_DIR:-${TMPDIR:-/tmp}/heyvox}"
+HERALD_RUN_DIR="${HERALD_RUN_DIR:-${TMPDIR:-/tmp}/herald}"
+
 ACTION="${1:-pause}"
 CALLER="${2:-orch}"
-FLAG="/tmp/herald-media-paused-${CALLER}"
+FLAG="$HERALD_RUN_DIR/media-paused-${CALLER}"
 
-HUSH_SOCK="/tmp/hush.sock"
+HUSH_SOCK="$HEYVOX_RUN_DIR/hush.sock"
 HUSH_REWIND_SECS=3
 HUSH_FADE_IN_MS=1000
 
@@ -128,7 +131,7 @@ if [ "$ACTION" = "pause" ]; then
 else
     [ ! -f "$FLAG" ] && exit 0
     HAS_OTHER=false
-    for f in /tmp/herald-media-paused-*; do
+    for f in "$HERALD_RUN_DIR"/media-paused-*; do
         [ "$f" != "$FLAG" ] && [ -f "$f" ] && HAS_OTHER=true && break
     done
     if [ "$HAS_OTHER" = "true" ]; then

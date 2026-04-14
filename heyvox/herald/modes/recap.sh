@@ -4,17 +4,18 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/config.sh"
 
-SPEECH_FILE="/tmp/herald-recap-$$.txt"
+HERALD_RUN_DIR="${HERALD_RUN_DIR:-${TMPDIR:-/tmp}/herald}"
+SPEECH_FILE="$HERALD_RUN_DIR/recap-$$.txt"
 
 herald_is_muted && exit 0
 herald_ensure_dirs
 
 if ! kill -0 "$(cat "$HERALD_ORCH_PID" 2>/dev/null)" 2>/dev/null; then
-  if mkdir /tmp/herald-orch-launch.lock 2>/dev/null; then
+  if mkdir "$HERALD_RUN_DIR/orch-launch.lock" 2>/dev/null; then
     if ! kill -0 "$(cat "$HERALD_ORCH_PID" 2>/dev/null)" 2>/dev/null; then
       nohup bash "${HERALD_HOME}/lib/orchestrator.sh" </dev/null >/dev/null 2>&1 &
     fi
-    rm -rf /tmp/herald-orch-launch.lock
+    rm -rf "$HERALD_RUN_DIR/orch-launch.lock"
   fi
 fi
 

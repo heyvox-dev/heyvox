@@ -511,7 +511,7 @@ def _write_tts_cmd(cmd: str) -> None:
         cmd_path = TTS_CMD_FILE
     except ImportError:
         _t = os.environ.get("TMPDIR", "/tmp").rstrip("/")
-        cmd_path = f"{_t}/heyvox-tts-cmd"  # Must match heyvox.constants.TTS_CMD_FILE
+        cmd_path = f"{_t}/heyvox-tts-cmd"
     try:
         tmp_path = cmd_path + ".tmp"
         with open(tmp_path, "w") as f:

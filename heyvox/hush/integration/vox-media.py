@@ -26,7 +26,7 @@ import socket as _socket
 import subprocess
 import time
 
-# User-scoped temp dir — matches heyvox.constants._TMP (cannot import package here).
+# User-scoped temp dir (cannot import heyvox.constants — may run standalone).
 _TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
 
@@ -48,7 +48,7 @@ _MR_PAUSE = 1
 # The TTS orchestrator uses /tmp/heyvox-media-paused-orch separately.
 # Contents: "hush" (Hush extension), "mr" (MediaRemote), "chrome-js" (Chrome JS),
 #           "media-key" (media key toggle)
-_PAUSE_FLAG = f"{_TMP}/heyvox-media-paused-rec"  # Must match heyvox.constants.HEYVOX_MEDIA_PAUSED_REC
+_PAUSE_FLAG = f"{_TMP}/heyvox-media-paused-rec"
 
 # Lazy-loaded framework handle
 _mr_lib = None
@@ -71,7 +71,7 @@ _VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com"]
 # Hush (Chrome extension) integration
 # ---------------------------------------------------------------------------
 
-_HUSH_SOCK = f"{_TMP}/hush.sock"  # Must match heyvox.constants.HUSH_SOCK
+_HUSH_SOCK = f"{_TMP}/hush.sock"
 
 
 def _hush_command(action: str, **kwargs) -> dict | None:

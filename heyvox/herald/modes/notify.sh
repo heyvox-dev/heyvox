@@ -39,7 +39,8 @@ fi
 
 case "$NOTIFY_TYPE" in
   permission_prompt)
-    pkill -f "afplay.*/tmp/herald" 2>/dev/null
+    HERALD_RUN_DIR="${HERALD_RUN_DIR:-${TMPDIR:-/tmp}/herald}"
+    pkill -f "afplay.*$HERALD_RUN_DIR" 2>/dev/null
     if [ "$IS_DANGEROUS" = "true" ]; then
       say -v Samantha -r 180 "Warning! Destructive operation detected. Please review carefully before approving." &
     else
