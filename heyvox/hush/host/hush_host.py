@@ -44,13 +44,13 @@ from typing import Any
 # Configuration
 # ---------------------------------------------------------------------------
 
-# User-scoped temp dir — matches heyvox.constants._TMP (cannot import package here).
+# User-scoped temp dir (cannot import heyvox.constants — launched by Chrome NMH).
 _TMP: str = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
-SOCKET_PATH: str = f"{_TMP}/hush.sock"  # Must match heyvox.constants.HUSH_SOCK
+SOCKET_PATH: str = f"{_TMP}/hush.sock"
 TCP_HOST: str = "127.0.0.1"
 TCP_PORT: int = 9847
-LOG_PATH: str = f"{_TMP}/hush.log"  # Must match heyvox.constants.HUSH_LOG
+LOG_PATH: str = f"{_TMP}/hush.log"
 LOG_MAX_BYTES: int = 1_048_576  # 1 MB
 LOG_BACKUP_COUNT: int = 2
 CHROME_RESPONSE_TIMEOUT: float = 3.0  # seconds

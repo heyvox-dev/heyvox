@@ -44,6 +44,8 @@ from heyvox.constants import (
     HERALD_PLAYING_PID,
     VERBOSITY_FILE,
     GRACE_AFTER_TTS,
+    ensure_run_dirs,
+    cleanup_ipc_files,
 )
 from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
 from heyvox.audio.stt import init_local_stt
@@ -1039,6 +1041,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
 def main() -> None:
     """Main event loop -- loads config, starts PTT, runs wake word detection."""
+    ensure_run_dirs()
     config = load_config()
 
     ctx, devices, recording, model, use_separate_words, hud_send, aec_active, profile_manager = _setup(config)
@@ -1050,19 +1053,7 @@ def main() -> None:
                   profile_manager=profile_manager)
     finally:
         log("Cleaning up...")
-        # Always clean up flag files to avoid blocking TTS orchestrator
-        for flag in (RECORDING_FLAG, TTS_PLAYING_FLAG, HERALD_PAUSE_FLAG):
-            try:
-                os.unlink(flag)
-            except FileNotFoundError:
-                pass
-        # Clean up media pause flags (both heyvox and herald namespaces)
-        import glob as _glob
-        for f in _glob.glob(HEYVOX_MEDIA_PAUSED_PREFIX + "*") + _glob.glob(HERALD_MEDIA_PAUSED_PREFIX + "*"):
-            try:
-                os.unlink(f)
-            except FileNotFoundError:
-                pass
+        cleanup_ipc_files(herald_too=False)
         if ctx.hud_client:
             ctx.hud_client.close()
         # Only kill HUD on explicit stop (SIGTERM/SIGINT), not on watchdog restart

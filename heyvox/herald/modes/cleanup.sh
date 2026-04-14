@@ -12,7 +12,8 @@ herald_log "CLEANUP FIRED: ppid=$PPID"
 sleep 2
 
 # Use mkdir as an atomic lock (works on macOS, no flock needed)
-CLEANUP_LOCK="/tmp/herald-cleanup.active"
+HERALD_RUN_DIR="${HERALD_RUN_DIR:-${TMPDIR:-/tmp}/herald}"
+CLEANUP_LOCK="$HERALD_RUN_DIR/cleanup.active"
 if ! mkdir "$CLEANUP_LOCK" 2>/dev/null; then
   herald_log "CLEANUP SKIPPED: another cleanup is running"
   exit 0
@@ -39,13 +40,13 @@ if [ -f "$HERALD_PLAYING_PID" ]; then
   kill "$(cat "$HERALD_PLAYING_PID")" 2>/dev/null
   rm -f "$HERALD_PLAYING_PID"
 fi
-pkill -f "afplay.*/tmp/herald" 2>/dev/null
+pkill -f "afplay.*$HERALD_RUN_DIR" 2>/dev/null
 
 rm -rf "$HERALD_QUEUE_DIR"
-rm -f /tmp/herald-raw*.txt /tmp/herald-speech-*.txt /tmp/herald-meta-*.json /tmp/herald-recap-*.txt
+rm -f "$HERALD_RUN_DIR"/raw*.txt "$HERALD_RUN_DIR"/speech-*.txt "$HERALD_RUN_DIR"/meta-*.json "$HERALD_RUN_DIR"/recap-*.txt
 # Clean up state files that can go stale and cause wrong behavior on next session
-rm -f /tmp/herald-pause /tmp/herald-ambient /tmp/herald-mode /tmp/herald-last-play /tmp/herald-workspace
+rm -f "$HERALD_RUN_DIR"/pause "$HERALD_RUN_DIR"/ambient "$HERALD_RUN_DIR"/mode "$HERALD_RUN_DIR"/last-play "$HERALD_RUN_DIR"/workspace
 # Clean up temp WAVs from crashed TTS workers
-rm -f /tmp/herald-generating-*.wav
+rm -f "$HERALD_RUN_DIR"/generating-*.wav
 
 exit 0

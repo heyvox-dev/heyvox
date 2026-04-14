@@ -1,5 +1,7 @@
 """Shared constants for the heyvox package."""
 
+import glob
+import os
 import tempfile
 
 # User-scoped temp directory. On macOS this is $TMPDIR (/var/folders/<uid>/...),
@@ -218,3 +220,59 @@ HUSH_LOG = f"{_TMP}/hush.log"
 # ---------------------------------------------------------------------------
 
 HEYVOX_STATE_FILE = f"{_TMP}/heyvox-state.json"
+
+
+# ---------------------------------------------------------------------------
+# IPC lifecycle helpers
+# ---------------------------------------------------------------------------
+
+def ensure_run_dirs():
+    """Create IPC directories if they don't exist."""
+    for d in (HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_HISTORY_DIR,
+              HERALD_CLAIM_DIR, HERALD_WATCHER_HANDLED_DIR, STT_DEBUG_DIR):
+        os.makedirs(d, exist_ok=True)
+
+
+def cleanup_ipc_files(herald_too: bool = True):
+    """Remove all HeyVox IPC flag/socket/PID files.
+
+    Called on clean shutdown or via ``heyvox cleanup`` CLI command.
+    Does NOT remove log files or debug dirs.
+    """
+    for path in (RECORDING_FLAG, TTS_PLAYING_FLAG, TTS_CMD_FILE,
+                 VERBOSITY_FILE, HUD_SOCKET_PATH, ACTIVE_MIC_FILE,
+                 MIC_SWITCH_REQUEST_FILE, HEYVOX_PID_FILE,
+                 HEYVOX_HEARTBEAT_FILE, HEYVOX_STATE_FILE,
+                 HUD_POSITION_FILE, TTS_STYLE_FILE,
+                 HEYVOX_MEDIA_PAUSED_REC, HUSH_SOCK):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    for pattern in (HEYVOX_MEDIA_PAUSED_PREFIX + "*",):
+        for f in glob.glob(pattern):
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
+
+    if not herald_too:
+        return
+    for path in (HERALD_ORCH_PID, HERALD_PLAYING_PID,
+                 HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG,
+                 HERALD_MODE_FILE, HERALD_LAST_PLAY,
+                 HERALD_PLAY_NEXT, KOKORO_DAEMON_SOCK,
+                 KOKORO_DAEMON_PID, HERALD_AMBIENT_FLAG,
+                 HERALD_WORKSPACE_FILE, HERALD_ORIGINAL_VOL_FILE,
+                 HERALD_WATCHER_PID):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    for pattern in (HERALD_GENERATING_WAV_PREFIX + "*.wav",
+                    HERALD_MEDIA_PAUSED_PREFIX + "*"):
+        for f in glob.glob(pattern):
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
