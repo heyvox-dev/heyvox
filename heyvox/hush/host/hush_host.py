@@ -44,10 +44,11 @@ from typing import Any
 # Configuration
 # ---------------------------------------------------------------------------
 
-SOCKET_PATH: str = "/tmp/hush.sock"  # Must match heyvox.constants.HUSH_SOCK
+_TMP: str = os.environ.get("TMPDIR", "/tmp").rstrip("/")
+SOCKET_PATH: str = f"{_TMP}/hush.sock"
 TCP_HOST: str = "127.0.0.1"
 TCP_PORT: int = 9847
-LOG_PATH: str = "/tmp/hush.log"  # Must match heyvox.constants.HUSH_LOG
+LOG_PATH: str = f"{_TMP}/hush.log"
 LOG_MAX_BYTES: int = 1_048_576  # 1 MB
 LOG_BACKUP_COUNT: int = 2
 CHROME_RESPONSE_TIMEOUT: float = 3.0  # seconds

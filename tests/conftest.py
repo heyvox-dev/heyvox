@@ -19,7 +19,8 @@ def _blackhole_available() -> bool:
 
 def _vox_running() -> bool:
     """Check if heyvox process is running."""
-    return os.path.exists("/tmp/heyvox.pid")
+    from heyvox.constants import HEYVOX_PID_FILE
+    return os.path.exists(HEYVOX_PID_FILE)
 
 
 # Markers for conditional test skipping

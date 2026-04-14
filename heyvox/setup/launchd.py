@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from heyvox.constants import LAUNCHD_LABEL
+from heyvox.constants import LAUNCHD_LABEL, LOG_FILE_DEFAULT
 
 
 PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -63,9 +63,9 @@ def write_plist() -> Path:
     <key>ThrottleInterval</key>
     <integer>5</integer>
     <key>StandardOutPath</key>
-    <string>/tmp/heyvox.log</string>
+    <string>{LOG_FILE_DEFAULT}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/heyvox.log</string>
+    <string>{LOG_FILE_DEFAULT}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
