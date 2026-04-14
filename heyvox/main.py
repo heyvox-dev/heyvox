@@ -551,7 +551,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             interval_secs=config.wake_words.negatives_interval_secs,
             sample_rate=sample_rate,
         )
-        log(f"Negative mining enabled → {neg_dir} (max {config.wake_words.negatives_max_clips} clips)")
+        log(f"Training mining enabled → negatives: {neg_dir}, positives: {os.path.join(os.path.dirname(neg_dir), 'positives')} (max {config.wake_words.negatives_max_clips} clips each)")
 
     # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
     # so the first words of the command aren't clipped.
@@ -997,6 +997,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 if s > active_threshold:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
+                        # Save confirmed positive for training
+                        if _neg_collector is not None and not _is_rec:
+                            _neg_collector.save_positive(s)
                         last_trigger = now
                         # D-05: If TTS is playing (echo_safe mode), interrupt it and start recording
                         if _tts_active and _echo_safe and not _is_rec:

@@ -1,12 +1,13 @@
 """
-Passive hard negative mining for wake word training.
+Passive training data mining for wake word improvement.
 
-Saves audio clips that contain speech but are NOT the wake word.
-These clips come from the user's real environment and are the most
-valuable negatives for reducing false positives.
+Collects two types of clips during normal wake word operation:
+  - **Negatives**: speech that is NOT the wake word (score 0.1–0.7)
+  - **Positives**: confirmed wake word triggers (score > threshold)
 
 Clips are saved as 2-second 16kHz mono WAVs with naming:
     neg_YYYYMMDD_HHMMSS_score0.42.wav
+    pos_YYYYMMDD_HHMMSS_score0.95.wav
 
 Enable via config:
     wake_words:
@@ -119,7 +120,59 @@ class NegativeCollector:
         if to_remove:
             logger.debug("Pruned %d oldest negative clips", len(to_remove))
 
+    def save_positive(self, score: float) -> bool:
+        """Save the current audio buffer as a confirmed positive (wake word trigger).
+
+        Call this when the wake word triggers — the buffer contains the audio
+        that caused the trigger, which is a valuable real-world positive sample.
+
+        Args:
+            score: The wake word score that caused the trigger.
+
+        Returns:
+            True if a clip was saved.
+        """
+        if self._buffer_samples < self._clip_samples:
+            return False
+
+        audio = np.concatenate(self._audio_buffer)[-self._clip_samples:]
+        rms = int(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        if rms < _MIN_SPEECH_RMS:
+            return False
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"pos_{timestamp}_score{score:.2f}.wav"
+        pos_dir = self._dir.parent / "positives"
+        pos_dir.mkdir(parents=True, exist_ok=True)
+        filepath = pos_dir / filename
+
+        try:
+            import soundfile as sf
+            sf.write(str(filepath), audio, self._sample_rate)
+            logger.debug("Saved positive clip: %s (rms=%d, score=%.2f)", filename, rms, score)
+        except Exception:
+            logger.warning("Failed to save positive clip", exc_info=True)
+            return False
+
+        # Prune oldest positives if over limit
+        clips = sorted(pos_dir.glob("pos_*.wav"))
+        if len(clips) > self._max_clips:
+            for clip in clips[: len(clips) - self._max_clips]:
+                try:
+                    clip.unlink()
+                except OSError:
+                    pass
+        return True
+
     @property
     def clip_count(self) -> int:
         """Number of collected negative clips."""
         return len(list(self._dir.glob("neg_*.wav")))
+
+    @property
+    def positive_count(self) -> int:
+        """Number of collected positive clips."""
+        pos_dir = self._dir.parent / "positives"
+        if not pos_dir.exists():
+            return 0
+        return len(list(pos_dir.glob("pos_*.wav")))
