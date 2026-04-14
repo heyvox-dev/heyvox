@@ -47,6 +47,7 @@ _WAKE_WORD_PHRASES: dict[str, list[str]] = {
         "hey docs", "hey, docs",
         "hey locks", "hey, locks",
         "hey socks", "hey, socks",
+        "he walks", "he vox", "he box",  # "hey vox" without the y
         "vox", "vox.",
     ],
 }
@@ -125,7 +126,8 @@ def strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
     phrases = set()
     for model in (start_model, stop_model):
         # Strip version suffix: "hey_jarvis_v0.1" → "hey_jarvis"
-        base = model.rsplit("_v", 1)[0] if "_v" in model else model
+        # Only strip _v followed by a digit to avoid mangling names like "hey_vox"
+        base = re.sub(r'_v\d[\d.]*$', '', model)
         if base in _WAKE_WORD_PHRASES:
             phrases.update(_WAKE_WORD_PHRASES[base])
         # Also add the raw model name as a phrase (underscores → spaces)
