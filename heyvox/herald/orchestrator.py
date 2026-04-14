@@ -317,22 +317,23 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
     """
     if not cfg.workspace_app_name:
         return False
+    app_lower = cfg.workspace_app_name.lower()
     try:
         import AppKit  # type: ignore
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if app is None:
             return False
-        return app.localizedName() == cfg.workspace_app_name
+        return app.localizedName().lower() == app_lower
     except Exception:
         pass
-    # Fallback: osascript
+    # Fallback: osascript (System Events returns lowercase process names)
     try:
         r = subprocess.run(
             ["osascript", "-e",
              "tell application \"System Events\" to get name of first application process whose frontmost is true"],
             capture_output=True, text=True, timeout=3.0,
         )
-        return r.stdout.strip() == cfg.workspace_app_name
+        return r.stdout.strip().lower() == app_lower
     except Exception:
         return False
 
