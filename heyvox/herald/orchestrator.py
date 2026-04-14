@@ -769,6 +769,15 @@ class HeraldOrchestrator:
                 cfg.orch_pid_file.unlink(missing_ok=True)
         except OSError:
             pass
+        # Release singleton lock
+        lock_fd = getattr(self, "_lock_fd", None)
+        if lock_fd:
+            try:
+                import fcntl
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except OSError:
+                pass
         cfg.playing_pid_file.unlink(missing_ok=True)
         cfg.play_next_flag.unlink(missing_ok=True)
         try:
@@ -785,6 +794,18 @@ class HeraldOrchestrator:
         # Ensure runtime directories exist
         for d in (cfg.queue_dir, cfg.hold_dir, cfg.history_dir, cfg.claim_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+        # Singleton lock: only one orchestrator can run at a time.
+        # fcntl.flock is atomic — no race between check and acquire.
+        import fcntl
+        lock_path = str(cfg.orch_pid_file) + ".lock"
+        self._lock_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            _herald_log("ORCH: another orchestrator holds the lock — exiting", debug_log)
+            self._lock_fd.close()
+            return
 
         # Write PID file
         try:
