@@ -14,7 +14,11 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from heyvox.audio import tts
-from heyvox.constants import HERALD_MUTE_FLAG, VERBOSITY_FILE, TTS_STYLE_FILE
+from heyvox.constants import (
+    HERALD_MUTE_FLAG,
+    VERBOSITY_FILE,
+    TTS_STYLE_FILE,
+)
 
 
 class TestSystemMuteDetection(unittest.TestCase):
@@ -78,7 +82,7 @@ class TestIsMuted(unittest.TestCase):
         assert tts.is_muted() is True
 
     @patch("heyvox.audio.tts._is_system_muted", return_value=False)
-    def test_muted_by_file_flag(self, _):
+    def test_muted_by_herald_flag(self, _):
         open(HERALD_MUTE_FLAG, "w").close()
         assert tts.is_muted() is True
 
@@ -168,6 +172,7 @@ class TestVerbosityFileSync(unittest.TestCase):
         """'skip' verbosity should also create mute flags for Herald."""
         tts.set_verbosity("skip")
         assert tts._muted is True
+        assert os.path.exists(HERALD_MUTE_FLAG)
         assert os.path.exists(HERALD_MUTE_FLAG)
 
     def test_set_full_clears_mute_flags(self):
@@ -286,7 +291,8 @@ class TestTtsThreadSafety(unittest.TestCase):
         tts._muted = False
         tts._verbosity = tts.Verbosity.FULL
         tts._style = "detailed"
-        for f in [VERBOSITY_FILE, TTS_STYLE_FILE, HERALD_MUTE_FLAG]:
+        for f in [VERBOSITY_FILE, TTS_STYLE_FILE,
+                  HERALD_MUTE_FLAG]:
             try:
                 os.remove(f)
             except FileNotFoundError:
