@@ -771,11 +771,11 @@ class HeraldOrchestrator:
             pass
         # Release singleton lock
         lock_fd = getattr(self, "_lock_fd", None)
-        if lock_fd:
+        if lock_fd is not None:
             try:
                 import fcntl
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                lock_fd.close()
+                fcntl.lockf(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
             except OSError:
                 pass
         cfg.playing_pid_file.unlink(missing_ok=True)
@@ -796,15 +796,17 @@ class HeraldOrchestrator:
             d.mkdir(parents=True, exist_ok=True)
 
         # Singleton lock: only one orchestrator can run at a time.
-        # fcntl.flock is atomic — no race between check and acquire.
+        # Use lockf (POSIX record locks via fcntl F_SETLK) — more reliable on
+        # macOS than BSD flock() which failed under simultaneous spawns.
         import fcntl
         lock_path = str(cfg.orch_pid_file) + ".lock"
-        self._lock_fd = open(lock_path, "w")
+        self._lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             _herald_log("ORCH: another orchestrator holds the lock — exiting", debug_log)
-            self._lock_fd.close()
+            os.close(self._lock_fd)
+            self._lock_fd = None
             return
 
         # Write PID file

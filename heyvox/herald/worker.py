@@ -178,17 +178,33 @@ def _ensure_orchestrator() -> None:
     """Start the Herald orchestrator if it isn't already running.
 
     Called after each successful WAV generation so the queue is always drained.
-    Uses a PID file check to avoid spawning duplicates.
+    Uses flock to prevent multiple simultaneous spawns (TOCTOU-safe).
     """
-    if os.path.exists(HERALD_ORCH_PID):
-        try:
-            pid = int(open(HERALD_ORCH_PID).read().strip())
-            os.kill(pid, 0)
-            return  # Already running
-        except (OSError, ValueError):
-            pass  # Stale PID file — start a new one
+    import fcntl
+
+    lock_path = HERALD_ORCH_PID + ".lock"
+    try:
+        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    except OSError:
+        return  # Can't open lock file — skip
 
     try:
+        # Non-blocking exclusive lock — if another worker is already spawning, bail
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        return  # Another worker is handling the spawn
+
+    try:
+        # Re-check PID while holding the lock (no TOCTOU race now)
+        if os.path.exists(HERALD_ORCH_PID):
+            try:
+                pid = int(open(HERALD_ORCH_PID).read().strip())
+                os.kill(pid, 0)
+                return  # Already running
+            except (OSError, ValueError):
+                pass  # Stale PID file — start a new one
+
         subprocess.Popen(
             [sys.executable, "-m", "heyvox.herald.cli", "orchestrator"],
             stdin=subprocess.DEVNULL,
@@ -199,6 +215,10 @@ def _ensure_orchestrator() -> None:
         log.info("Auto-started Herald orchestrator")
     except Exception as exc:
         log.warning("Failed to auto-start orchestrator: %s", exc)
+    finally:
+        # Release lock — the orchestrator's own flock in run() takes over
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 # ---------------------------------------------------------------------------

@@ -375,12 +375,22 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
 
     # Step 0: For apps with workspace detection, switch back to the workspace
     # that was active when recording started (before activating the app).
+    # CRITICAL: Only switch if the current workspace differs from the snapshot.
+    # Unnecessary switches click the sidebar, stealing focus from the text input
+    # and causing paste to go nowhere.
     if snap.detected_workspace and config is not None:
         profile = config.get_app_profile(snap.app_name)
         if profile:
-            _log(f"restore: switching {profile.name} to workspace '{snap.detected_workspace}'")
-            _switch_app_workspace(snap.detected_workspace, profile)
-            _time.sleep(profile.settle_delay)
+            current_ws = _detect_app_workspace(snap.app_pid, profile)
+            if current_ws and current_ws == snap.detected_workspace:
+                _log(f"restore: already on workspace '{current_ws}', skipping switch")
+                snap._workspace_switched = False
+            else:
+                _log(f"restore: switching {profile.name} to workspace "
+                     f"'{snap.detected_workspace}' (current='{current_ws}')")
+                _switch_app_workspace(snap.detected_workspace, profile)
+                _time.sleep(profile.settle_delay)
+                snap._workspace_switched = True
 
     # Step 1: Activate the app (skip if already frontmost)
     if _already_frontmost:
