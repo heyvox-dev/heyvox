@@ -141,13 +141,19 @@ def strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
     # --- Pass 1: Exact phrase matching (handles known variants) ---
     stripped = False
 
-    # Strip from end first (stop wake word)
-    for phrase in sorted_phrases:
-        lower = cleaned.lower().rstrip(" .,!?")
-        if lower.endswith(phrase):
-            idx = len(cleaned.rstrip(" .,!?")) - len(phrase)
-            cleaned = cleaned[:idx].rstrip(" .,!?")
-            stripped = True
+    # Strip from end (stop wake word) — repeat to catch multiple trailing instances
+    # e.g. "some text. Hey box. Hey box" when detector misses first attempts
+    for _ in range(5):  # Cap iterations to avoid infinite loop
+        matched = False
+        for phrase in sorted_phrases:
+            lower = cleaned.lower().rstrip(" .,!?")
+            if lower.endswith(phrase):
+                idx = len(cleaned.rstrip(" .,!?")) - len(phrase)
+                cleaned = cleaned[:idx].rstrip(" .,!?")
+                stripped = True
+                matched = True
+                break
+        if not matched:
             break
 
     # Strip from start (start wake word — happens with toggle mode)
