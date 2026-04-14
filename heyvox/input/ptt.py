@@ -74,7 +74,8 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     def callback(proxy, event_type, event, refcon):
         nonlocal ptt_held, _last_keydown_time, _stop_in_progress
 
-        # Handle Escape key
+        # Handle Escape key — consume it (return None) when HeyVox acts on it,
+        # so it doesn't propagate to the foreground app (e.g. exit fullscreen).
         if event_type == Quartz.kCGEventKeyDown:
             _last_keydown_time = time.time()
             keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
@@ -84,15 +85,18 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
                     if cancel_t:
                         cancel_t()
                     _log("Escape: cancelling transcription")
+                    return None  # consume — don't pass to app
                 elif callbacks.get("is_recording", lambda: False)():
                     cancel_r = callbacks.get("on_cancel_recording")
                     if cancel_r:
                         cancel_r()
+                    return None  # consume — don't pass to app
                 elif callbacks.get("is_speaking", lambda: False)():
                     cancel_tts = callbacks.get("on_cancel_tts")
                     if cancel_tts:
                         cancel_tts()
                     _log("Escape: stopping TTS")
+                    return None  # consume — don't pass to app
             return event
 
         # Only process modifier flag changes for PTT
@@ -139,10 +143,13 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
         Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged) |
         Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
     )
+    # kCGEventTapOptionDefault (not ListenOnly) so we can consume Escape
+    # when HeyVox handles it — prevents it from reaching the foreground app
+    # (e.g. Conductor exiting fullscreen).
     tap = Quartz.CGEventTapCreate(
         Quartz.kCGSessionEventTap,
         Quartz.kCGHeadInsertEventTap,
-        Quartz.kCGEventTapOptionListenOnly,
+        Quartz.kCGEventTapOptionDefault,
         mask,
         callback,
         None,
