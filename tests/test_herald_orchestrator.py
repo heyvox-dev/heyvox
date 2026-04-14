@@ -583,8 +583,9 @@ class TestHeraldOrchestratorLifecycle:
 
     def test_default_config_used_when_none(self):
         """HeraldOrchestrator() with no args uses OrchestratorConfig defaults."""
+        from heyvox.constants import HERALD_QUEUE_DIR
         orch = HeraldOrchestrator()
-        assert orch.cfg.queue_dir == Path("/tmp/herald-queue")
+        assert orch.cfg.queue_dir == Path(HERALD_QUEUE_DIR)
 
     def test_custom_config_used(self, tmp_path):
         """HeraldOrchestrator(config=...) uses provided config."""

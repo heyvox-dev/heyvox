@@ -88,7 +88,8 @@ def _find_blackhole_device_id() -> int | None:
 def read_vox_log(since_time: float) -> list[str]:
     """Read heyvox log lines since a given timestamp."""
     # Check both possible log paths (config may override default)
-    log_path = "/tmp/vox.log" if os.path.exists("/tmp/vox.log") else "/tmp/heyvox.log"
+    from heyvox.constants import LOG_FILE_DEFAULT
+    log_path = LOG_FILE_DEFAULT
     if not os.path.exists(log_path):
         return []
     lines = []
