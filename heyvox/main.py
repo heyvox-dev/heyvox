@@ -589,6 +589,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Silence timeout: tracks when user first speaks during recording
     _first_speech_time: float = 0.0
     _is_rec: bool = False
+    _last_model_reset: float = 0.0  # Periodic model reset during recording
 
     def _hud_ensure_connected() -> None:
         """Attempt periodic reconnect if the HUD connection was lost."""
@@ -757,9 +758,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # Feed pre-roll buffer when idle -- captures audio before wake word
                     _preroll_buffer.append(audio.copy())
 
-            # Reset first-speech tracker when recording starts
+            # Reset first-speech tracker and model reset timer when recording starts
             if _is_rec and not _was_rec:
                 _first_speech_time = 0.0
+                _last_model_reset = time.time()
 
             # Send live audio level to HUD at ~20fps during recording (HUD-08)
             if _is_rec:
@@ -961,6 +963,15 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 audio = process_mic_frame(audio, sample_rate=sample_rate)
 
             model.predict(audio)
+
+            # Periodic model reset during recording — clears accumulated speech
+            # features so the stop wake word can be detected even after long
+            # continuous speech (without this, rapid "Hey Vox" after talking
+            # scores below threshold because the feature window is polluted).
+            _MODEL_RESET_INTERVAL = 2.5  # seconds
+            if _is_rec and time.time() - _last_model_reset > _MODEL_RESET_INTERVAL:
+                model.reset()
+                _last_model_reset = time.time()
 
             # Hard negative mining: feed audio and check scores
             if _neg_collector is not None and not _is_rec:
