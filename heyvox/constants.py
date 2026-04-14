@@ -1,12 +1,19 @@
 """Shared constants for the heyvox package."""
 
+import tempfile
+
+# User-scoped temp directory. On macOS this is $TMPDIR (/var/folders/<uid>/...),
+# avoiding /tmp which is shared across all users and can cause permission clashes
+# or sandboxing issues when running as a LaunchAgent.
+_TMP = tempfile.gettempdir()
+
 # IPC flag file: written when recording is active, removed when done.
 # Used by TTS orchestrator to pause playback during recording.
 # Requirement: DECP-04
-RECORDING_FLAG = "/tmp/heyvox-recording"
+RECORDING_FLAG = f"{_TMP}/heyvox-recording"
 
 # Default log file location
-LOG_FILE_DEFAULT = "/tmp/heyvox.log"
+LOG_FILE_DEFAULT = f"{_TMP}/heyvox.log"
 
 # Keep LOG_FILE as alias for backward compatibility within package
 LOG_FILE = LOG_FILE_DEFAULT
@@ -21,7 +28,7 @@ DEFAULT_CHUNK_SIZE = 1280
 # TTS coordination flag (written by TTS process while speaking)
 # Echo suppression reads this to mute the mic during TTS playback in speaker mode.
 # Requirement: AUDIO-09
-TTS_PLAYING_FLAG = "/tmp/heyvox-tts-playing"
+TTS_PLAYING_FLAG = f"{_TMP}/heyvox-tts-playing"
 
 # Ignore TTS flag older than this many seconds.
 # Guards against permanent mic mute if TTS process crashes without cleanup.
@@ -61,12 +68,12 @@ GRACE_BEFORE_MEDIA_RESUME = 1.5  # Pause after TTS ends before resuming YouTube/
 
 # Command file for cross-process CLI control (skip, mute-toggle, quiet, stop)
 # Written by heyvox skip/mute/quiet CLI commands; read and deleted by TTS worker.
-TTS_CMD_FILE = "/tmp/heyvox-tts-cmd"
+TTS_CMD_FILE = f"{_TMP}/heyvox-tts-cmd"
 
 # Verbosity state file — shared across all processes (main, Herald, watcher).
 # Contains one of: full, summary, short, skip.
 # Absent = full (default).
-VERBOSITY_FILE = "/tmp/heyvox-verbosity"
+VERBOSITY_FILE = f"{_TMP}/heyvox-verbosity"
 
 # ---------------------------------------------------------------------------
 # Echo suppression constants (ECHO-01 through ECHO-06)
@@ -101,25 +108,25 @@ AEC_DEFAULT_DELAY_MS = 50
 # ---------------------------------------------------------------------------
 
 # Directory for saving raw audio recordings and debug logs
-STT_DEBUG_DIR = "/tmp/heyvox-debug"
+STT_DEBUG_DIR = f"{_TMP}/heyvox-debug"
 
 # Structured debug log for STT pipeline analysis
-STT_DEBUG_LOG = "/tmp/heyvox-stt-debug.log"
+STT_DEBUG_LOG = f"{_TMP}/heyvox-stt-debug.log"
 
 # ---------------------------------------------------------------------------
 # HUD overlay Unix socket path — single source of truth.
 # Used by HUDClient (sender in main.py/tts.py) and HUDServer (receiver in overlay.py).
 # ipc.py uses its own DEFAULT_SOCKET_PATH as a module-level fallback for standalone use.
 # Requirement: HUD-08
-HUD_SOCKET_PATH = "/tmp/heyvox-hud.sock"
+HUD_SOCKET_PATH = f"{_TMP}/heyvox-hud.sock"
 
 # Active mic name file — written by main.py on startup and device switch.
 # Read by HUD overlay to display the current mic in the menu bar.
-ACTIVE_MIC_FILE = "/tmp/heyvox-active-mic"
+ACTIVE_MIC_FILE = f"{_TMP}/heyvox-active-mic"
 
 # Mic switch request file — written by HUD overlay menu action.
 # Contains the device name substring to switch to. Read and deleted by main.py.
-MIC_SWITCH_REQUEST_FILE = "/tmp/heyvox-mic-switch"
+MIC_SWITCH_REQUEST_FILE = f"{_TMP}/heyvox-mic-switch"
 
 # ---------------------------------------------------------------------------
 # Herald TTS orchestration constants (Phase 7)
@@ -128,79 +135,86 @@ MIC_SWITCH_REQUEST_FILE = "/tmp/heyvox-mic-switch"
 # Herald queue/hold/history directories — WAV files pass through these.
 # Queue: ready to play. Hold: from inactive workspace, held until user idle.
 # History: last 50 played (for debugging).
-HERALD_QUEUE_DIR = "/tmp/herald-queue"
-HERALD_HOLD_DIR = "/tmp/herald-hold"
-HERALD_HISTORY_DIR = "/tmp/herald-history"
-HERALD_CLAIM_DIR = "/tmp/herald-claim"
+HERALD_QUEUE_DIR = f"{_TMP}/herald-queue"
+HERALD_HOLD_DIR = f"{_TMP}/herald-hold"
+HERALD_HISTORY_DIR = f"{_TMP}/herald-history"
+HERALD_CLAIM_DIR = f"{_TMP}/herald-claim"
 
 # Herald log files
-HERALD_DEBUG_LOG = "/tmp/herald-debug.log"
-HERALD_VIOLATIONS_LOG = "/tmp/herald-violations.log"
+HERALD_DEBUG_LOG = f"{_TMP}/herald-debug.log"
+HERALD_VIOLATIONS_LOG = f"{_TMP}/herald-violations.log"
 
 # Herald PID files
-HERALD_ORCH_PID = "/tmp/herald-orchestrator.pid"
-HERALD_PLAYING_PID = "/tmp/herald-playing.pid"
+HERALD_ORCH_PID = f"{_TMP}/herald-orchestrator.pid"
+HERALD_PLAYING_PID = f"{_TMP}/herald-playing.pid"
 
 # Herald state flag files
-HERALD_PAUSE_FLAG = "/tmp/herald-pause"
-HERALD_MUTE_FLAG = "/tmp/herald-mute"
-HERALD_MODE_FILE = "/tmp/herald-mode"
-HERALD_LAST_PLAY = "/tmp/herald-last-play"
-HERALD_PLAY_NEXT = "/tmp/herald-play-next"
+HERALD_PAUSE_FLAG = f"{_TMP}/herald-pause"
+HERALD_MUTE_FLAG = f"{_TMP}/herald-mute"
+HERALD_MODE_FILE = f"{_TMP}/herald-mode"
+HERALD_LAST_PLAY = f"{_TMP}/herald-last-play"
+HERALD_PLAY_NEXT = f"{_TMP}/herald-play-next"
 
 # Kokoro TTS daemon IPC — Unix socket + PID file
-KOKORO_DAEMON_SOCK = "/tmp/kokoro-daemon.sock"
-KOKORO_DAEMON_PID = "/tmp/kokoro-daemon.pid"
+KOKORO_DAEMON_SOCK = f"{_TMP}/kokoro-daemon.sock"
+KOKORO_DAEMON_PID = f"{_TMP}/kokoro-daemon.pid"
 
 # ---------------------------------------------------------------------------
 # Core process files (IPC-01)
 # ---------------------------------------------------------------------------
 
-HEYVOX_PID_FILE = "/tmp/heyvox.pid"
-HEYVOX_HEARTBEAT_FILE = "/tmp/heyvox-heartbeat"
-HEYVOX_RESTART_LOG = "/tmp/heyvox-restart.log"
+HEYVOX_PID_FILE = f"{_TMP}/heyvox.pid"
+HEYVOX_HEARTBEAT_FILE = f"{_TMP}/heyvox-heartbeat"
+HEYVOX_RESTART_LOG = f"{_TMP}/heyvox-restart.log"
+
+# ---------------------------------------------------------------------------
+# Legacy compatibility (v1.0 claude-tts paths)
+# ---------------------------------------------------------------------------
+
+CLAUDE_TTS_MUTE_FLAG = f"{_TMP}/claude-tts-mute"
+CLAUDE_TTS_PLAYING_PID = f"{_TMP}/claude-tts-playing.pid"
 
 # ---------------------------------------------------------------------------
 # Herald workspace/ambient (IPC-01)
 # ---------------------------------------------------------------------------
 
-HERALD_AMBIENT_FLAG = "/tmp/herald-ambient"
-HERALD_WORKSPACE_FILE = "/tmp/herald-workspace"
-HERALD_ORIGINAL_VOL_FILE = "/tmp/herald-original-vol"
-HERALD_GENERATING_WAV_PREFIX = "/tmp/herald-generating-"
-HERALD_WATCHER_PID = "/tmp/herald-watcher.pid"
-HERALD_WATCHER_HANDLED_DIR = "/tmp/herald-watcher-handled"
-HERALD_MEDIA_PAUSED_PREFIX = "/tmp/herald-media-paused-"
+HERALD_AMBIENT_FLAG = f"{_TMP}/herald-ambient"
+HERALD_WORKSPACE_FILE = f"{_TMP}/herald-workspace"
+HERALD_ORIGINAL_VOL_FILE = f"{_TMP}/herald-original-vol"
+HERALD_GENERATING_WAV_PREFIX = f"{_TMP}/herald-generating-"
+HERALD_WATCHER_PID = f"{_TMP}/herald-watcher.pid"
+HERALD_WATCHER_HANDLED_DIR = f"{_TMP}/herald-watcher-handled"
+HERALD_MEDIA_PAUSED_PREFIX = f"{_TMP}/herald-media-paused-"
 
 # ---------------------------------------------------------------------------
 # HUD files (IPC-01)
 # ---------------------------------------------------------------------------
 
-HUD_POSITION_FILE = "/tmp/heyvox-hud-position.json"
-HUD_STDERR_LOG = "/tmp/heyvox-hud-stderr.log"
+HUD_POSITION_FILE = f"{_TMP}/heyvox-hud-position.json"
+HUD_STDERR_LOG = f"{_TMP}/heyvox-hud-stderr.log"
 
 # ---------------------------------------------------------------------------
 # TTS style (IPC-01)
 # ---------------------------------------------------------------------------
 
-TTS_STYLE_FILE = "/tmp/heyvox-tts-style"
+TTS_STYLE_FILE = f"{_TMP}/heyvox-tts-style"
 
 # ---------------------------------------------------------------------------
 # Media pause coordination (IPC-01)
 # ---------------------------------------------------------------------------
 
-HEYVOX_MEDIA_PAUSED_REC = "/tmp/heyvox-media-paused-rec"
-HEYVOX_MEDIA_PAUSED_PREFIX = "/tmp/heyvox-media-paused-"
+HEYVOX_MEDIA_PAUSED_REC = f"{_TMP}/heyvox-media-paused-rec"
+HEYVOX_MEDIA_PAUSED_PREFIX = f"{_TMP}/heyvox-media-paused-"
 
 # ---------------------------------------------------------------------------
 # Hush (browser media control) (IPC-01)
 # ---------------------------------------------------------------------------
 
-HUSH_SOCK = "/tmp/hush.sock"
-HUSH_LOG = "/tmp/hush.log"
+HUSH_SOCK = f"{_TMP}/hush.sock"
+HUSH_LOG = f"{_TMP}/hush.log"
 
 # ---------------------------------------------------------------------------
 # Atomic state file (IPC-02)
 # ---------------------------------------------------------------------------
 
-HEYVOX_STATE_FILE = "/tmp/heyvox-state.json"
+HEYVOX_STATE_FILE = f"{_TMP}/heyvox-state.json"

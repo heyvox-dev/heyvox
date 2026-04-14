@@ -29,8 +29,11 @@ import wave
 
 import numpy as np
 
-SOCKET_PATH = "/tmp/kokoro-daemon.sock"  # Must match heyvox.constants.KOKORO_DAEMON_SOCK
-PID_FILE = "/tmp/kokoro-daemon.pid"  # Must match heyvox.constants.KOKORO_DAEMON_PID
+# User-scoped temp dir — matches heyvox.constants._TMP (cannot import package here).
+_TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
+
+SOCKET_PATH = f"{_TMP}/kokoro-daemon.sock"  # Must match heyvox.constants.KOKORO_DAEMON_SOCK
+PID_FILE = f"{_TMP}/kokoro-daemon.pid"  # Must match heyvox.constants.KOKORO_DAEMON_PID
 IDLE_TIMEOUT = int(os.environ.get("KOKORO_IDLE_TIMEOUT", "300"))
 
 # Legacy kokoro-onnx paths (used for fallback)
@@ -317,7 +320,7 @@ def handle_client(conn, model):
         voice = request.get("voice", "af_sarah")
         lang = request.get("lang", "en-us")
         speed = request.get("speed", 1.2)
-        output = request.get("output", "/tmp/kokoro-out.wav")
+        output = request.get("output", f"{_TMP}/kokoro-out.wav")
 
         if not text:
             response = {"ok": False, "error": "empty text"}
@@ -374,14 +377,21 @@ def main():
 
     model = load_model()
 
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCKET_PATH)
+    try:
+        server.bind(SOCKET_PATH)
+    except OSError as e:
+        log(f"Cannot bind {SOCKET_PATH}: {e} — another daemon may be running")
+        server.close()
+        return
     server.listen(2)
     server.settimeout(5.0)
     os.chmod(SOCKET_PATH, 0o600)
+
+    # Write PID file AFTER successful bind to avoid stale PID from a
+    # second daemon that crashes on bind (race condition → HUD shows "crashed")
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
 
     log(f"Listening on {SOCKET_PATH} (engine={ENGINE}, idle timeout: {IDLE_TIMEOUT}s)")
 

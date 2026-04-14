@@ -26,13 +26,16 @@ import socket as _socket
 import subprocess
 import time
 
+# User-scoped temp dir — matches heyvox.constants._TMP (cannot import package here).
+_TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
+
 
 def _log(msg: str) -> None:
     """Write to main vox log file (same as main.py's log())."""
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [media] {msg}\n"
     try:
-        with open(os.environ.get("VOX_LOG_FILE", "/tmp/heyvox.log"), "a") as f:
+        with open(os.environ.get("VOX_LOG_FILE", f"{_TMP}/heyvox.log"), "a") as f:
             f.write(line)
     except OSError:
         pass
@@ -45,7 +48,7 @@ _MR_PAUSE = 1
 # The TTS orchestrator uses /tmp/heyvox-media-paused-orch separately.
 # Contents: "hush" (Hush extension), "mr" (MediaRemote), "chrome-js" (Chrome JS),
 #           "media-key" (media key toggle)
-_PAUSE_FLAG = "/tmp/heyvox-media-paused-rec"  # Must match heyvox.constants.HEYVOX_MEDIA_PAUSED_REC
+_PAUSE_FLAG = f"{_TMP}/heyvox-media-paused-rec"  # Must match heyvox.constants.HEYVOX_MEDIA_PAUSED_REC
 
 # Lazy-loaded framework handle
 _mr_lib = None
@@ -68,7 +71,7 @@ _VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com"]
 # Hush (Chrome extension) integration
 # ---------------------------------------------------------------------------
 
-_HUSH_SOCK = "/tmp/hush.sock"  # Must match heyvox.constants.HUSH_SOCK
+_HUSH_SOCK = f"{_TMP}/hush.sock"  # Must match heyvox.constants.HUSH_SOCK
 
 
 def _hush_command(action: str, **kwargs) -> dict | None:
@@ -467,7 +470,7 @@ def resume_media() -> bool:
         pass
 
     # Don't actually resume if another caller (orchestrator) still has it paused
-    other_flags = [f for f in glob.glob("/tmp/heyvox-media-paused-*") if f != _PAUSE_FLAG]
+    other_flags = [f for f in glob.glob(f"{_TMP}/heyvox-media-paused-*") if f != _PAUSE_FLAG]
     if other_flags:
         _log(f"resume_media: other pause flags exist {other_flags}, not resuming")
         return False

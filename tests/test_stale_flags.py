@@ -8,16 +8,24 @@ Covers bug-audit patterns:
 """
 
 import os
+import tempfile
 import unittest
 
+from heyvox.constants import (
+    RECORDING_FLAG,
+    TTS_PLAYING_FLAG,
+    CLAUDE_TTS_MUTE_FLAG,
+    HERALD_MUTE_FLAG,
+    VERBOSITY_FILE,
+)
 
 # Flags that main.py cleans up on startup
 STARTUP_CLEANUP_FLAGS = [
-    "/tmp/heyvox-recording",
-    "/tmp/heyvox-tts-playing",
-    "/tmp/claude-tts-mute",
-    "/tmp/herald-mute",
-    "/tmp/heyvox-verbosity",
+    RECORDING_FLAG,
+    TTS_PLAYING_FLAG,
+    CLAUDE_TTS_MUTE_FLAG,
+    HERALD_MUTE_FLAG,
+    VERBOSITY_FILE,
 ]
 
 
@@ -26,7 +34,7 @@ class TestStaleFlagCleanup(unittest.TestCase):
 
     def test_recording_flag_removed(self):
         """Recording flag from crashed session should be removable."""
-        flag = "/tmp/heyvox-recording"
+        flag = RECORDING_FLAG
         open(flag, "w").close()
         assert os.path.exists(flag)
         os.remove(flag)
@@ -34,7 +42,7 @@ class TestStaleFlagCleanup(unittest.TestCase):
 
     def test_mute_flags_removed(self):
         """Mute flags from previous session should be removable."""
-        for flag in ["/tmp/claude-tts-mute", "/tmp/herald-mute"]:
+        for flag in [CLAUDE_TTS_MUTE_FLAG, HERALD_MUTE_FLAG]:
             open(flag, "w").close()
             assert os.path.exists(flag)
             os.remove(flag)
@@ -51,7 +59,7 @@ class TestStaleFlagCleanup(unittest.TestCase):
 
     def test_verbosity_file_removed(self):
         """Verbosity file should be removable for clean default."""
-        flag = "/tmp/heyvox-verbosity"
+        flag = VERBOSITY_FILE
         with open(flag, "w") as f:
             f.write("skip")
         assert os.path.exists(flag)
@@ -64,7 +72,8 @@ class TestFlagAtomicity(unittest.TestCase):
 
     def test_active_mic_atomic_write(self):
         """Writing mic name should be atomic (temp + rename)."""
-        mic_file = "/tmp/heyvox-test-atomic"
+        _tmp = tempfile.gettempdir()
+        mic_file = f"{_tmp}/heyvox-test-atomic"
         tmp_file = mic_file + ".tmp"
         try:
             # This is the atomic write pattern used in overlay.py
@@ -85,7 +94,8 @@ class TestFlagAtomicity(unittest.TestCase):
         """Atomic rename ensures readers never see partial writes."""
         import threading
 
-        mic_file = "/tmp/heyvox-test-atomic-concurrent"
+        _tmp = tempfile.gettempdir()
+        mic_file = f"{_tmp}/heyvox-test-atomic-concurrent"
         results = []
         errors = []
 
