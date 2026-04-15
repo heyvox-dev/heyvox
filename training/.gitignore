@@ -1,0 +1,5 @@
+# Training data (large binary files)
+data/
+negatives_real/
+recordings_friends/
+output/
