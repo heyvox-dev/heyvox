@@ -156,6 +156,7 @@ class RecordingStateMachine:
         self.config = config
         self._log = log_fn
         self._hud_send = hud_send
+        self.training_collector = None  # Set by main.py when collect_negatives is enabled
 
     def start(self, ptt: bool = False, preroll=None) -> None:
         """Begin a recording session.
@@ -503,6 +504,9 @@ class RecordingStateMachine:
                 sample_rate=self.config.audio.sample_rate,
             )
             elapsed = time.time() - t0
+            # Snapshot audio tail for training data before clearing
+            _training_chunks = list(audio_chunks) if self.training_collector else []
+            _training_sr = self.config.audio.sample_rate
             # Free audio chunks immediately — no longer needed after transcription
             audio_chunks.clear()
 
@@ -550,6 +554,9 @@ class RecordingStateMachine:
             # Quality filter: discard garbled/nonsensical STT output
             if text and is_garbled(text):
                 self._log(f"FILTER: Discarding garbled transcription: {text[:80]}")
+                # Training: save as false positive (trigger led to garbled output)
+                if self.training_collector and _training_chunks:
+                    self.training_collector.save_fp(_training_chunks, _training_sr, reason="garbled")
                 cues_dir = get_cues_dir(self.config.cues_dir)
                 audio_cue("paused", cues_dir)
                 return
@@ -615,8 +622,15 @@ class RecordingStateMachine:
             # Strip wake word phrases from transcription (start and end)
             pre_strip = text
             text = strip_wake_words(text, self.config.wake_words.start, self.config.wake_words.stop)
-            if text != pre_strip:
+            _wake_word_stripped = text != pre_strip
+            if _wake_word_stripped:
                 self._log(f"Wake word strip: '{pre_strip[:80]}' -> '{text[:80]}'")
+                # Training: STT found wake word in recording tail → model missed it (FN-stop)
+                if self.training_collector and _training_chunks:
+                    self.training_collector.save_fn_stop(_training_chunks, _training_sr)
+            elif self.training_collector and _training_chunks and text and text.strip():
+                # Clean transcription with no wake word remnants → confirmed TP-stop
+                self.training_collector.save_tp_stop(_training_chunks, _training_sr)
 
             # Final debug log entry with full pipeline result
             _save_debug_audio("_final", [], self.config.audio.sample_rate, {
