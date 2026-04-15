@@ -1,0 +1,59 @@
+model_name: hey_vox
+target_phrases:
+  - "hey vox"
+
+# Data generation — 10K synthetic + real recordings injected after
+n_samples: 2000
+n_samples_val: 2000
+n_background_samples: 200
+n_background_samples_val: 40
+tts_batch_size: 50
+
+# Adversarial negatives: confusable phrases to synthesize
+custom_negative_phrases:
+  - "hey fox"
+  - "hey box"
+  - "hey socks"
+  - "hey doc"
+  - "hey docs"
+  - "hey boss"
+  - "hey siri"
+  - "hey rocks"
+  - "hey locks"
+  - "hey blocks"
+  - "a vox"
+  - "the vox"
+  - "hey"
+  - "vox"
+
+# Paths (absolute to avoid CWD issues)
+data_dir: "/Users/work/conductor/workspaces/vox-v2/seattle/training/data"
+output_dir: "/Users/work/conductor/workspaces/vox-v2/seattle/training/output"
+
+# Augmentation
+augmentation:
+  clip_duration: 2.0
+  batch_size: 16
+  rounds: 5
+  background_paths:
+    - "./data/backgrounds"
+  rir_paths:
+    - "./data/rirs"
+
+# Model — conv_attention is the key upgrade over openwakeword MLP
+model:
+  model_type: conv_attention
+  model_size: small
+
+# Training
+steps: 50000
+learning_rate: 0.0001
+weight_decay: 0.01
+label_smoothing: 0.05
+max_negative_weight: 1500.0
+target_fp_per_hour: 0.2
+batch_n_per_class:
+  positive: 50
+  adversarial_negative: 50
+  ACAV100M_sample: 1024
+  background_noise: 50
