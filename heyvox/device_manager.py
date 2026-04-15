@@ -554,6 +554,190 @@ class DeviceManager:
         return True
 
     # -------------------------------------------------------------------------
+    # Bluetooth HFP wait + mic switch
+    # -------------------------------------------------------------------------
+
+    # Non-blocking BT HFP retry state (checked each scan cycle instead of blocking)
+    _bt_hfp_target: str = ""        # device name we're waiting for
+    _bt_hfp_trigger_time: float = 0 # when we first triggered the HFP switch
+    _bt_hfp_attempts: int = 0       # how many re-checks so far
+
+    _BT_HFP_RETRY_INTERVAL = 2.0   # seconds between re-checks
+    _BT_HFP_MAX_ATTEMPTS = 3       # give up after this many
+
+    def _try_switch_to_better_mic(
+        self,
+        target_name: str,
+        current_input_names: set[str],
+        mic_priority: list[str] | None,
+        sample_rate: int,
+        chunk_size: int,
+    ) -> bool:
+        """Try to switch to a higher-priority mic. Handles Bluetooth A2DP→HFP.
+
+        For Bluetooth devices that only show an output device (A2DP mode), we
+        briefly open a mic stream to trigger the profile switch, then return
+        False. On subsequent scan() calls, _continue_bt_hfp_wait() re-checks
+        whether the input device has appeared (non-blocking).
+
+        Returns True if the switch succeeded, False otherwise.
+        """
+        has_input = any(
+            target_name.lower() in n.lower()
+            for n in current_input_names
+        )
+
+        if not has_input:
+            # A2DP mode — trigger HFP switch and schedule non-blocking retries
+            self._log(f"BT device '{target_name}' has no input yet (A2DP), triggering HFP switch...")
+            self._bt_trigger_hfp_switch(target_name, sample_rate, chunk_size)
+            self._bt_hfp_target = target_name
+            self._bt_hfp_trigger_time = time.time()
+            self._bt_hfp_attempts = 0
+            return False
+
+        # Input device exists — proceed with actual switch
+        return self._do_mic_switch(target_name, mic_priority, sample_rate, chunk_size)
+
+    def _bt_trigger_hfp_switch(
+        self, target_name: str, sample_rate: int, chunk_size: int,
+    ) -> None:
+        """Briefly open a mic stream on a BT device to trigger A2DP → HFP switch."""
+        try:
+            _pa = pyaudio.PyAudio()
+            try:
+                for _i in range(_pa.get_device_count()):
+                    _d = _pa.get_device_info_by_index(_i)
+                    if (target_name.lower() in _d['name'].lower()
+                            and _d['maxInputChannels'] > 0):
+                        try:
+                            _s = _pa.open(
+                                format=pyaudio.paInt16, channels=1,
+                                rate=sample_rate, input=True,
+                                input_device_index=_i,
+                                frames_per_buffer=chunk_size,
+                            )
+                            _s.close()
+                        except Exception:
+                            pass
+                        break
+            finally:
+                _pa.terminate()
+        except Exception as e:
+            self._log(f"BT HFP trigger failed: {e}")
+
+    def _continue_bt_hfp_wait(
+        self, mic_priority: list[str] | None, sample_rate: int, chunk_size: int,
+    ) -> bool:
+        """Non-blocking check: has the BT device switched to HFP yet?
+
+        Called from scan() on each cycle. Returns True if the switch completed
+        and mic was switched, False if still waiting or gave up.
+        """
+        if not self._bt_hfp_target:
+            return False
+
+        elapsed = time.time() - self._bt_hfp_trigger_time
+        next_check_at = (self._bt_hfp_attempts + 1) * self._BT_HFP_RETRY_INTERVAL
+
+        if elapsed < next_check_at:
+            return False  # Not time to check yet
+
+        self._bt_hfp_attempts += 1
+
+        # Re-enumerate and look for input device
+        try:
+            _pa = pyaudio.PyAudio()
+            try:
+                has_input = False
+                for _i in range(_pa.get_device_count()):
+                    _d = _pa.get_device_info_by_index(_i)
+                    if (self._bt_hfp_target.lower() in _d['name'].lower()
+                            and _d['maxInputChannels'] > 0):
+                        has_input = True
+                        break
+            finally:
+                _pa.terminate()
+        except Exception as e:
+            self._log(f"BT HFP re-check failed: {e}")
+            has_input = False
+
+        if has_input:
+            self._log(f"BT HFP switch completed after {elapsed:.1f}s — switching mic")
+            target = self._bt_hfp_target
+            self._bt_hfp_target = ""
+            return self._do_mic_switch(
+                target, mic_priority, sample_rate, chunk_size,
+            )
+
+        if self._bt_hfp_attempts >= self._BT_HFP_MAX_ATTEMPTS:
+            self._log(
+                f"BT HFP switch failed after {elapsed:.1f}s / {self._bt_hfp_attempts} attempts "
+                f"— keeping current mic, preserving headset_mode={self.headset_mode}"
+            )
+            self._bt_hfp_target = ""
+            return False
+
+        # Re-trigger in case the first attempt didn't stick
+        self._log(f"BT HFP attempt {self._bt_hfp_attempts}/{self._BT_HFP_MAX_ATTEMPTS} — still no input, re-triggering...")
+        self._bt_trigger_hfp_switch(self._bt_hfp_target, sample_rate, chunk_size)
+        return False
+
+    def _do_mic_switch(
+        self,
+        target_name: str,
+        mic_priority: list[str] | None,
+        sample_rate: int,
+        chunk_size: int,
+    ) -> bool:
+        """Actually switch to a new mic via find_best_mic. Returns True on success."""
+        old_headset_mode = self.headset_mode
+        try:
+            self.stream.stop_stream()
+            self.stream.close()
+        except Exception:
+            pass
+        self.pa.terminate()
+        self.pa = pyaudio.PyAudio()
+        dev_index = find_best_mic(
+            self.pa,
+            mic_priority=mic_priority,
+            sample_rate=sample_rate,
+            chunk_size=chunk_size,
+            require_audio=True,
+        )
+        if dev_index is not None:
+            self.dev_index = dev_index
+            self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
+            self._log(f"Switched to: [{dev_index}] {self.dev_name}")
+            self.stream = open_mic_stream(
+                self.pa, dev_index,
+                sample_rate=sample_rate,
+                chunk_size=chunk_size,
+            )
+            self.headset_mode = detect_headset(self.pa, dev_index)
+            if self.profile_manager:
+                self.active_profile = self.profile_manager.get_profile(self.dev_name)
+            self._log(f"Headset mode: {self.headset_mode}")
+            self._write_active_mic(self.dev_name)
+            device_change_cue(self.dev_name, "input")
+            self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+            return True
+
+        # find_best_mic failed — reopen current device, preserve headset_mode
+        self._log(f"Mic switch failed — preserving headset_mode={old_headset_mode}")
+        self.headset_mode = old_headset_mode
+        try:
+            self.stream = open_mic_stream(
+                self.pa, self.dev_index,
+                sample_rate=sample_rate,
+                chunk_size=chunk_size,
+            )
+        except Exception as e:
+            self._log(f"Failed to reopen current mic: {e}")
+        return False
+
+    # -------------------------------------------------------------------------
     # Hotplug scan
     # -------------------------------------------------------------------------
 
@@ -627,104 +811,9 @@ class DeviceManager:
                     break
 
             if better_available:
-                # For Bluetooth devices, check if the input device exists yet.
-                # Bluetooth headsets connect in A2DP mode (output only). Opening
-                # a mic stream triggers macOS to switch to HFP (bidirectional),
-                # but the switch takes 1-3 seconds. We detect this by checking
-                # if a device with maxInputChannels > 0 exists for the name.
-                bt_target_name = matching[0]  # from the priority scan above
-                bt_has_input = any(
-                    bt_target_name.lower() in n.lower()
-                    for n in current_names  # current_names only has input devices
+                better_available = self._try_switch_to_better_mic(
+                    matching[0], current_names, mic_priority, sample_rate, chunk_size,
                 )
-
-                if not bt_has_input:
-                    # A2DP mode — no input device yet. Briefly open a mic stream
-                    # to trigger the A2DP → HFP switch, then wait and re-check.
-                    self._log(f"Bluetooth device '{bt_target_name}' has no input (A2DP mode), triggering HFP switch...")
-                    _trigger_pa = pyaudio.PyAudio()
-                    for attempt in range(3):
-                        # Try to open the device to trigger the profile switch
-                        for _i in range(_trigger_pa.get_device_count()):
-                            _d = _trigger_pa.get_device_info_by_index(_i)
-                            if bt_target_name.lower() in _d['name'].lower() and _d['maxInputChannels'] > 0:
-                                try:
-                                    _s = _trigger_pa.open(
-                                        format=pyaudio.paInt16, channels=1,
-                                        rate=sample_rate, input=True,
-                                        input_device_index=_i,
-                                        frames_per_buffer=chunk_size,
-                                    )
-                                    _s.close()
-                                except Exception:
-                                    pass
-                                break
-
-                        time.sleep(2)
-                        # Re-enumerate to see if input device appeared
-                        _trigger_pa.terminate()
-                        _trigger_pa = pyaudio.PyAudio()
-                        for _i in range(_trigger_pa.get_device_count()):
-                            _d = _trigger_pa.get_device_info_by_index(_i)
-                            if (bt_target_name.lower() in _d['name'].lower()
-                                    and _d['maxInputChannels'] > 0):
-                                bt_has_input = True
-                                self._log(f"HFP switch completed after {(attempt + 1) * 2}s — input device available")
-                                break
-                        if bt_has_input:
-                            break
-                        self._log(f"HFP switch attempt {attempt + 1}/3 — still no input, retrying...")
-
-                    _trigger_pa.terminate()
-
-                    if not bt_has_input:
-                        self._log(f"Bluetooth HFP switch failed after 6s — keeping current mic, preserving headset_mode")
-                        # Don't downgrade headset_mode — the BT device is connected,
-                        # just temporarily unable to provide input
-                        better_available = False
-
-            if better_available:
-                # HFP mode confirmed (or non-BT device) — proceed with mic switch
-                old_headset_mode = self.headset_mode
-                try:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                except Exception:
-                    pass
-                self.pa.terminate()
-                self.pa = pyaudio.PyAudio()
-                dev_index = find_best_mic(
-                    self.pa,
-                    mic_priority=mic_priority,
-                    sample_rate=sample_rate,
-                    chunk_size=chunk_size,
-                    require_audio=True,
-                )
-                if dev_index is not None:
-                    self.dev_index = dev_index
-                    self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
-                    self._log(f"Switched to: [{dev_index}] {self.dev_name}")
-                    self.stream = open_mic_stream(
-                        self.pa, dev_index,
-                        sample_rate=sample_rate,
-                        chunk_size=chunk_size,
-                    )
-                    self.headset_mode = detect_headset(self.pa, dev_index)
-                    if self.profile_manager:
-                        self.active_profile = self.profile_manager.get_profile(self.dev_name)
-                    self._log(f"Headset mode: {self.headset_mode}")
-                    self._write_active_mic(self.dev_name)
-                    device_change_cue(self.dev_name, "input")
-                    self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
-                else:
-                    # find_best_mic failed even after HFP confirmed — reopen current
-                    self._log(f"Mic switch failed — preserving headset_mode={old_headset_mode}")
-                    self.headset_mode = old_headset_mode
-                    self.stream = open_mic_stream(
-                        self.pa, self.dev_index,
-                        sample_rate=sample_rate,
-                        chunk_size=chunk_size,
-                    )
 
             # Check for manual mic switch request from HUD menu
             if os.path.exists(MIC_SWITCH_REQUEST_FILE):
