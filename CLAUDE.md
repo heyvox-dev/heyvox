@@ -148,3 +148,22 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 - [ ] TTS server on Mac Mini (v2)
 - [ ] Generic app switching in Herald (not just Conductor)
 - [ ] Hold queue cap enforcement
+
+## Defect Log Protocol
+
+Every bug fix, regression, or process gap MUST be logged in `.planning/DEFECT-LOG.md` before committing the fix. This is non-optional — it feeds periodic reviews that improve testing and CI.
+
+### When to log
+- Any bug you fix (even trivial ones — patterns emerge from volume)
+- Any regression (a bug that was fixed before)
+- Any "should have been caught earlier" moment
+- Any error handling gap discovered in production
+
+### What to capture
+Each entry needs: date, category, severity (S1/S2/S3), symptom, root cause, fix, how it was found, and **what would have caught it earlier** (the most important field — this drives process improvement).
+
+### Categories
+`race` | `regression` | `error-handling` | `dead-code` | `platform` | `state-pollution` | `config` | `string-handling` | `timing` | `integration` | `ux`
+
+### Patterns section
+When you see 2+ defects with the same root cause pattern, add it to the "Patterns & Process Gaps" section with a concrete action item.
