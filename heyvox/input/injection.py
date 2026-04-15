@@ -22,7 +22,10 @@ SUBPROCESS_TIMEOUT = 5
 
 def _log(msg: str) -> None:
     """Log to stderr with [injection] prefix."""
-    print(f"[injection] {msg}", file=sys.stderr, flush=True)
+    try:
+        print(f"[injection] {msg}", file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError):
+        pass
 
 
 def _get_frontmost_app() -> str:
@@ -68,7 +71,7 @@ def _hush_send(command: dict) -> dict | None:
             return json.loads(data.strip())
         return None
     except (OSError, json.JSONDecodeError, TimeoutError) as e:
-        print(f"[injection] Hush socket error: {e}", file=sys.stderr)
+        _log(f"Hush socket error: {e}")
         return None
 
 
@@ -76,10 +79,10 @@ def _chrome_type_text(text: str) -> bool:
     """Insert text via the Hush Chrome extension. Returns True on success."""
     resp = _hush_send({"action": "type-text", "text": text})
     if resp and resp.get("ok"):
-        print(f"[injection] Chrome type-text OK (tab: {resp.get('title', '?')})", file=sys.stderr)
+        _log(f"Chrome type-text OK (tab: {resp.get('title', '?')})")
         return True
     if resp and resp.get("error"):
-        print(f"[injection] Chrome type-text failed: {resp['error']}", file=sys.stderr)
+        _log(f"Chrome type-text failed: {resp['error']}")
     return False
 
 
