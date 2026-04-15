@@ -537,21 +537,26 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     last_trigger = 0.0
     consecutive_errors = 0
 
-    # Hard negative mining: passively collect audio clips for wake word training
-    _neg_collector = None
+    # Training data collection: passively collect labeled audio clips (TP/FP/TN/FN)
+    _training_collector = None
     if config.wake_words.collect_negatives:
-        from heyvox.audio.negative_collector import NegativeCollector
+        from heyvox.audio.training_collector import TrainingCollector
         neg_dir = config.wake_words.negatives_dir
         if not neg_dir:
             neg_dir = os.path.join(str(CONFIG_DIR), "negatives")
-        _neg_collector = NegativeCollector(
-            negatives_dir=neg_dir,
-            max_clips=config.wake_words.negatives_max_clips,
-            score_range=tuple(config.wake_words.negatives_score_range),
-            interval_secs=config.wake_words.negatives_interval_secs,
+        # Training collector uses parent of negatives_dir as base (creates tp/fp/tn/fn subdirs)
+        training_base = os.path.join(os.path.dirname(neg_dir), "training")
+        _training_collector = TrainingCollector(
+            base_dir=training_base,
+            max_clips_per_category=config.wake_words.negatives_max_clips,
+            tn_score_range=tuple(config.wake_words.negatives_score_range),
+            tn_interval_secs=config.wake_words.negatives_interval_secs,
             sample_rate=sample_rate,
         )
-        log(f"Training mining enabled → negatives: {neg_dir}, positives: {os.path.join(os.path.dirname(neg_dir), 'positives')} (max {config.wake_words.negatives_max_clips} clips each)")
+        # Pass collector to recording state machine for FP/FN/TP-stop hooks
+        recording.training_collector = _training_collector
+        log(f"Training collector enabled → {training_base} (max {config.wake_words.negatives_max_clips} clips/category)")
+        log(f"  Categories: tp/ fp/ tn/ fn/")
 
     # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
     # so the first words of the command aren't clipped.
@@ -973,14 +978,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 model.reset()
                 _last_model_reset = time.time()
 
-            # Hard negative mining: feed audio and check scores
-            if _neg_collector is not None and not _is_rec:
-                _neg_collector.feed(audio)
+            # Training data: feed audio buffer and save hard negatives (TN)
+            if _training_collector is not None and not _is_rec:
+                _training_collector.feed(audio)
                 _neg_max_score = max(
                     (score[-1] for score in model.prediction_buffer.values()),
                     default=0.0,
                 )
-                _neg_collector.maybe_save(_neg_max_score)
+                _training_collector.save_tn(_neg_max_score)
 
             # ECHO-02: Dynamic threshold in speaker mode
             _speaker_mult = (
@@ -1008,9 +1013,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 if s > active_threshold:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
-                        # Save confirmed positive for training
-                        if _neg_collector is not None and not _is_rec:
-                            _neg_collector.save_positive(s)
+                        # Training data: save TP-start and reclassify recent TN→FN
+                        if _training_collector is not None and not _is_rec:
+                            _training_collector.save_tp_start(s)
+                            reclass = _training_collector.reclassify_fn_start()
+                            if reclass:
+                                log(f"Training: reclassified {reclass} TN→FN (retry pattern)")
                         last_trigger = now
                         # D-05: If TTS is playing (echo_safe mode), interrupt it and start recording
                         if _tts_active and _echo_safe and not _is_rec:
