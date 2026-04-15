@@ -760,6 +760,10 @@ class DeviceManager:
         sample_rate = self.config.audio.sample_rate if self.config else 16000
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
+        # Check pending BT HFP wait (non-blocking, returns early if nothing pending)
+        if self._continue_bt_hfp_wait(mic_priority, sample_rate, chunk_size):
+            return  # Switch completed this cycle
+
         try:
             # PortAudio caches the device list — create a temporary instance
             # to discover newly connected devices (e.g. USB/Bluetooth hotplug).
