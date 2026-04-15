@@ -21,7 +21,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          brew install portaudio
+          brew install portaudio shellcheck
 
       - name: Install package with dev extras
         run: |
@@ -46,3 +46,7 @@ jobs:
       - name: Verify Python imports
         run: |
           python -c "from heyvox.herald import get_herald_home; from heyvox.hush import HUSH_HOME; print('imports ok')"
+
+      - name: Defect guard tests (regression prevention)
+        run: |
+          pytest tests/test_defect_guards.py -v --tb=short

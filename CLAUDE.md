@@ -138,16 +138,18 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 **Existing violations to fix:** There are ~20 places in the codebase that hardcode `"conductor"` checks. These must be migrated to the app profile system before public release. Search for: `"conductor" in`, `conductor_workspace`, `is_conductor`.
 
 ## Pending
-- [ ] Volume control — respect system volume, stop auto-increasing
-- [ ] Pause/resume recording (Escape pauses, second press resumes)
-- [ ] Menu bar state text ("Recording...", "Transcribing...")
-- [ ] Train "Hey Vox" custom wake word
+- [ ] Pause/resume recording (Escape pauses, second press resumes) — cancel works, pause/resume state machine not built
+- [ ] Generic app switching in Herald (not just Conductor) — app profile framework exists, ~15+ hardcoded "conductor" refs remain in injection.py etc.
 - [ ] Evaluate Cohere Transcribe as alternative STT (v2)
-- [ ] Landing page on heyvox.dev
-- [ ] GitHub repo under heyvox org
-- [ ] TTS server on Mac Mini (v2)
-- [ ] Generic app switching in Herald (not just Conductor)
-- [ ] Hold queue cap enforcement
+- [ ] TTS server on Mac Mini (v2) — no remote TTS code yet
+
+## Done (previously pending)
+- [x] Volume control — CoreAudio ducking + restore in herald/coreaudio.py + orchestrator.py
+- [x] Menu bar state text — NSStatusItem title updates in hud/overlay.py (_STATUS_LABELS)
+- [x] Train "Hey Vox" custom wake word — MLP model deployed, conv-attention pipeline + auto-collection in place
+- [x] Landing page on heyvox.dev — docs/index.html + CNAME, served via GitHub Pages
+- [x] GitHub repo under heyvox org — heyvox-dev/heyvox.git remote configured
+- [x] Hold queue cap enforcement — max_queued=10, _enforce_queue_cap() in orchestrator.py
 
 ## Defect Log Protocol
 
