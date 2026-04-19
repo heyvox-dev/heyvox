@@ -870,15 +870,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             # Silence watchdog — two modes:
             # 1) No speech yet: cancel after 5s (false wake word trigger)
-            # 2) After speech: stop+transcribe after silence_timeout (4s), with a
-            #    soft ceiling at _MAX_POST_SPEECH_SECS that force-stops only
-            #    when recent audio is mostly quiet (noisy-mic-no-speech), and
-            #    an absolute ceiling at _ABSOLUTE_MAX_POST_SPEECH_SECS so a
-            #    continuously-active mic can never wedge the pipeline. See
-            #    DEF-038 (soft cap origin) and DEF-049 (active-speech exemption).
+            # 2) After speech: stop+transcribe after silence_timeout (4s)
+            #
+            # The only absolute ceiling on recording is config.max_recording_secs
+            # (5 min by default) — see the cap earlier in this loop. DEF-038 and
+            # DEF-049 previously added a 30 s post-speech hard cap here, but that
+            # cap truncated long dictation mid-sentence and was reverted as DEF-050.
+            # The original DEF-038 noisy-mic scenario (G435 sidetone wedging
+            # herald-pause for up to 5 min) is addressed at the hardware level by
+            # DEF-036's mute-button workaround and at the wake-word level by
+            # DEF-045/DEF-047 VAD gates.
             _NO_SPEECH_CANCEL_SECS = 5.0
-            _MAX_POST_SPEECH_SECS = 30.0
-            _ABSOLUTE_MAX_POST_SPEECH_SECS = 120.0
             if _is_rec and not _is_ptt and silence_timeout > 0:
                 _elapsed = time.time() - ctx.recording_start_time
 
@@ -909,7 +911,6 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # Use percentage of quiet chunks (not single-spike max)
                     # to handle Bluetooth mics with occasional noise spikes.
                     elapsed_since_speech = time.time() - _first_speech_time
-                    quiet_pct = 0.0
                     if elapsed_since_speech > silence_timeout:
                         with ctx.lock:
                             recent_chunks = ctx.audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
@@ -920,31 +921,6 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet), transcribing")
                                 recording.stop()
                                 continue
-                    # Soft ceiling (DEF-038) — if a noisy mic (BT sidetone,
-                    # ambient room) keeps quiet_pct below the silence gate,
-                    # force a transcribe so the pipeline can't wedge
-                    # herald-pause forever.
-                    #
-                    # DEF-049 refinement: don't truncate active dictation.
-                    # The DEF-038 scenario (noisy mic, no actual user speech)
-                    # has quiet_pct somewhere in 0.30-0.84. Genuine long
-                    # dictation shows quiet_pct well below 0.30 (mostly active
-                    # speech). Only force-stop at the soft cap when quiet_pct
-                    # is in the "noisy-but-not-speech" range. An absolute
-                    # hard cap still bounds the worst case.
-                    if elapsed_since_speech > _MAX_POST_SPEECH_SECS:
-                        actively_speaking = quiet_pct < 0.30
-                        if (
-                            elapsed_since_speech > _ABSOLUTE_MAX_POST_SPEECH_SECS
-                            or not actively_speaking
-                        ):
-                            log(
-                                f"Max post-speech duration ({elapsed_since_speech:.0f}s, "
-                                f"{quiet_pct:.0%} quiet, active={actively_speaking}), "
-                                f"forcing transcribe (DEF-038/DEF-049)"
-                            )
-                            recording.stop()
-                            continue
 
             if _is_busy:
                 # Busy flag watchdog -- force-reset if stuck (AUDIO-12)
