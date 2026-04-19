@@ -368,6 +368,71 @@ def test_def050_max_recording_secs_still_enforced():
     )
 
 
+# ---------------------------------------------------------------------------
+# Test 7: User-pinned mic must not be kicked out by AUDIO-13 (DEF-051)
+#
+# When a user manually picks a mic from the HUD menu, `_mic_pinned` is set.
+# AUDIO-13's dead-mic watchdog must respect that pin — otherwise 30 s of
+# idle silence (totally normal when not speaking) fires a reinit, cooldowns
+# the wireless device, and falls back to built-in. Also, `_do_manual_pin`
+# must reset `last_good_audio_time` so a stale countdown from a previous
+# silent mic doesn't immediately fire against the freshly-pinned one.
+# ---------------------------------------------------------------------------
+
+def _read_device_manager_py() -> str:
+    import heyvox
+    path = os.path.join(os.path.dirname(heyvox.__file__), "device_manager.py")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _extract_method_body(src: str, method_name: str) -> str:
+    """Return the body of the named method (text between `def <name>(...):`
+    and the next `def ` / `class ` at the same indent, or EOF)."""
+    m = re.search(rf"^(\s+)def {method_name}\([^)]*\)[^:]*:\n", src, re.MULTILINE)
+    if m is None:
+        return ""
+    start = m.end()
+    indent = m.group(1)
+    end_m = re.search(
+        rf"^(?:{indent}def |class )", src[start:], re.MULTILINE,
+    )
+    return src[start:start + end_m.start()] if end_m else src[start:]
+
+
+def test_def051_audio13_exempts_pinned_mic():
+    """`check_dead_mic_timeout` must bail out when `_mic_pinned` is True."""
+    src = _read_device_manager_py()
+    body = _extract_method_body(src, "check_dead_mic_timeout")
+    assert body, "Could not locate check_dead_mic_timeout body"
+    # The pin check must short-circuit *before* the dead_secs computation.
+    assert re.search(r"if\s+self\._mic_pinned\s*:\s*\n\s+return", body), (
+        "DEF-051: `check_dead_mic_timeout` must early-return when "
+        "`_mic_pinned` is True. Without this, idle silence evicts the "
+        "wireless mic after 30 s and falls back to built-in."
+    )
+
+
+def test_def051_do_manual_pin_resets_audio13_timer():
+    """`_do_manual_pin` must reset `last_good_audio_time` before returning.
+
+    Otherwise a stale timer from a previous silent mic fires AUDIO-13 within
+    seconds of the switch, cooldowning the freshly-pinned wireless device.
+    """
+    src = _read_device_manager_py()
+    body = _extract_method_body(src, "_do_manual_pin")
+    assert body, "Could not locate _do_manual_pin body"
+    assert "last_good_audio_time" in body, (
+        "DEF-051: `_do_manual_pin` must reset `last_good_audio_time` so the "
+        "AUDIO-13 countdown restarts from the pin moment."
+    )
+    # And the counters too — otherwise the diagnostic histogram is wrong.
+    assert "dead_mic_zero_chunks" in body, (
+        "DEF-051: `_do_manual_pin` must also clear `dead_mic_zero_chunks` "
+        "so the AUDIO-13 stream diagnostic reflects only post-pin samples."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).
