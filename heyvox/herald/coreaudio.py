@@ -34,9 +34,14 @@ kAudioObjectPropertyScopeOutput: int = 0x6F757470   # 'outp'
 kAudioObjectPropertyElementMain: int = 0             # kAudioObjectPropertyElementMaster
 
 # Property selectors
-kAudioHardwarePropertyDefaultOutputDevice: int = 0x6465765F  # 'dev_' -> 'dOut' / 'dOut'
+# macOS ≤15 uses 'dout', macOS 26+ uses 'dOut' — detected at runtime below.
+kAudioHardwarePropertyDefaultOutputDevice_legacy: int = 0x646F7574  # 'dout'
+kAudioHardwarePropertyDefaultOutputDevice_new: int = 0x644F7574     # 'dOut'
+# Filled in by _load_coreaudio() via AudioObjectHasProperty probe.
+kAudioHardwarePropertyDefaultOutputDevice: int = kAudioHardwarePropertyDefaultOutputDevice_legacy
 kAudioDevicePropertyVolumeScalar: int = 0x766F6C6D           # 'volm'
 kAudioDevicePropertyMute: int = 0x6D757465                   # 'mute'
+kAudioObjectPropertyElementMaster: int = 0  # alias for clarity with HasProperty probe
 
 # ---------------------------------------------------------------------------
 # CoreAudio structs
@@ -61,8 +66,13 @@ _ca_lock = threading.Lock()
 
 
 def _load_coreaudio() -> ctypes.CDLL | None:
-    """Load the CoreAudio framework (lazy, cached, thread-safe)."""
-    global _ca, _ca_loaded
+    """Load the CoreAudio framework (lazy, cached, thread-safe).
+
+    Also probes the correct FourCC for kAudioHardwarePropertyDefaultOutputDevice.
+    macOS ≤15 uses 'dout'; macOS 26+ uses 'dOut'. Fills in the module-level
+    selector so all subsequent calls use the right one on this system.
+    """
+    global _ca, _ca_loaded, kAudioHardwarePropertyDefaultOutputDevice
     with _ca_lock:
         if _ca_loaded is not None:
             return _ca
@@ -90,8 +100,33 @@ def _load_coreaudio() -> ctypes.CDLL | None:
                 ctypes.c_void_p,  # inData
             ]
             _ca.AudioObjectSetPropertyData.restype = ctypes.c_int32
+            _ca.AudioObjectHasProperty.argtypes = [
+                ctypes.c_uint32, addr_type,
+            ]
+            _ca.AudioObjectHasProperty.restype = ctypes.c_bool
+
+            # Probe which default-output-device selector this macOS supports.
+            # Try the new ('dOut') first since macOS 26+ is now the common case;
+            # fall back to legacy ('dout') for macOS ≤15.
+            for selector in (
+                kAudioHardwarePropertyDefaultOutputDevice_new,
+                kAudioHardwarePropertyDefaultOutputDevice_legacy,
+            ):
+                probe_addr = AudioObjectPropertyAddress(
+                    selector,
+                    kAudioObjectPropertyScopeGlobal,
+                    kAudioObjectPropertyElementMain,
+                )
+                if _ca.AudioObjectHasProperty(
+                    kAudioObjectSystemObject, ctypes.byref(probe_addr)
+                ):
+                    kAudioHardwarePropertyDefaultOutputDevice = selector
+                    break
             _ca_loaded = True
-            log.debug("CoreAudio loaded")
+            log.debug(
+                "CoreAudio loaded (default-output selector=0x%08x)",
+                kAudioHardwarePropertyDefaultOutputDevice,
+            )
         except Exception as e:
             log.warning("CoreAudio load failed: %s — will fall back to osascript", e)
             _ca = None
@@ -350,7 +385,10 @@ def get_system_volume_cached(ttl: float = 5.0) -> float:
 
 
 def _invalidate_volume_cache() -> None:
-    """Invalidate the cached volume so the next read goes to CoreAudio."""
+    """Invalidate the cached volume so the next read goes to CoreAudio.
+
+    Kept for test fixtures that reset cache state between cases.
+    """
     global _cached_volume, _cached_at
     with _cache_lock:
         _cached_volume = None
