@@ -18,7 +18,7 @@ Fallback logic when no text field was focused at recording start:
 import os
 import sys
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -442,19 +442,51 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
     return True
 
 
-def _activate_app(pid: int, app_name: str) -> None:
-    """Activate an app by PID, falling back to osascript."""
+def _activate_app(pid: int, app_name: str) -> bool:
+    """Activate an app by PID, polling until frontmost matches or timeout.
+
+    Returns True if frontmost PID matches target after activation, else False.
+
+    For multi-PID bundles (Electron apps like Conductor, VS Code, Slack, Cursor),
+    `activateWithOptions_` is advisory at the AppKit layer — WindowServer may
+    keep a different helper PID as the key window even though the bundle has
+    been "activated". We poll frontmost PID up to 500 ms with periodic
+    re-activation to force the specific target PID to the front before the
+    caller sends keystrokes. Single-PID apps resolve on the first poll.
+
+    See DEF-054 for the failure mode this guards against.
+    """
     try:
         import AppKit
         app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        if app is not None:
+        if app is None:
+            _log(f"activate: no NSRunningApplication for pid={pid}, falling back")
+        else:
             app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-            return
-    except Exception:
-        pass
-    # Fallback
+            # Poll-verify: frontmost PID may lag or land on a sibling helper PID.
+            # 5 × 100 ms = 500 ms total, re-activate between iterations.
+            ws = AppKit.NSWorkspace.sharedWorkspace()
+            for i in range(5):
+                _time.sleep(0.1)
+                front = ws.frontmostApplication()
+                front_pid = front.processIdentifier() if front else 0
+                if front_pid == pid:
+                    if i > 0:
+                        _log(f"activate: pid={pid} confirmed frontmost after {i+1} polls")
+                    return True
+                if i < 4:
+                    app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+            _log(
+                f"activate: WARNING target pid={pid} but frontmost pid={front_pid} "
+                f"after 500 ms retry (likely different helper PID in same bundle)"
+            )
+            return False
+    except Exception as e:
+        _log(f"activate: NSRunningApplication path failed: {e}")
+    # Fallback — osascript-based focus, cannot verify PID
     from heyvox.input.injection import focus_app
     focus_app(app_name)
+    return False
 
 
 def _find_window_text_fields(ax_app) -> list[tuple]:
