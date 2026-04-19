@@ -85,6 +85,12 @@ class OrchestratorConfig:
     # Audio ducking
     duck_enabled: bool = True
     duck_level: float = 0.03      # 3% — same as orchestrator.sh HERALD_DUCK_LEVEL=3/100
+    # DEF-053: TTS plays at the user's pre-duck media volume. When the user's
+    # music is at 37 %, TTS also plays at 37 %, which sounds "rather low" even
+    # though the logic is working correctly. Enforce a minimum so TTS is always
+    # audible regardless of the background media level. 0.55 ≈ normal speaking
+    # level on the G435 / MacBook speakers without being jarring.
+    tts_min_volume: float = 0.55
 
     # Queue caps
     max_queued: int = 10   # drop oldest messages when queue exceeds this
@@ -493,6 +499,9 @@ def _set_tts_volume(original_vol: float | None, cfg: OrchestratorConfig) -> None
             cfg.debug_log,
         )
         return
+    # DEF-053: enforce minimum TTS volume floor so TTS stays audible even when
+    # the user's pre-duck media volume was low (e.g. background music at 37 %).
+    tts_vol = max(original_vol, cfg.tts_min_volume)
     from heyvox.herald.coreaudio import _set_volume_coreaudio, set_system_volume_cached
     dev_id = None
     try:
@@ -502,15 +511,17 @@ def _set_tts_volume(original_vol: float | None, cfg: OrchestratorConfig) -> None
     except (OSError, ValueError):
         pass
     if dev_id is not None:
-        ok = _set_volume_coreaudio(dev_id, original_vol)
+        ok = _set_volume_coreaudio(dev_id, tts_vol)
         _herald_log(
-            f"ORCH: set TTS volume to {original_vol:.2f} via CA dev={dev_id} ok={ok}",
+            f"ORCH: set TTS volume to {tts_vol:.2f} (orig={original_vol:.2f}, "
+            f"floor={cfg.tts_min_volume:.2f}) via CA dev={dev_id} ok={ok}",
             cfg.debug_log,
         )
     else:
-        set_system_volume_cached(original_vol)
+        set_system_volume_cached(tts_vol)
         _herald_log(
-            f"ORCH: set TTS volume to {original_vol:.2f} via system-cached (dev=None)",
+            f"ORCH: set TTS volume to {tts_vol:.2f} (orig={original_vol:.2f}, "
+            f"floor={cfg.tts_min_volume:.2f}) via system-cached (dev=None)",
             cfg.debug_log,
         )
 
