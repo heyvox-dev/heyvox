@@ -433,6 +433,78 @@ def test_def051_do_manual_pin_resets_audio13_timer():
     )
 
 
+def test_def053_vad_silent_grace_during_recording():
+    """During recording, `_vad_silent` must honour a grace window covering the
+    wake-word model's feature-window lag.
+
+    DEF-053: user said "Hey Vox" 11 times over 2 s but the stop never fired —
+    trailing-silence chunks kept resetting `_consecutive_hits` to 0 under the
+    strict DEF-047 VAD gate. Fix introduces `_VAD_SILENT_GRACE` and a rolling
+    `_last_nonsilent_time` so recent activity keeps the gate open long enough
+    for the classifier's feature window to clear.
+    """
+    src = _read_main_py()
+    assert "_VAD_SILENT_GRACE" in src, (
+        "DEF-053: `_VAD_SILENT_GRACE` constant must exist in main.py"
+    )
+    assert "_last_nonsilent_time" in src, (
+        "DEF-053: `_last_nonsilent_time` tracking must exist in main.py"
+    )
+    # The grace window must apply to the recording path specifically, not
+    # accidentally relaxed on the idle path (which still needs strict VAD
+    # suppression of silence-driven false positives per DEF-045).
+    assert re.search(
+        r"if\s+_is_rec:\s*\n\s+_vad_silent\s*=\s*\(?\s*\n?\s*_raw_vad_silent",
+        src,
+    ), (
+        "DEF-053: The grace-window VAD computation must be gated on `_is_rec`. "
+        "Idle-path VAD must stay strict (DEF-045)."
+    )
+
+
+def test_def053_tts_min_volume_floor():
+    """Herald must clamp TTS volume to a minimum floor so the user doesn't hear
+    quiet TTS when their pre-duck media volume happens to be low.
+
+    DEF-053: user's media volume had drifted to 37 %, Herald faithfully played
+    TTS at 37 %, user reported "rather low volume." Fix: `tts_min_volume` in
+    OrchestratorConfig and a `max(original_vol, cfg.tts_min_volume)` clamp in
+    `_set_tts_volume`.
+    """
+    from heyvox.herald.orchestrator import OrchestratorConfig
+    cfg = OrchestratorConfig()
+    assert hasattr(cfg, "tts_min_volume"), (
+        "DEF-053: OrchestratorConfig must expose `tts_min_volume`"
+    )
+    assert 0.3 <= cfg.tts_min_volume <= 1.0, (
+        f"DEF-053: tts_min_volume={cfg.tts_min_volume} outside sane range [0.3, 1.0]"
+    )
+    import inspect
+    from heyvox.herald import orchestrator as orch
+    src = inspect.getsource(orch._set_tts_volume)
+    assert "tts_min_volume" in src, (
+        "DEF-053: `_set_tts_volume` must read `cfg.tts_min_volume` to apply the floor"
+    )
+    assert re.search(r"max\s*\(\s*original_vol\s*,\s*cfg\.tts_min_volume", src), (
+        "DEF-053: `_set_tts_volume` must clamp with `max(original_vol, cfg.tts_min_volume)`"
+    )
+
+
+def test_def053_hud_dbg_skips_audio_level():
+    """HUD-DBG logger must not emit a per-message line for `audio_level` — that
+    message type fires at ~20 Hz and would flood the log with empty `state=`
+    entries (`audio_level` payloads use the `level` key, not `state`).
+    """
+    src = _read_main_py()
+    assert re.search(
+        r'if\s+msg\.get\("type"\)\s*!=\s*"audio_level"',
+        src,
+    ), (
+        "DEF-053: HUD-DBG logger must skip audio_level messages to prevent "
+        "~20 Hz empty-state log spam."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).

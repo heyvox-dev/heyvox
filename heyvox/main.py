@@ -406,7 +406,15 @@ def _setup(config: HeyvoxConfig):
             log("[HUD-DBG] Reconnected!")
         try:
             ctx.hud_client.send(msg)
-            log(f"[HUD-DBG] Sent {msg.get('type')}: {msg.get('state', '')}")
+            # DEF-053: audio_level fires ~20 Hz and floods the log with empty
+            # "state=" lines (msg.state is absent on that message type). Skip
+            # per-message logging for audio_level; the other message types are
+            # infrequent enough that the debug trail stays useful.
+            if msg.get("type") != "audio_level":
+                log(
+                    f"[HUD-DBG] Sent {msg.get('type')}: "
+                    f"{msg.get('state', msg.get('text', ''))}"
+                )
         except Exception as e:
             log(f"[HUD-DBG] Send failed: {e}")
 
@@ -604,6 +612,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # VAD gate multiplier: skip wake-word eval when idle and audio level is below
     # silence_threshold * this factor. Prevents silence-driven false triggers.
     _VAD_GATE_MULT = 0.8
+    # DEF-053: Grace window during recording — a chunk is treated as "silent"
+    # only if no non-silent activity in the last N seconds. Covers the wake-word
+    # model's feature-window lag (user says "Hey Vox", model reports high score
+    # on trailing silence). Kept ≤ the feature window (~1 s) so dead-mic silence
+    # bursts still fall inside the silent gate within a couple of chunks.
+    _VAD_SILENT_GRACE = 0.5
+    _last_nonsilent_time: float = 0.0
 
     def _hud_ensure_connected() -> None:
         """Attempt periodic reconnect if the HUD connection was lost."""
@@ -1013,7 +1028,25 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # while recording to preserve feature continuity for the stop-word detector,
             # but we never ACT on triggers from silent frames.
             _vad_level = int(np.abs(audio).max())
-            _vad_silent = _vad_level < silence_threshold * _VAD_GATE_MULT
+            _raw_vad_silent = _vad_level < silence_threshold * _VAD_GATE_MULT
+            if not _raw_vad_silent:
+                _last_nonsilent_time = time.time()
+            # DEF-053: During recording the wake-word model's feature window lags
+            # the audio by ~500 ms. When the user says "Hey Vox" at the end of
+            # an utterance, the model reports score≥0.9 on chunks AFTER the tail
+            # (which are near-silent). A strict VAD gate resets consecutive_hits
+            # on those trailing chunks and the stop-trigger never accumulates.
+            # Grace: a chunk is treated as silent only if the last non-silent
+            # sample was > _VAD_SILENT_GRACE ago. Dead-mic scenario (DEF-047)
+            # still satisfied because an all-silent stream never updates
+            # _last_nonsilent_time, so the grace window expires in 0.5 s.
+            if _is_rec:
+                _vad_silent = (
+                    _raw_vad_silent
+                    and (time.time() - _last_nonsilent_time) > _VAD_SILENT_GRACE
+                )
+            else:
+                _vad_silent = _raw_vad_silent
             if not _is_rec and _vad_silent:
                 # Clear consecutive-hits so a single pre-silence high score doesn't
                 # combine with a post-silence high score to cross the threshold.
@@ -1065,7 +1098,21 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 log_threshold = active_threshold * 0.5
                 if s > log_threshold:
                     triggered = s > active_threshold
-                    msg = f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) {'>>> TRIGGER' if triggered else ''}"
+                    # DEF-053 diagnostic: include VAD state + consecutive_hits
+                    # during recording so we can tell whether a stop-trigger
+                    # that didn't stop recording was killed by the VAD gate
+                    # (silent frame → hits reset to 0) or by the cooldown.
+                    _hit_info = ""
+                    if _is_rec:
+                        _hits_now = _consecutive_hits.get(ww_name, 0)
+                        _hit_info = (
+                            f" vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)}"
+                            f" silent={_vad_silent} hits={_hits_now}/{_CONSECUTIVE_FRAMES_REQUIRED}"
+                        )
+                    msg = (
+                        f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) "
+                        f"{'>>> TRIGGER' if triggered else ''}{_hit_info}"
+                    )
                     log(msg)
                     if triggered:
                         _safe_stderr(f"[wakeword] {msg.strip()}")
