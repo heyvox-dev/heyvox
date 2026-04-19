@@ -14,7 +14,6 @@ import os
 import sys
 import time
 import signal
-import threading
 import numpy as np
 
 from heyvox.config import load_config, HeyvoxConfig, CONFIG_DIR
@@ -27,7 +26,6 @@ from heyvox.constants import (
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
-    STT_DEBUG_DIR,
     LOG_FILE_DEFAULT,
     HEYVOX_PID_FILE,
     HEYVOX_HEARTBEAT_FILE,
@@ -36,6 +34,7 @@ from heyvox.constants import (
     HERALD_MEDIA_PAUSED_PREFIX,
     HERALD_PAUSE_FLAG,
     HERALD_MUTE_FLAG,
+    MIC_MUTE_FLAG,
     HERALD_AMBIENT_FLAG,
     HERALD_MODE_FILE,
     HERALD_LAST_PLAY,
@@ -43,11 +42,10 @@ from heyvox.constants import (
     HERALD_GENERATING_WAV_PREFIX,
     HERALD_PLAYING_PID,
     VERBOSITY_FILE,
-    GRACE_AFTER_TTS,
     ensure_run_dirs,
     cleanup_ipc_files,
 )
-from heyvox.audio.cues import audio_cue, is_suppressed, get_cues_dir
+from heyvox.audio.cues import is_suppressed
 from heyvox.audio.stt import init_local_stt
 from heyvox.hud.process import (
     launch_hud_overlay,
@@ -533,7 +531,6 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     start_word = config.wake_words.start
     stop_word = config.wake_words.stop
 
-    cues_dir = get_cues_dir(config.cues_dir)
     last_trigger = 0.0
     consecutive_errors = 0
 
@@ -552,6 +549,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             tn_score_range=tuple(config.wake_words.negatives_score_range),
             tn_interval_secs=config.wake_words.negatives_interval_secs,
             sample_rate=sample_rate,
+            get_mic_name=lambda: devices.dev_name,
         )
         # Pass collector to recording state machine for FP/FN/TP-stop hooks
         recording.training_collector = _training_collector
@@ -593,8 +591,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
     # Silence timeout: tracks when user first speaks during recording
     _first_speech_time: float = 0.0
+    _rec_started_at: float = 0.0  # timestamp when current recording started (for warmup)
+    _STOP_WARMUP_SECS = 2.0       # suppress stop-word re-trigger for this long after start
     _is_rec: bool = False
     _last_model_reset: float = 0.0  # Periodic model reset during recording
+    # Consecutive-frame detection: require N consecutive above-threshold frames
+    # before triggering. Filters single-frame false positives from passing speech.
+    # Bumped to 3 after DEF-045 — model emits 2-frame high-score bursts during
+    # silence; 3 consecutive high-scores in silence is essentially never seen.
+    _CONSECUTIVE_FRAMES_REQUIRED = 3
+    _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
+    # VAD gate multiplier: skip wake-word eval when idle and audio level is below
+    # silence_threshold * this factor. Prevents silence-driven false triggers.
+    _VAD_GATE_MULT = 0.8
 
     def _hud_ensure_connected() -> None:
         """Attempt periodic reconnect if the HUD connection was lost."""
@@ -767,6 +776,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             if _is_rec and not _was_rec:
                 _first_speech_time = 0.0
                 _last_model_reset = time.time()
+                _rec_started_at = time.time()  # for stop-word warmup suppression
 
             # Send live audio level to HUD at ~20fps during recording (HUD-08)
             if _is_rec:
@@ -860,8 +870,15 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             # Silence watchdog — two modes:
             # 1) No speech yet: cancel after 5s (false wake word trigger)
-            # 2) After speech: stop+transcribe after silence_timeout (4s)
+            # 2) After speech: stop+transcribe after silence_timeout (4s), with a
+            #    soft ceiling at _MAX_POST_SPEECH_SECS that force-stops only
+            #    when recent audio is mostly quiet (noisy-mic-no-speech), and
+            #    an absolute ceiling at _ABSOLUTE_MAX_POST_SPEECH_SECS so a
+            #    continuously-active mic can never wedge the pipeline. See
+            #    DEF-038 (soft cap origin) and DEF-049 (active-speech exemption).
             _NO_SPEECH_CANCEL_SECS = 5.0
+            _MAX_POST_SPEECH_SECS = 30.0
+            _ABSOLUTE_MAX_POST_SPEECH_SECS = 120.0
             if _is_rec and not _is_ptt and silence_timeout > 0:
                 _elapsed = time.time() - ctx.recording_start_time
 
@@ -879,6 +896,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         if quiet_pct >= 0.85:
                             log(f"No speech after {_NO_SPEECH_CANCEL_SECS}s ({quiet_pct:.0%} quiet), cancelling (false trigger)")
                             recording.cancel()
+                            if _training_collector is not None:
+                                if _training_collector.reclassify_tp_start_as_fp("no-speech"):
+                                    log("Training: reclassified last TP → FP (no-speech after trigger)")
                             log("Ready for next wake word.")
                             continue
                         else:
@@ -889,6 +909,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # Use percentage of quiet chunks (not single-spike max)
                     # to handle Bluetooth mics with occasional noise spikes.
                     elapsed_since_speech = time.time() - _first_speech_time
+                    quiet_pct = 0.0
                     if elapsed_since_speech > silence_timeout:
                         with ctx.lock:
                             recent_chunks = ctx.audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
@@ -899,6 +920,31 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet), transcribing")
                                 recording.stop()
                                 continue
+                    # Soft ceiling (DEF-038) — if a noisy mic (BT sidetone,
+                    # ambient room) keeps quiet_pct below the silence gate,
+                    # force a transcribe so the pipeline can't wedge
+                    # herald-pause forever.
+                    #
+                    # DEF-049 refinement: don't truncate active dictation.
+                    # The DEF-038 scenario (noisy mic, no actual user speech)
+                    # has quiet_pct somewhere in 0.30-0.84. Genuine long
+                    # dictation shows quiet_pct well below 0.30 (mostly active
+                    # speech). Only force-stop at the soft cap when quiet_pct
+                    # is in the "noisy-but-not-speech" range. An absolute
+                    # hard cap still bounds the worst case.
+                    if elapsed_since_speech > _MAX_POST_SPEECH_SECS:
+                        actively_speaking = quiet_pct < 0.30
+                        if (
+                            elapsed_since_speech > _ABSOLUTE_MAX_POST_SPEECH_SECS
+                            or not actively_speaking
+                        ):
+                            log(
+                                f"Max post-speech duration ({elapsed_since_speech:.0f}s, "
+                                f"{quiet_pct:.0%} quiet, active={actively_speaking}), "
+                                f"forcing transcribe (DEF-038/DEF-049)"
+                            )
+                            recording.stop()
+                            continue
 
             if _is_busy:
                 # Busy flag watchdog -- force-reset if stuck (AUDIO-12)
@@ -910,7 +956,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     with ctx.lock:
                         ctx.busy = False
                     _busy_since = 0.0
-                    _release_recording_guard()
+                    try:
+                        os.remove(RECORDING_FLAG)
+                    except FileNotFoundError:
+                        pass
                     hud_send({"type": "state", "state": "idle"})
                     # Fall through to wake word processing
                 else:
@@ -920,6 +969,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             # Suppress wake word detection while audio cue plays
             if is_suppressed():
+                continue
+
+            # Mic mute: skip all wake word processing when mic is muted
+            if os.path.exists(MIC_MUTE_FLAG):
                 continue
 
             # Echo suppression: skip wake word while ANY TTS is playing.
@@ -967,6 +1020,20 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 from heyvox.audio.echo import process_mic_frame
                 audio = process_mic_frame(audio, sample_rate=sample_rate)
 
+            # VAD gate (DEF-045 / DEF-047): skip wake-word eval when audio is near-silent.
+            # Model emits high-confidence bursts on pure silence (observed during dead
+            # Jabra HFP streams — entire recording at -89 dBFS + three 0.9+ bursts that
+            # fired the stop-word and truncated the recording). We still feed model.predict
+            # while recording to preserve feature continuity for the stop-word detector,
+            # but we never ACT on triggers from silent frames.
+            _vad_level = int(np.abs(audio).max())
+            _vad_silent = _vad_level < silence_threshold * _VAD_GATE_MULT
+            if not _is_rec and _vad_silent:
+                # Clear consecutive-hits so a single pre-silence high score doesn't
+                # combine with a post-silence high score to cross the threshold.
+                _consecutive_hits.clear()
+                continue  # skip model.predict + trigger loop entirely
+
             model.predict(audio)
 
             # Periodic model reset during recording — clears accumulated speech
@@ -1001,7 +1068,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
                 base_thr = _model_thresholds.get(ww_name, threshold)
-                active_threshold = (base_thr * _speaker_mult * 0.85) if _is_rec else (base_thr * _speaker_mult)
+                # Cap at 0.95 — openwakeword scores are in [0, 1], so any higher
+                # threshold makes triggering physically impossible. Prevents the
+                # speaker_mult (1.4) × high base_thr (0.8) = 1.12 dead zone.
+                # Stop-wake threshold matches start threshold (no 0.85 discount):
+                # the old discount made stop-word easier to detect but caused
+                # mid-sentence phonemes to falsely stop recording (DEF-043).
+                active_threshold = min(0.95, base_thr * _speaker_mult)
                 active_cooldown = stop_cooldown if _is_rec else cooldown
                 log_threshold = active_threshold * 0.5
                 if s > log_threshold:
@@ -1010,7 +1083,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     log(msg)
                     if triggered:
                         _safe_stderr(f"[wakeword] {msg.strip()}")
-                if s > active_threshold:
+                # DEF-047: During recording, silent frames must not count toward a
+                # stop-trigger. The model emits silence-bursts on dead HFP streams;
+                # without this gate, a mic that stops delivering audio mid-recording
+                # will self-stop within ~4s. Feature-continuity is preserved because
+                # we still call model.predict above.
+                if s > active_threshold and not _vad_silent:
+                    _consecutive_hits[ww_name] = _consecutive_hits.get(ww_name, 0) + 1
+                else:
+                    _consecutive_hits[ww_name] = 0
+
+                if _consecutive_hits.get(ww_name, 0) >= _CONSECUTIVE_FRAMES_REQUIRED:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         # Training data: save TP-start and reclassify recent TN→FN
@@ -1037,10 +1120,18 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             if start_word in ww_name and not _is_rec:
                                 recording.start(preroll=_preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
-                                recording.stop()
+                                # Warmup: ignore stop-word in first _STOP_WARMUP_SECS
+                                # to prevent user's own speech from self-stopping.
+                                if time.time() - _rec_started_at < _STOP_WARMUP_SECS:
+                                    log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
+                                else:
+                                    recording.stop()
                         else:
                             if not _is_rec:
                                 recording.start(preroll=_preroll_buffer)
+                            elif time.time() - _rec_started_at < _STOP_WARMUP_SECS:
+                                # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS
+                                log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
                             else:
                                 recording.stop()
                     model.reset()

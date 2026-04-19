@@ -316,6 +316,66 @@ def _shellcheck_available() -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Test 6: Recording hard-cap preserves active dictation (DEF-049)
+#
+# DEF-038 added _MAX_POST_SPEECH_SECS = 30.0 as an unconditional hard ceiling
+# to unwedge herald-pause when a noisy mic kept quiet_pct < 0.85 forever.
+# DEF-049: the cap fired mid-sentence on legitimate long dictation because
+# it didn't check whether the user was currently speaking. The cap must now
+# gate on quiet_pct (active-speech detector) and a separate absolute ceiling
+# bounds the worst case.
+# ---------------------------------------------------------------------------
+
+def _read_main_py() -> str:
+    import heyvox
+    path = os.path.join(os.path.dirname(heyvox.__file__), "main.py")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def test_def049_absolute_post_speech_cap_defined():
+    """main.py must declare an absolute hard ceiling >= the soft cap (DEF-049).
+
+    The soft cap (_MAX_POST_SPEECH_SECS) can be deferred when the user is
+    actively speaking; _ABSOLUTE_MAX_POST_SPEECH_SECS bounds the worst case.
+    """
+    src = _read_main_py()
+    m_soft = re.search(r"_MAX_POST_SPEECH_SECS\s*=\s*([\d.]+)", src)
+    m_hard = re.search(r"_ABSOLUTE_MAX_POST_SPEECH_SECS\s*=\s*([\d.]+)", src)
+    assert m_soft is not None, "Missing _MAX_POST_SPEECH_SECS in main.py"
+    assert m_hard is not None, (
+        "DEF-049: _ABSOLUTE_MAX_POST_SPEECH_SECS must be declared — the soft "
+        "cap alone truncates long dictation."
+    )
+    assert float(m_hard.group(1)) >= float(m_soft.group(1)), (
+        "DEF-049: absolute cap must be >= soft cap"
+    )
+
+
+def test_def049_soft_cap_gated_on_active_speech():
+    """The soft-cap branch must check quiet_pct before force-stopping (DEF-049).
+
+    Otherwise it truncates mid-sentence whenever a user dictates past 30 s.
+    """
+    src = _read_main_py()
+    m = re.search(
+        r"if\s+elapsed_since_speech\s*>\s*_MAX_POST_SPEECH_SECS:\s*\n"
+        r"(?P<body>(?:[ \t]+.+\n){2,30})",
+        src,
+    )
+    assert m is not None, "Could not locate soft-cap branch in main.py"
+    body = m.group("body")
+    assert "quiet_pct" in body, (
+        "DEF-049: soft cap must reference quiet_pct so active-speech "
+        "dictation isn't force-truncated at 30 s."
+    )
+    assert "_ABSOLUTE_MAX_POST_SPEECH_SECS" in body, (
+        "DEF-049: soft cap must also check _ABSOLUTE_MAX_POST_SPEECH_SECS "
+        "to bound the worst case."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).
