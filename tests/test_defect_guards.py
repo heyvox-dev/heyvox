@@ -505,6 +505,68 @@ def test_def053_hud_dbg_skips_audio_level():
     )
 
 
+def test_def054_activate_app_poll_verifies_pid():
+    """_activate_app must poll frontmost PID after activating and retry on
+    mismatch. On Electron bundles (Conductor, VS Code, Slack, Cursor) the
+    activate call is advisory — WindowServer can keep a sibling helper PID
+    as the key window. A single activate + sleep, without a poll-verify
+    loop, produced paste landing in the wrong window within the same bundle.
+    """
+    target_py = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "heyvox", "input", "target.py",
+    )
+    src = open(target_py).read()
+    # Pull out the body of _activate_app so sibling functions don't satisfy
+    # the assertion accidentally.
+    m = re.search(
+        r"def _activate_app\([^)]*\)[^:]*:\s*(.*?)(?=\n(?:def |class |[^\s]))",
+        src,
+        re.DOTALL,
+    )
+    assert m, "DEF-054: could not locate _activate_app body in target.py"
+    body = m.group(1)
+    assert "frontmostApplication" in body and "processIdentifier" in body, (
+        "DEF-054: _activate_app must read frontmostApplication().processIdentifier() "
+        "to verify the target PID actually became frontmost."
+    )
+    assert "for" in body and "range" in body and "activateWithOptions_" in body, (
+        "DEF-054: _activate_app must loop with periodic re-activation — a single "
+        "activateWithOptions_ call is advisory only on Electron bundles."
+    )
+
+
+def test_def054_paste_guard_compares_pid_not_just_name():
+    """The paste path must log a WARNING when frontmost PID differs from the
+    target PID, even if the app *name* matches. Multi-PID bundles share a
+    name across helpers, so a name-only guard silently passes when paste
+    lands in the wrong window.
+    """
+    inj_py = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "heyvox", "input", "injection.py",
+    )
+    src = open(inj_py).read()
+    # Must plumb expected_pid parameter
+    assert re.search(
+        r"def _osascript_type_text\([^)]*expected_pid",
+        src,
+        re.DOTALL,
+    ), "DEF-054: _osascript_type_text must accept expected_pid parameter."
+    # Must emit a WARNING when PID differs from expected
+    assert re.search(
+        r"WARNING[^\"\']*pid=\{expected_pid\}[^\"\']*frontmost",
+        src,
+    ) or re.search(
+        r"expected pid=\{expected_pid\}.*frontmost.*pid=",
+        src,
+        re.DOTALL,
+    ), (
+        "DEF-054: paste path must log a WARNING when frontmost PID differs "
+        "from expected_pid (not just when names differ)."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).

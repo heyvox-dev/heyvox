@@ -254,6 +254,7 @@ def _osascript_type_text(
     app_name: str | None = None,
     settle_secs: float = 0.1,
     expected_bundle_id: str | None = None,
+    expected_pid: int = 0,
     max_retries: int = 2,
     enter_count: int = 0,
     enter_delay: float = 0.05,
@@ -310,6 +311,22 @@ def _osascript_type_text(
         frontmost_before = _get_frontmost_app()
         original_pid = _save_frontmost_pid()
         _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
+
+        # DEF-054: PID-aware guard. For Electron bundles (Conductor, VS Code,
+        # Slack, Cursor…) the same bundle name maps to many helper PIDs.
+        # Activating the target bundle doesn't guarantee the *correct* helper
+        # PID becomes key window. If we see a mismatch here, log a WARNING so
+        # the next time paste lands in the wrong window we know why.
+        if (
+            expected_pid
+            and original_pid
+            and original_pid != expected_pid
+        ):
+            _log(
+                f"paste: WARNING: expected pid={expected_pid} but frontmost "
+                f"pid={original_pid} ({frontmost_before}) — likely wrong "
+                f"window within same bundle (DEF-054)"
+            )
 
         time.sleep(settle_secs)
 
@@ -411,6 +428,19 @@ def _osascript_type_text(
 
     if app_name and frontmost_after.lower() != app_name.lower() and frontmost_after != "?":
         _log(f"paste: WARNING: target was {app_name} but frontmost is {frontmost_after} — may have pasted to wrong app!")
+
+    # DEF-054: PID-level post-paste check. For multi-PID bundles the name
+    # guard above always passes ("conductor" == "conductor") even when paste
+    # lands in a different window within the same bundle. Compare PIDs to
+    # catch that case.
+    if expected_pid:
+        frontmost_after_pid = _save_frontmost_pid()
+        if frontmost_after_pid and frontmost_after_pid != expected_pid:
+            _log(
+                f"paste: WARNING: target pid={expected_pid} but frontmost "
+                f"pid={frontmost_after_pid} — paste likely landed in wrong "
+                f"window within same bundle (DEF-054)"
+            )
 
     return True
 
@@ -544,11 +574,13 @@ def type_text(
     _log(f"type_text: using osascript → {app_name or 'frontmost'}"
          f"{f' + Enter x{enter_count}' if enter_count else ''}")
     expected_bundle_id = getattr(snap, "app_bundle_id", None) if snap is not None else None
+    expected_pid = getattr(snap, "app_pid", 0) if snap is not None else 0
     return _osascript_type_text(
         text,
         app_name=app_name,
         settle_secs=settle_secs,
         expected_bundle_id=expected_bundle_id,
+        expected_pid=expected_pid,
         max_retries=max_retries,
         enter_count=enter_count,
         enter_delay=enter_delay,
