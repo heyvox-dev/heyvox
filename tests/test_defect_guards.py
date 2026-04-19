@@ -317,14 +317,16 @@ def _shellcheck_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: Recording hard-cap preserves active dictation (DEF-049)
+# Test 6: No short hard cap on recording duration (DEF-050 regression guard)
 #
-# DEF-038 added _MAX_POST_SPEECH_SECS = 30.0 as an unconditional hard ceiling
-# to unwedge herald-pause when a noisy mic kept quiet_pct < 0.85 forever.
-# DEF-049: the cap fired mid-sentence on legitimate long dictation because
-# it didn't check whether the user was currently speaking. The cap must now
-# gate on quiet_pct (active-speech detector) and a separate absolute ceiling
-# bounds the worst case.
+# The only duration ceiling on a recording must be `config.max_recording_secs`
+# (default 300 s / 5 min). DEF-038 previously added `_MAX_POST_SPEECH_SECS =
+# 30.0` as a short post-speech hard cap to mitigate a one-off G435 sidetone
+# scenario (DEF-036). That cap truncated legitimate long dictation mid-sentence
+# and was reverted as DEF-050. The noisy-mic scenarios DEF-038 was guarding
+# against are now handled by DEF-036 (hardware workaround) and DEF-045/DEF-047
+# (wake-word VAD gate). Re-introducing a short post-speech cap without first
+# revisiting DEF-050 should fail this guard.
 # ---------------------------------------------------------------------------
 
 def _read_main_py() -> str:
@@ -334,45 +336,35 @@ def _read_main_py() -> str:
         return f.read()
 
 
-def test_def049_absolute_post_speech_cap_defined():
-    """main.py must declare an absolute hard ceiling >= the soft cap (DEF-049).
+def test_def050_no_short_post_speech_cap():
+    """main.py must not reintroduce a short post-speech hard cap (DEF-050).
 
-    The soft cap (_MAX_POST_SPEECH_SECS) can be deferred when the user is
-    actively speaking; _ABSOLUTE_MAX_POST_SPEECH_SECS bounds the worst case.
+    `max_recording_secs` (5 min, from config) is the only safety ceiling.
+    Previous 30 s / 120 s caps truncated active dictation.
     """
     src = _read_main_py()
-    m_soft = re.search(r"_MAX_POST_SPEECH_SECS\s*=\s*([\d.]+)", src)
-    m_hard = re.search(r"_ABSOLUTE_MAX_POST_SPEECH_SECS\s*=\s*([\d.]+)", src)
-    assert m_soft is not None, "Missing _MAX_POST_SPEECH_SECS in main.py"
-    assert m_hard is not None, (
-        "DEF-049: _ABSOLUTE_MAX_POST_SPEECH_SECS must be declared — the soft "
-        "cap alone truncates long dictation."
+    assert "_MAX_POST_SPEECH_SECS" not in src, (
+        "DEF-050: `_MAX_POST_SPEECH_SECS` was reintroduced. The 30 s post-speech "
+        "cap from DEF-038 truncated legitimate long dictation mid-sentence. "
+        "Rely on `config.max_recording_secs` (5 min) as the only ceiling."
     )
-    assert float(m_hard.group(1)) >= float(m_soft.group(1)), (
-        "DEF-049: absolute cap must be >= soft cap"
+    assert "_ABSOLUTE_MAX_POST_SPEECH_SECS" not in src, (
+        "DEF-050: `_ABSOLUTE_MAX_POST_SPEECH_SECS` was reintroduced. Rely on "
+        "`config.max_recording_secs` (5 min) as the only ceiling."
     )
 
 
-def test_def049_soft_cap_gated_on_active_speech():
-    """The soft-cap branch must check quiet_pct before force-stopping (DEF-049).
-
-    Otherwise it truncates mid-sentence whenever a user dictates past 30 s.
-    """
+def test_def050_max_recording_secs_still_enforced():
+    """`max_recording_secs` must remain the single enforced ceiling (DEF-050)."""
     src = _read_main_py()
-    m = re.search(
-        r"if\s+elapsed_since_speech\s*>\s*_MAX_POST_SPEECH_SECS:\s*\n"
-        r"(?P<body>(?:[ \t]+.+\n){2,30})",
-        src,
+    assert "max_recording_secs" in src, (
+        "DEF-050: `max_recording_secs` is the only hard ceiling on a recording. "
+        "It must remain wired into the main loop."
     )
-    assert m is not None, "Could not locate soft-cap branch in main.py"
-    body = m.group("body")
-    assert "quiet_pct" in body, (
-        "DEF-049: soft cap must reference quiet_pct so active-speech "
-        "dictation isn't force-truncated at 30 s."
-    )
-    assert "_ABSOLUTE_MAX_POST_SPEECH_SECS" in body, (
-        "DEF-049: soft cap must also check _ABSOLUTE_MAX_POST_SPEECH_SECS "
-        "to bound the worst case."
+    assert re.search(
+        r"if\s+elapsed\s*>\s*max_recording_secs\s*:", src
+    ), (
+        "DEF-050: expected `if elapsed > max_recording_secs:` guard in main loop."
     )
 
 
