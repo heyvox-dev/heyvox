@@ -695,9 +695,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 consecutive_errors = 0
                 ctx.last_read_time = time.monotonic()
 
-                # AUDIO-13: track last time we saw real audio (level >= 10)
-                if int(np.abs(audio).max()) >= 10:
+                # AUDIO-13: track last time we saw real audio (level >= 10).
+                # Also tally zero vs low-level chunks since the last reset so
+                # check_dead_mic_timeout can distinguish a dead stream (all
+                # zeros) from a quiet room (steady 1-9 ambient).
+                _chunk_max = int(np.abs(audio).max())
+                if _chunk_max >= 10:
                     ctx.last_good_audio_time = time.time()
+                    ctx.dead_mic_zero_chunks = 0
+                    ctx.dead_mic_low_chunks = 0
+                elif _chunk_max == 0:
+                    ctx.dead_mic_zero_chunks += 1
+                else:
+                    ctx.dead_mic_low_chunks += 1
 
                 # Auto-calibration: collect chunks in parallel with normal processing (D-04)
                 # IMPORTANT: do NOT gate wake word during calibration (Pitfall 4)

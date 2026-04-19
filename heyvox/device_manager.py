@@ -24,6 +24,7 @@ from heyvox.audio.mic import (
     add_device_cooldown,
     clear_device_cooldown,
     is_device_cooled_down,
+    mute_output_during_bt_switch as _mute_during_bt_switch,
 )
 from heyvox.audio.cues import device_change_cue
 from heyvox.audio.profile import MicProfileManager, MicProfileEntry
@@ -206,6 +207,11 @@ class DeviceManager:
         self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
         self._mic_pinned = False
 
+        # Remember the failing device so we can detect "same device re-selected"
+        # after reinit — find_best_mic clears built-in-mic cooldowns, so the
+        # existing last-resort grace period would miss that loop. See DEF-037.
+        _prev_dev_name = self.dev_name
+
         # Cooldown the zombie device so find_best_mic and hotplug scan skip it
         add_device_cooldown(self.dev_name)
 
@@ -255,6 +261,25 @@ class DeviceManager:
                 print(f"[mic] Last-resort fallback: {self.dev_name}, grace {grace}s", file=sys.stderr, flush=True)
             except (BrokenPipeError, OSError):
                 pass
+        elif _prev_dev_name and self.dev_name.lower() == _prev_dev_name.lower():
+            # Same device we just flagged as zombie got re-selected — usually
+            # happens when find_best_mic special-cases a built-in mic and
+            # clears its cooldown. Reinit won't help if the mic is genuinely
+            # silent (input level 0, muted, broken), so back off to avoid a
+            # 30-second reinit loop. See DEF-037.
+            grace = 120
+            self._last_resort_until = time.time() + grace
+            self._log(
+                f"Zombie reinit: same device [{dev_index}] {self.dev_name} "
+                f"re-selected, suppressing recovery for {grace}s"
+            )
+            try:
+                print(
+                    f"[mic] Same mic after reinit ({self.dev_name}), grace {grace}s",
+                    file=sys.stderr, flush=True,
+                )
+            except (BrokenPipeError, OSError):
+                pass
         else:
             self._log(f"Zombie reinit recovered: [{dev_index}] {self.dev_name}")
             try:
@@ -275,6 +300,8 @@ class DeviceManager:
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
         self._health_cv_history.clear()
         self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
+        self.ctx.dead_mic_zero_chunks = 0
+        self.ctx.dead_mic_low_chunks = 0
         return True
 
     # -------------------------------------------------------------------------
@@ -454,6 +481,8 @@ class DeviceManager:
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
         self._health_cv_history.clear()
         self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
+        self.ctx.dead_mic_zero_chunks = 0
+        self.ctx.dead_mic_low_chunks = 0
 
     # -------------------------------------------------------------------------
     # Dead mic timeout (AUDIO-13)
@@ -465,6 +494,12 @@ class DeviceManager:
         Called on every main loop iteration (including during recording).  Does
         nothing if ctx.last_good_audio_time is zero (not yet initialised) or if
         the reinit flag is already set.
+
+        DEF-051: if the user has explicitly pinned a mic from the HUD menu
+        (`_mic_pinned`), AUDIO-13 does not force a reinit. A user-pinned mic
+        is a deliberate choice — kicking them off after 30 s of idle silence
+        (normal when not speaking) was causing the wireless mic to fall back
+        to built-in constantly.
         """
         if not self.ctx.last_good_audio_time:
             return
@@ -472,15 +507,24 @@ class DeviceManager:
             return
         if time.time() < self._last_resort_until:
             return
+        if self._mic_pinned:
+            return  # DEF-051: pinned mics are not subject to AUDIO-13
         dead_secs = time.time() - self.ctx.last_good_audio_time
         if dead_secs > self._DEAD_MIC_TIMEOUT:
+            zero_n = self.ctx.dead_mic_zero_chunks
+            low_n = self.ctx.dead_mic_low_chunks
+            total = zero_n + low_n
+            diag = (
+                f"stream diag: {zero_n}/{total} all-zero chunks, "
+                f"{low_n}/{total} low (1-9)"
+            ) if total else "stream diag: no chunks observed"
             self._log(
                 f"WARNING: No good audio for {dead_secs:.0f}s, "
-                f"forcing mic reinit (AUDIO-13)"
+                f"forcing mic reinit (AUDIO-13) — {diag}"
             )
             try:
                 print(
-                    f"[mic] Dead mic timeout ({dead_secs:.0f}s silence), forcing reinit...",
+                    f"[mic] Dead mic timeout ({dead_secs:.0f}s silence), forcing reinit... {diag}",
                     file=sys.stderr, flush=True,
                 )
             except BrokenPipeError:
@@ -561,9 +605,11 @@ class DeviceManager:
     _bt_hfp_target: str = ""        # device name we're waiting for
     _bt_hfp_trigger_time: float = 0 # when we first triggered the HFP switch
     _bt_hfp_attempts: int = 0       # how many re-checks so far
+    _bt_hfp_pin_mode: bool = False  # True = user-requested pin (HUD menu);
+                                    # False = priority auto-switch
 
     _BT_HFP_RETRY_INTERVAL = 2.0   # seconds between re-checks
-    _BT_HFP_MAX_ATTEMPTS = 3       # give up after this many
+    _BT_HFP_MAX_ATTEMPTS = 5       # give up after this many (Jabras need more time than G435)
 
     def _try_switch_to_better_mic(
         self,
@@ -606,21 +652,33 @@ class DeviceManager:
         try:
             _pa = pyaudio.PyAudio()
             try:
+                found = False
                 for _i in range(_pa.get_device_count()):
                     _d = _pa.get_device_info_by_index(_i)
                     if (target_name.lower() in _d['name'].lower()
                             and _d['maxInputChannels'] > 0):
-                        try:
-                            _s = _pa.open(
-                                format=pyaudio.paInt16, channels=1,
-                                rate=sample_rate, input=True,
-                                input_device_index=_i,
-                                frames_per_buffer=chunk_size,
-                            )
-                            _s.close()
-                        except Exception:
-                            pass
+                        found = True
+                        with _mute_during_bt_switch(target_name):
+                            try:
+                                _s = _pa.open(
+                                    format=pyaudio.paInt16, channels=1,
+                                    rate=sample_rate, input=True,
+                                    input_device_index=_i,
+                                    frames_per_buffer=chunk_size,
+                                )
+                                _s.close()
+                            except Exception as probe_err:
+                                self._log(
+                                    f"BT HFP probe open failed for '{_d['name']}' "
+                                    f"(idx={_i}, rate={sample_rate}, chunk={chunk_size}): "
+                                    f"{type(probe_err).__name__}: {probe_err}"
+                                )
                         break
+                if not found:
+                    self._log(
+                        f"BT HFP probe: no input device matching '{target_name}' in "
+                        f"current enumeration (device likely still in A2DP-only mode)"
+                    )
             finally:
                 _pa.terminate()
         except Exception as e:
@@ -665,7 +723,11 @@ class DeviceManager:
         if has_input:
             self._log(f"BT HFP switch completed after {elapsed:.1f}s — switching mic")
             target = self._bt_hfp_target
+            pin_mode = self._bt_hfp_pin_mode
             self._bt_hfp_target = ""
+            self._bt_hfp_pin_mode = False
+            if pin_mode:
+                return self._do_manual_pin(target, sample_rate, chunk_size)
             return self._do_mic_switch(
                 target, mic_priority, sample_rate, chunk_size,
             )
@@ -676,6 +738,7 @@ class DeviceManager:
                 f"— keeping current mic, preserving headset_mode={self.headset_mode}"
             )
             self._bt_hfp_target = ""
+            self._bt_hfp_pin_mode = False
             return False
 
         # Re-trigger in case the first attempt didn't stick
@@ -692,6 +755,30 @@ class DeviceManager:
     ) -> bool:
         """Actually switch to a new mic via find_best_mic. Returns True on success."""
         old_headset_mode = self.headset_mode
+        # Probe first with a fresh PyAudio instance — don't close the live stream
+        # unless we're actually going to switch. This prevents a periodic click/toc
+        # cycle when find_best_mic keeps returning the current device (e.g. because
+        # the "better" candidate is deferred).
+        _probe_pa = pyaudio.PyAudio()
+        try:
+            candidate_index = find_best_mic(
+                _probe_pa,
+                mic_priority=mic_priority,
+                sample_rate=sample_rate,
+                chunk_size=chunk_size,
+                require_audio=True,
+            )
+            candidate_name = (
+                _probe_pa.get_device_info_by_index(candidate_index)['name']
+                if candidate_index is not None else None
+            )
+        finally:
+            _probe_pa.terminate()
+
+        if candidate_name and candidate_name == self.dev_name:
+            # No actual change — don't close/reopen/cue, stay on current stream
+            return False
+
         try:
             self.stream.stop_stream()
             self.stream.close()
@@ -710,11 +797,12 @@ class DeviceManager:
             self.dev_index = dev_index
             self.dev_name = self.pa.get_device_info_by_index(dev_index)['name']
             self._log(f"Switched to: [{dev_index}] {self.dev_name}")
-            self.stream = open_mic_stream(
-                self.pa, dev_index,
-                sample_rate=sample_rate,
-                chunk_size=chunk_size,
-            )
+            with _mute_during_bt_switch(self.dev_name):
+                self.stream = open_mic_stream(
+                    self.pa, dev_index,
+                    sample_rate=sample_rate,
+                    chunk_size=chunk_size,
+                )
             self.headset_mode = detect_headset(self.pa, dev_index)
             if self.profile_manager:
                 self.active_profile = self.profile_manager.get_profile(self.dev_name)
@@ -736,6 +824,67 @@ class DeviceManager:
         except Exception as e:
             self._log(f"Failed to reopen current mic: {e}")
         return False
+
+    def _do_manual_pin(
+        self, requested_name: str, sample_rate: int, chunk_size: int,
+    ) -> bool:
+        """Open the user-requested mic by name and pin it.
+
+        Used by the HUD-menu manual-switch flow (direct pick) and by
+        _continue_bt_hfp_wait when the pending target is a user pin that had
+        to wait for BT A2DP→HFP. Re-enumerates devices to get a fresh index
+        (indices shift after profile switches).
+
+        Returns True on success, False if the device still isn't available.
+        """
+        _pa = pyaudio.PyAudio()
+        target_index = None
+        try:
+            for _di in range(_pa.get_device_count()):
+                try:
+                    _d = _pa.get_device_info_by_index(_di)
+                    if (requested_name.lower() in _d['name'].lower()
+                            and _d['maxInputChannels'] > 0):
+                        target_index = _di
+                        break
+                except Exception:
+                    pass
+        finally:
+            _pa.terminate()
+
+        if target_index is None:
+            self._log(f"Manual pin failed: '{requested_name}' still has no input")
+            return False
+
+        try:
+            self.stream.stop_stream()
+            self.stream.close()
+        except Exception:
+            pass
+        self.pa.terminate()
+        self.pa = pyaudio.PyAudio()
+        self.dev_index = target_index
+        self.dev_name = self.pa.get_device_info_by_index(target_index)['name']
+        self._log(f"Switched to: [{target_index}] {self.dev_name} (pinned)")
+        with _mute_during_bt_switch(self.dev_name):
+            self.stream = open_mic_stream(
+                self.pa, target_index,
+                sample_rate=sample_rate,
+                chunk_size=chunk_size,
+            )
+        self.headset_mode = detect_headset(self.pa, target_index)
+        if self.profile_manager:
+            self.active_profile = self.profile_manager.get_profile(self.dev_name)
+        self._mic_pinned = True  # Suppress auto-switch back to priority mic
+        self._write_active_mic(self.dev_name)
+        device_change_cue(self.dev_name, "input")
+        self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+        # DEF-051: reset AUDIO-13 timer + diagnostic counters so a just-pinned
+        # mic isn't immediately kicked out by a stale dead-mic countdown.
+        self.ctx.last_good_audio_time = time.time()
+        self.ctx.dead_mic_zero_chunks = 0
+        self.ctx.dead_mic_low_chunks = 0
+        return True
 
     # -------------------------------------------------------------------------
     # Hotplug scan
@@ -821,57 +970,36 @@ class DeviceManager:
 
             # Check for manual mic switch request from HUD menu
             if os.path.exists(MIC_SWITCH_REQUEST_FILE):
+                requested_name = ""
                 try:
                     with open(MIC_SWITCH_REQUEST_FILE) as f:
                         requested_name = f.read().strip()
                     os.unlink(MIC_SWITCH_REQUEST_FILE)
-                    if requested_name:
-                        self._log(f"Mic switch requested from menu: {requested_name}")
-                        target_index = None
-                        for n in current_names:
-                            if requested_name.lower() in n.lower():
-                                _scan2 = pyaudio.PyAudio()
-                                try:
-                                    for _di2 in range(_scan2.get_device_count()):
-                                        try:
-                                            _d2 = _scan2.get_device_info_by_index(_di2)
-                                            if _d2['name'] == n and _d2['maxInputChannels'] > 0:
-                                                target_index = _di2
-                                                break
-                                        except Exception:
-                                            pass
-                                finally:
-                                    _scan2.terminate()
-                                break
-                        if target_index is not None:
-                            try:
-                                self.stream.stop_stream()
-                                self.stream.close()
-                            except Exception:
-                                pass
-                            self.pa.terminate()
-                            self.pa = pyaudio.PyAudio()
-                            self.dev_index = target_index
-                            self.dev_name = self.pa.get_device_info_by_index(target_index)['name']
-                            self._log(
-                                f"Switched to: [{target_index}] {self.dev_name} (pinned)"
-                            )
-                            self.stream = open_mic_stream(
-                                self.pa, target_index,
-                                sample_rate=sample_rate,
-                                chunk_size=chunk_size,
-                            )
-                            self.headset_mode = detect_headset(self.pa, target_index)
-                            if self.profile_manager:
-                                self.active_profile = self.profile_manager.get_profile(self.dev_name)
-                            self._mic_pinned = True  # Suppress auto-switch back to priority mic
-                            self._write_active_mic(self.dev_name)
-                            device_change_cue(self.dev_name, "input")
-                            self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
-                        else:
-                            self._log(f"Requested mic not found: {requested_name}")
                 except Exception as e:
                     self._log(f"Mic switch request error: {e}")
+
+                if requested_name:
+                    self._log(f"Mic switch requested from menu: {requested_name}")
+                    # If target currently has input channels, switch immediately.
+                    # Otherwise it's a BT device in A2DP mode — trigger the
+                    # A2DP→HFP profile switch and schedule non-blocking retries
+                    # (same flow the priority auto-switch uses).
+                    has_input = any(
+                        requested_name.lower() in n.lower()
+                        for n in current_names
+                    )
+                    if has_input:
+                        self._do_manual_pin(requested_name, sample_rate, chunk_size)
+                    else:
+                        self._log(
+                            f"Requested mic '{requested_name}' has no input yet "
+                            f"(likely BT A2DP), triggering HFP switch..."
+                        )
+                        self._bt_trigger_hfp_switch(requested_name, sample_rate, chunk_size)
+                        self._bt_hfp_target = requested_name
+                        self._bt_hfp_trigger_time = time.time()
+                        self._bt_hfp_attempts = 0
+                        self._bt_hfp_pin_mode = True
 
             # Check if the default output device changed (AUDIO-11)
             try:

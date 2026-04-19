@@ -377,18 +377,37 @@ def _osascript_type_text(
             )
     else:
         script = f'tell application "System Events"\n    {keystroke_block}\nend tell'
+    _paste_t0 = time.time()
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT + 2,
     )
+    _paste_elapsed_ms = int((time.time() - _paste_t0) * 1000)
 
     frontmost_after = _get_frontmost_app()
     if result.returncode != 0:
-        _log(f"paste: FAILED (rc={result.returncode}): {result.stderr.decode().strip()}")
+        _stderr = result.stderr.decode(errors="replace").strip()
+        _log(
+            f"paste: FAILED (rc={result.returncode}, {_paste_elapsed_ms} ms): {_stderr}"
+        )
         audio_cue("error")
         return False
 
-    _log(f"paste: OK → frontmost app AFTER = {frontmost_after}")
+    # DEF-052 diagnostic: log osascript duration + any stdout/stderr. Silent
+    # "success" where the keystroke vanished tends to manifest as an unusually
+    # short elapsed time (<100 ms skips settle delays) or stderr noise the
+    # user can't see otherwise.
+    _stderr = result.stderr.decode(errors="replace").strip()
+    _stdout = result.stdout.decode(errors="replace").strip()
+    _extra = ""
+    if _stderr:
+        _extra += f" stderr={_stderr!r}"
+    if _stdout:
+        _extra += f" stdout={_stdout!r}"
+    _log(
+        f"paste: OK → frontmost app AFTER = {frontmost_after} "
+        f"(osascript {_paste_elapsed_ms} ms){_extra}"
+    )
 
     if app_name and frontmost_after.lower() != app_name.lower() and frontmost_after != "?":
         _log(f"paste: WARNING: target was {app_name} but frontmost is {frontmost_after} — may have pasted to wrong app!")
@@ -500,7 +519,16 @@ def type_text(
     Returns:
         True on success, False on failure. Error cue is played on failure.
     """
-    if _chrome_type_text(text):
+    # Chrome extension path is only for browser targets. When app_name points
+    # to a specific non-browser app (e.g. Conductor), routing through Chrome
+    # would paste into whatever tab is active in the browser — completely
+    # wrong target. Only try Chrome when the target is a browser or unknown.
+    _browser_names = ("chrome", "arc", "brave", "edge", "vivaldi", "opera")
+    _is_browser_target = (
+        app_name is None
+        or any(b in app_name.lower() for b in _browser_names)
+    )
+    if _is_browser_target and _chrome_type_text(text):
         _log(f"type_text: done via Chrome extension ({len(text)} chars)")
         if enter_count > 0:
             _chrome_press_enter(enter_count)

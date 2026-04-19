@@ -12,8 +12,7 @@ import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from heyvox.hud.ipc import HUDClient
-    from heyvox.config import HeyvoxConfig
+    pass
 
 
 @dataclasses.dataclass
@@ -82,6 +81,12 @@ class AppContext:
 
     last_good_audio_time: float = 0.0
     """Updated whenever audio level >= threshold; drives dead mic detection."""
+
+    dead_mic_zero_chunks: int = 0
+    """Count of all-zero chunks since last_good_audio_time (AUDIO-13 diagnostic)."""
+
+    dead_mic_low_chunks: int = 0
+    """Count of chunks with level 1-9 since last_good_audio_time (AUDIO-13 diagnostic)."""
 
     # -------------------------------------------------------------------------
     # HUD state (Phase 5 — optional, never crashes main loop)
