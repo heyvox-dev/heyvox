@@ -17,12 +17,9 @@ Requirements: HERALD-01, HERALD-02, HERALD-03, HERALD-04
 from __future__ import annotations
 
 import logging
-import math
 import os
 import shutil
 import signal
-import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -30,7 +27,6 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -417,57 +413,143 @@ def _media_resume(cfg: OrchestratorConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_ducked_state(text: str) -> tuple[int | None, float] | None:
+    """Parse the ducked-state sidecar. Supports legacy 'vol' and new 'dev_id:vol'."""
+    text = text.strip()
+    if not text:
+        return None
+    if ":" in text:
+        dev_str, vol_str = text.split(":", 1)
+        try:
+            return int(dev_str), float(vol_str)
+        except ValueError:
+            return None
+    try:
+        return None, float(text)  # legacy: volume only, no device pinning
+    except ValueError:
+        return None
+
+
 def _duck_audio(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
-    """Lower system volume for TTS ducking. Returns the original volume or None."""
+    """Lower system volume for TTS ducking. Returns the original volume or None.
+
+    DEF-046: Saves the ducked device_id alongside the volume so that restore
+    always targets the originally-ducked device, even if the user switches
+    the default output mid-playback. Without the device pin, the duck level
+    sticks on device A while restore writes to device B, leaving A at 3%.
+    """
     if not cfg.duck_enabled:
         return None
 
-    from heyvox.herald.coreaudio import get_system_volume_cached, set_system_volume_cached
+    from heyvox.herald.coreaudio import (
+        _get_default_output_device, _set_volume_coreaudio,
+        get_system_volume_cached, set_system_volume_cached,
+    )
 
     # Only save original if not already ducked (avoid saving already-ducked level on restart)
     if cfg.original_vol_file.exists():
         try:
-            saved = float(cfg.original_vol_file.read_text().strip())
-            set_system_volume_cached(cfg.duck_level)
-            time.sleep(0.05)
-            return saved
-        except (ValueError, OSError):
+            parsed = _parse_ducked_state(cfg.original_vol_file.read_text())
+            if parsed is not None:
+                _dev_id, saved = parsed
+                # Duck the pinned device if we have one, else current default
+                if _dev_id is not None:
+                    _set_volume_coreaudio(_dev_id, cfg.duck_level)
+                else:
+                    set_system_volume_cached(cfg.duck_level)
+                time.sleep(0.05)
+                return saved
+        except OSError:
             pass
 
     original_vol = get_system_volume_cached(cfg.volume_cache_ttl)
+    dev_id = _get_default_output_device()
     try:
-        cfg.original_vol_file.write_text(str(original_vol))
+        if dev_id is not None:
+            cfg.original_vol_file.write_text(f"{dev_id}:{original_vol}")
+        else:
+            cfg.original_vol_file.write_text(str(original_vol))
     except OSError:
         pass
     set_system_volume_cached(cfg.duck_level)
     time.sleep(0.05)
-    _herald_log(f"ORCH: ducked audio from {original_vol:.2f} to {cfg.duck_level:.2f}", debug_log)
+    _herald_log(
+        f"ORCH: ducked audio from {original_vol:.2f} to {cfg.duck_level:.2f} (dev={dev_id})",
+        debug_log,
+    )
     return original_vol
 
 
 def _set_tts_volume(original_vol: float | None, cfg: OrchestratorConfig) -> None:
-    """Restore volume to TTS (full) level after ducking."""
+    """Restore volume to TTS (full) level after ducking.
+
+    Targets the originally-ducked device via the sidecar file so that a mid-
+    playback output device change doesn't leave the previous device muted.
+    """
     if not cfg.duck_enabled or original_vol is None:
+        _herald_log(
+            f"ORCH: _set_tts_volume skipped (duck_enabled={cfg.duck_enabled} "
+            f"original_vol={original_vol})",
+            cfg.debug_log,
+        )
         return
-    from heyvox.herald.coreaudio import set_system_volume_cached
-    set_system_volume_cached(original_vol)
+    from heyvox.herald.coreaudio import _set_volume_coreaudio, set_system_volume_cached
+    dev_id = None
+    try:
+        parsed = _parse_ducked_state(cfg.original_vol_file.read_text())
+        if parsed is not None:
+            dev_id, _ = parsed
+    except (OSError, ValueError):
+        pass
+    if dev_id is not None:
+        ok = _set_volume_coreaudio(dev_id, original_vol)
+        _herald_log(
+            f"ORCH: set TTS volume to {original_vol:.2f} via CA dev={dev_id} ok={ok}",
+            cfg.debug_log,
+        )
+    else:
+        set_system_volume_cached(original_vol)
+        _herald_log(
+            f"ORCH: set TTS volume to {original_vol:.2f} via system-cached (dev=None)",
+            cfg.debug_log,
+        )
 
 
 def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_log: Path) -> None:
-    """Restore volume after all TTS parts are done."""
+    """Restore volume after all TTS parts are done.
+
+    DEF-046: Restores to the pinned device_id captured at duck time, not the
+    current default. If the user switched output during playback, the original
+    device would otherwise stay stuck at 3%.
+    """
     if not cfg.duck_enabled:
         return
-    # Try in-memory first, then from file
+
+    from heyvox.herald.coreaudio import _set_volume_coreaudio, set_system_volume_cached
+
+    dev_id: int | None = None
     vol = original_vol
+
+    # Read sidecar to get the pinned device (and volume as fallback)
+    try:
+        parsed = _parse_ducked_state(cfg.original_vol_file.read_text())
+        if parsed is not None:
+            file_dev, file_vol = parsed
+            dev_id = file_dev
+            if vol is None:
+                vol = file_vol
+    except (OSError, ValueError):
+        pass
+
     if vol is None:
-        try:
-            vol = float(cfg.original_vol_file.read_text().strip())
-        except (OSError, ValueError):
-            return
-    from heyvox.herald.coreaudio import set_system_volume_cached
-    set_system_volume_cached(vol)
+        return
+
+    if dev_id is not None:
+        _set_volume_coreaudio(dev_id, vol)
+    else:
+        set_system_volume_cached(vol)
     cfg.original_vol_file.unlink(missing_ok=True)
-    _herald_log(f"ORCH: restored audio to {vol:.2f}", debug_log)
+    _herald_log(f"ORCH: restored audio to {vol:.2f} (dev={dev_id})", debug_log)
 
 
 # ---------------------------------------------------------------------------
