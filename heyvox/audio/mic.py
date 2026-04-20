@@ -9,6 +9,7 @@ Uses CoreAudio to filter out paired-but-disconnected Bluetooth devices.
 import ctypes
 import ctypes.util
 import time
+from contextlib import contextmanager
 
 import numpy as np
 import pyaudio
@@ -16,7 +17,51 @@ import pyaudio
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 
 # Re-export for use by hotplug scan in main.py
-__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down"]
+__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch"]
+
+
+@contextmanager
+def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
+    """Mute system output while opening a BT mic stream.
+
+    A2DP → HFP profile switches emit a pop/static burst. Muting output during
+    the stream open (and for settle_secs after) hides that artifact.
+
+    Skipped for built-in mics (no profile switch). Silently no-op if volume
+    helpers aren't importable (e.g. during CLI-only invocation).
+    """
+    if is_builtin_mic(device_name):
+        yield
+        return
+
+    _saved_vol = None
+    try:
+        from heyvox.herald.coreaudio import get_system_volume, set_system_volume
+        _saved_vol = get_system_volume()
+        set_system_volume(0.0)
+    except Exception:
+        pass
+
+    try:
+        yield
+    finally:
+        if _saved_vol is not None:
+            time.sleep(settle_secs)
+            try:
+                from heyvox.herald.coreaudio import set_system_volume
+                set_system_volume(_saved_vol)
+            except Exception:
+                pass
+
+# Built-in mic name substrings — these devices are physically always present
+# and should never be put in cooldown or rejected for low audio levels.
+_BUILTIN_MIC_NAMES = ["macbook pro microphone", "macbook air microphone", "built-in microphone"]
+
+def is_builtin_mic(device_name: str) -> bool:
+    """Check if a device is a built-in microphone (always assumed working)."""
+    name_lower = device_name.lower()
+    return any(b in name_lower for b in _BUILTIN_MIC_NAMES)
+
 
 # ---------------------------------------------------------------------------
 # Device cooldown — prevents re-selecting a dead Bluetooth device every cycle
@@ -58,6 +103,7 @@ class _AudioObjectPropertyAddress(ctypes.Structure):
 
 _kAudioObjectSystemObject = 1
 _kAudioHardwarePropertyDevices = _fourcc("dev#")
+_kAudioHardwarePropertyDefaultInputDevice = _fourcc("dIn ")
 _kAudioObjectPropertyScopeGlobal = _fourcc("glob")
 _kAudioObjectPropertyScopeInput = _fourcc("inpt")
 _kAudioObjectPropertyElementMain = 0
@@ -208,6 +254,155 @@ def get_dead_input_device_names() -> set[str]:
     return _get_dead_input_device_names()
 
 
+def force_os_default_input(name_substr: str) -> bool:
+    """Set the macOS default input device by name via CoreAudio ctypes.
+
+    This bypasses PyAudio entirely. PortAudio's CoreAudio HAL caches the
+    device enumeration at process start, so secondary ``pyaudio.PyAudio()``
+    instances spawned later (e.g. inside ``_bt_trigger_hfp_switch``) inherit
+    the stale cache — they can't see a Bluetooth input entry that only
+    appears after macOS activates HFP. Writing the default-input property
+    via CoreAudio forces macOS to activate HFP for the target BT device at
+    the OS level, regardless of what PyAudio thinks. See DEF-060.
+
+    Args:
+        name_substr: Case-insensitive substring of the target device name.
+
+    Returns:
+        True if a matching device was found and the default-input write
+        succeeded. False on any failure (CoreAudio unavailable, no match,
+        write rejected).
+    """
+    try:
+        ca_path = ctypes.util.find_library("CoreAudio")
+        cf_path = ctypes.util.find_library("CoreFoundation")
+        if not ca_path or not cf_path:
+            return False
+        ca = ctypes.cdll.LoadLibrary(ca_path)
+        cf = ctypes.cdll.LoadLibrary(cf_path)
+
+        cf.CFStringGetCStringPtr.restype = ctypes.c_char_p
+        cf.CFStringGetCStringPtr.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        cf.CFStringGetLength.restype = ctypes.c_long
+        cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32,
+        ]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+        def cfstr_to_str(cfstr) -> str:
+            if not cfstr:
+                return ""
+            ptr = cf.CFStringGetCStringPtr(cfstr, _kCFStringEncodingUTF8)
+            if ptr:
+                return ptr.decode("utf-8")
+            length = cf.CFStringGetLength(cfstr) * 4 + 1
+            buf = ctypes.create_string_buffer(length)
+            if cf.CFStringGetCString(cfstr, buf, length, _kCFStringEncodingUTF8):
+                return buf.value.decode("utf-8")
+            return ""
+
+        # Enumerate all CoreAudio devices (this call hits the live HAL, not
+        # PyAudio's cache — so BT devices that just became HFP-available
+        # show up here even when PyAudio can't see them).
+        addr = _AudioObjectPropertyAddress(
+            _kAudioHardwarePropertyDevices,
+            _kAudioObjectPropertyScopeGlobal,
+            _kAudioObjectPropertyElementMain,
+        )
+        size = ctypes.c_uint32(0)
+        status = ca.AudioObjectGetPropertyDataSize(
+            ctypes.c_uint32(_kAudioObjectSystemObject), ctypes.byref(addr),
+            ctypes.c_uint32(0), None, ctypes.byref(size),
+        )
+        if status != 0 or size.value == 0:
+            return False
+
+        buf = (ctypes.c_char * size.value)()
+        io_size = ctypes.c_uint32(size.value)
+        status = ca.AudioObjectGetPropertyData(
+            ctypes.c_uint32(_kAudioObjectSystemObject), ctypes.byref(addr),
+            ctypes.c_uint32(0), None, ctypes.byref(io_size), buf,
+        )
+        if status != 0:
+            return False
+
+        device_count = io_size.value // 4
+        device_ids = [
+            int.from_bytes(bytes(buf)[i * 4:(i + 1) * 4], byteorder="little")
+            for i in range(device_count)
+        ]
+
+        target_lower = name_substr.lower()
+        for did in device_ids:
+            # Must have input streams — skip output-only devices.
+            stream_addr = _AudioObjectPropertyAddress(
+                _kAudioDevicePropertyStreams,
+                _kAudioObjectPropertyScopeInput,
+                _kAudioObjectPropertyElementMain,
+            )
+            stream_size = ctypes.c_uint32(0)
+            status = ca.AudioObjectGetPropertyDataSize(
+                ctypes.c_uint32(did), ctypes.byref(stream_addr),
+                ctypes.c_uint32(0), None, ctypes.byref(stream_size),
+            )
+            if status != 0 or stream_size.value == 0:
+                continue
+
+            # Fetch the name and substring-match against the target.
+            name_addr = _AudioObjectPropertyAddress(
+                _kAudioObjectPropertyName,
+                _kAudioObjectPropertyScopeGlobal,
+                _kAudioObjectPropertyElementMain,
+            )
+            cfstr = ctypes.c_void_p(0)
+            name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
+            status = ca.AudioObjectGetPropertyData(
+                ctypes.c_uint32(did), ctypes.byref(name_addr),
+                ctypes.c_uint32(0), None, ctypes.byref(name_size),
+                ctypes.byref(cfstr),
+            )
+            if status != 0 or not cfstr.value:
+                continue
+            dev_name = cfstr_to_str(cfstr.value)
+            cf.CFRelease(cfstr)
+
+            if target_lower not in dev_name.lower():
+                continue
+
+            # Found it — write it as the default input device.
+            default_addr = _AudioObjectPropertyAddress(
+                _kAudioHardwarePropertyDefaultInputDevice,
+                _kAudioObjectPropertyScopeGlobal,
+                _kAudioObjectPropertyElementMain,
+            )
+            did_val = ctypes.c_uint32(did)
+            status = ca.AudioObjectSetPropertyData(
+                ctypes.c_uint32(_kAudioObjectSystemObject),
+                ctypes.byref(default_addr),
+                ctypes.c_uint32(0), None,
+                ctypes.c_uint32(ctypes.sizeof(did_val)),
+                ctypes.byref(did_val),
+            )
+            if status == 0:
+                _log(
+                    f"  CoreAudio: set default input to '{dev_name}' "
+                    f"(AudioObjectID={did})"
+                )
+                return True
+            _log(
+                f"  CoreAudio: SetPropertyData(defaultInput) failed "
+                f"status={status} for '{dev_name}'"
+            )
+            return False
+
+        return False
+    except Exception as e:
+        _log(f"  CoreAudio force_os_default_input failed: {e}")
+        return False
+
+
 def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sample_rate: int = DEFAULT_SAMPLE_RATE, chunk_size: int = DEFAULT_CHUNK_SIZE, require_audio: bool = False) -> int | None:
     """Find the best working microphone based on priority list.
 
@@ -260,30 +455,87 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
     MIN_AUDIO_LEVEL = 10
 
     def test_mic(index, name, frames=15) -> int:
-        """Open a test stream and return the peak audio level (0 on error)."""
-        test_stream = None
-        try:
-            test_stream = pa.open(
-                format=pyaudio.paInt16, channels=1,
-                rate=sample_rate, input=True,
-                input_device_index=index, frames_per_buffer=chunk_size,
-            )
-            max_level = 0
-            for _ in range(frames):
-                data = np.frombuffer(
-                    test_stream.read(chunk_size, exception_on_overflow=False),
-                    dtype=np.int16,
+        """Open a test stream and return the peak audio level (0 on error).
+
+        Runs the pa.open + read loop on a watchdog thread because CoreAudio
+        AUHAL err=-50 (paramErr) leaves PortAudio with a zombie stream: pa.open
+        returns normally (error only printed to stderr) but the first
+        stream.read() then spins forever in Pa_Sleep. Prior to the watchdog
+        a single bad probe would freeze the entire main loop (DEF-057).
+        """
+        import threading
+        # 15 frames × chunk_size @ 16 kHz ≈ 1.2 s for a healthy probe, plus
+        # the 0.8 s unmute settle. 4 s gives safe margin on the happy path
+        # while still bounding the hang on AUHAL zombie streams.
+        DEADLINE = 4.0
+
+        result = {"level": 0, "err": None, "stream": None}
+        done = threading.Event()
+
+        # Save system volume up front so the outer thread can restore it even
+        # if we abandon the probe worker mid-mute.
+        saved_vol = None
+        if not is_builtin_mic(name):
+            try:
+                from heyvox.herald.coreaudio import get_system_volume, set_system_volume
+                saved_vol = get_system_volume()
+                set_system_volume(0.0)
+            except Exception:
+                saved_vol = None
+
+        def _probe() -> None:
+            try:
+                s = pa.open(
+                    format=pyaudio.paInt16, channels=1,
+                    rate=sample_rate, input=True,
+                    input_device_index=index, frames_per_buffer=chunk_size,
                 )
-                max_level = max(max_level, int(np.abs(data).max()))
-            _log(f"  [{index}] {name}: max_level={max_level}")
-            return max_level
-        except Exception as e:
-            _log(f"  [{index}] {name}: error - {e}")
-            return 0
+                result["stream"] = s
+                max_level = 0
+                for _ in range(frames):
+                    data = np.frombuffer(
+                        s.read(chunk_size, exception_on_overflow=False),
+                        dtype=np.int16,
+                    )
+                    max_level = max(max_level, int(np.abs(data).max()))
+                result["level"] = max_level
+            except Exception as e:
+                result["err"] = repr(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_probe, daemon=True, name=f"probe-{name}")
+        t.start()
+        try:
+            if not done.wait(timeout=DEADLINE):
+                _log(f"  [{index}] {name}: PROBE TIMEOUT ({DEADLINE}s) — AUHAL zombie (err=-50?), abandoning thread")
+                # Best-effort close; may no-op or raise on a broken stream.
+                s = result.get("stream")
+                if s is not None:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                return 0
+            if result["err"]:
+                _log(f"  [{index}] {name}: error - {result['err']}")
+                return 0
+            _log(f"  [{index}] {name}: max_level={result['level']}")
+            return result["level"]
         finally:
-            if test_stream is not None:
+            s = result.get("stream")
+            if s is not None and not done.is_set():
+                pass  # thread still owns the stream, don't double-close
+            elif s is not None:
                 try:
-                    test_stream.close()
+                    s.close()
+                except Exception:
+                    pass
+            if saved_vol is not None:
+                time.sleep(0.8)
+                try:
+                    from heyvox.herald.coreaudio import set_system_volume
+                    set_system_volume(saved_vol)
                 except Exception:
                     pass
 
@@ -292,6 +544,23 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
     for rank, prio_name in enumerate(mic_priority):
         for index, dev_name in devices_by_priority[prio_name]:
             dev_key = dev_name.lower()
+            _is_builtin = is_builtin_mic(dev_name)
+
+            # Built-in mic is always assumed working — never cooldown or level-test it.
+            # Just verify the stream opens successfully.
+            if _is_builtin:
+                try:
+                    s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
+                                input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                    s.close()
+                    _log(f"  [{index}] {dev_name}: built-in mic, accepting (always trusted)")
+                    _device_cooldowns.pop(dev_key, None)
+                    _device_failure_counts.pop(dev_key, None)
+                    return index
+                except Exception as e:
+                    _log(f"  [{index}] {dev_name}: built-in mic stream failed: {e}")
+                    continue
+
             # Skip devices that failed recently — prevents tight infinite loop
             # when a dead Bluetooth device (e.g. Jabra) stays highest-priority.
             cooldown_ts = _device_cooldowns.get(dev_key)
@@ -324,9 +593,10 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             # Skip this fallback during dead-mic recovery (require_audio=True).
             if rank == 0 and not require_audio and max_level == 0:
                 try:
-                    s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
-                                input=True, input_device_index=index, frames_per_buffer=chunk_size)
-                    s.close()
+                    with mute_output_during_bt_switch(dev_name):
+                        s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
+                                    input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                        s.close()
                     _log(f"  [{index}] {dev_name}: no audio but stream OK (first priority), accepting")
                     # Don't penalise virtual/first-priority devices with a cooldown.
                     _device_cooldowns.pop(dev_key, None)
@@ -336,6 +606,22 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
 
     for index, dev_name in other_devices:
         dev_key = dev_name.lower()
+        _is_builtin = is_builtin_mic(dev_name)
+
+        # Built-in mic: always accept if stream opens (no cooldown, no level test).
+        if _is_builtin:
+            try:
+                s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
+                            input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                s.close()
+                _log(f"  [{index}] {dev_name}: built-in mic, accepting (always trusted)")
+                _device_cooldowns.pop(dev_key, None)
+                _device_failure_counts.pop(dev_key, None)
+                return index
+            except Exception as e:
+                _log(f"  [{index}] {dev_name}: built-in mic stream failed: {e}")
+                continue
+
         cooldown_ts = _device_cooldowns.get(dev_key)
         adaptive_secs = _get_adaptive_cooldown(dev_key)
         if cooldown_ts is not None and now - cooldown_ts < adaptive_secs:
@@ -359,9 +645,10 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
     try:
         default_info = pa.get_default_input_device_info()
         default_name = default_info.get('name', '')
-        if default_name and require_audio:
+        if default_name and require_audio and not is_builtin_mic(default_name):
             # When require_audio is set (recovery path), respect cooldown —
             # caller will retry or fall back to a second find_best_mic() without it.
+            # Built-in mics are exempt: they're always assumed working.
             default_key = default_name.lower()
             cooldown_ts = _device_cooldowns.get(default_key)
             if cooldown_ts is not None and now - cooldown_ts < _get_adaptive_cooldown(default_key):
@@ -442,10 +729,16 @@ def detect_headset(pa, selected_input_index: int) -> bool:
 def add_device_cooldown(device_name: str) -> None:
     """Add a device to cooldown after it was detected as silent/dead.
 
+    Built-in microphones are never put in cooldown — they are physically
+    always present and assumed working.
+
     Increments the failure count for adaptive cooldown escalation.
     Call this from the silent mic recovery path so that the hotplug scanner
     doesn't immediately re-select the dead device.
     """
+    if is_builtin_mic(device_name):
+        _log(f"Device '{device_name}' is built-in, skipping cooldown")
+        return
     key = device_name.lower()
     _device_failure_counts[key] = _device_failure_counts.get(key, 0) + 1
     _device_cooldowns[key] = time.time()
