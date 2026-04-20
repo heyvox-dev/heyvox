@@ -484,6 +484,11 @@ def _activate_app(pid: int, app_name: str) -> bool:
         if app is None:
             _log(f"activate: no NSRunningApplication for pid={pid}, falling back")
         else:
+            target_bundle = None
+            try:
+                target_bundle = app.bundleIdentifier()
+            except Exception:
+                pass
             app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
             # Poll-verify: frontmost PID may lag or land on a sibling helper PID.
             # 5 × 100 ms = 500 ms total, re-activate between iterations.
@@ -496,6 +501,27 @@ def _activate_app(pid: int, app_name: str) -> bool:
                     if i > 0:
                         _log(f"activate: pid={pid} confirmed frontmost after {i+1} polls")
                     return True
+                # Same-bundle sibling is frontmost: WindowServer will not
+                # rotate between helper PIDs of the same bundle in response
+                # to activateWithOptions_, and each repeated call blocks the
+                # main thread for ~1 s waiting on WindowServer (~5 s total
+                # burn on a 5-poll retry). Bail immediately — the paste-path
+                # focus shortcut (Cmd+L) lands keystrokes in the current
+                # frontmost helper's text input. See DEF-061.
+                same_bundle = False
+                if front is not None and target_bundle:
+                    try:
+                        same_bundle = front.bundleIdentifier() == target_bundle
+                    except Exception:
+                        front_name = front.localizedName() or ""
+                        same_bundle = front_name.lower() == (app_name or "").lower()
+                if same_bundle:
+                    _log(
+                        f"activate: sibling helper frontmost (pid={front_pid}, "
+                        f"target={pid}) — same bundle, skipping further "
+                        f"retries (DEF-061)"
+                    )
+                    return False
                 if i < 4:
                     app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
             _log(
