@@ -46,9 +46,12 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 class WakeWordConfig(BaseModel):
     """Wake word model names for start and stop triggers."""
-    start: str = "hey_jarvis_v0.1"
+    start: str = "hey_vox"
     stop: str = ""  # Empty = use same as start
-    also_load: list[str] = []  # Additional models to load as fallback wake words
+    # Additional models to load as fallback wake words. Ships with
+    # hey_jarvis_v0.1 (bundled with openwakeword) so fresh installs get a
+    # working fallback before any custom model is trained.
+    also_load: list[str] = ["hey_jarvis_v0.1"]
     model_thresholds: dict[str, float] = {}  # Per-model threshold overrides (e.g. hey_vox: 0.95)
     models_dir: str = ""  # Custom models directory (empty = use default locations)
     # Hard negative mining: passively save audio clips that contain speech but
@@ -649,8 +652,9 @@ def generate_default_config() -> str:
 # ---------------------------------------------------------------------------
 
 wake_words:
-  start: hey_jarvis_v0.1   # Model name (from models/ directory)
-  stop: hey_jarvis_v0.1    # Leave same as start to toggle; use different for separate start/stop
+  start: hey_vox                   # Model name (from models/ directory)
+  stop: hey_vox                    # Leave same as start to toggle; use different for separate start/stop
+  also_load: [hey_jarvis_v0.1]     # Extra fallback wake words loaded alongside start/stop
 
 threshold: 0.5             # Detection confidence threshold (0.0–1.0)
 cooldown_secs: 2.0         # Minimum seconds between triggers
