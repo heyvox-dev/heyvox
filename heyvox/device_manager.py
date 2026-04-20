@@ -25,6 +25,7 @@ from heyvox.audio.mic import (
     clear_device_cooldown,
     is_device_cooled_down,
     mute_output_during_bt_switch as _mute_during_bt_switch,
+    force_os_default_input,
 )
 from heyvox.audio.cues import device_change_cue
 from heyvox.audio.profile import MicProfileManager, MicProfileEntry
@@ -679,6 +680,18 @@ class DeviceManager:
                         f"BT HFP probe: no input device matching '{target_name}' in "
                         f"current enumeration (device likely still in A2DP-only mode)"
                     )
+                    # Fallback: bypass PyAudio's per-process HAL cache and ask
+                    # CoreAudio directly to switch the default input. This is
+                    # what nudges macOS to actually engage HFP for the headset
+                    # when PortAudio's cached enumeration doesn't yet list an
+                    # input entry for it (DEF-060).
+                    with _mute_during_bt_switch(target_name):
+                        if force_os_default_input(target_name):
+                            self._log(
+                                f"BT HFP probe: CoreAudio default-input write "
+                                f"succeeded for '{target_name}' — HFP negotiation "
+                                f"kicked off at the OS layer"
+                            )
             finally:
                 _pa.terminate()
         except Exception as e:
@@ -733,12 +746,41 @@ class DeviceManager:
             )
 
         if self._bt_hfp_attempts >= self._BT_HFP_MAX_ATTEMPTS:
+            # Last resort: PortAudio caches device enumeration per-process and
+            # throwaway pyaudio.PyAudio() instances inherit the stale cache
+            # (DEF-060). Flush the long-lived self.pa instance by calling
+            # reinit() before giving up — find_best_mic then runs against a
+            # fresh HAL snapshot and may pick up the BT input that just
+            # became HFP-available.
+            target = self._bt_hfp_target
+            pin_mode = self._bt_hfp_pin_mode
             self._log(
-                f"BT HFP switch failed after {elapsed:.1f}s / {self._bt_hfp_attempts} attempts "
-                f"— keeping current mic, preserving headset_mode={self.headset_mode}"
+                f"BT HFP attempt {self._bt_hfp_attempts}/{self._BT_HFP_MAX_ATTEMPTS} "
+                f"exhausted after {elapsed:.1f}s — flushing PyAudio HAL cache via reinit"
             )
             self._bt_hfp_target = ""
             self._bt_hfp_pin_mode = False
+            # scan() guards on (not is_recording and not busy), so reinit()
+            # is safe here without additional checks.
+            if self.reinit(require_audio=True):
+                # After reinit the device list is fresh; if the BT input
+                # landed, self.dev_name will now be the target and we're
+                # done. Otherwise emit the original give-up log.
+                if target.lower() in (self.dev_name or "").lower():
+                    self._log(
+                        f"BT HFP switch completed via post-reinit find_best_mic "
+                        f"— now on '{self.dev_name}'"
+                    )
+                    return True
+                if pin_mode:
+                    # Honour the user pin by trying the explicit switch path.
+                    if self._do_manual_pin(target, sample_rate, chunk_size):
+                        return True
+            self._log(
+                f"BT HFP switch failed after {elapsed:.1f}s / "
+                f"{self._BT_HFP_MAX_ATTEMPTS} attempts + cache flush "
+                f"— keeping current mic, preserving headset_mode={self.headset_mode}"
+            )
             return False
 
         # Re-trigger in case the first attempt didn't stick

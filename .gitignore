@@ -36,6 +36,14 @@ conductor/
 
 # Logs
 *.log
+mcp-logs.txt
+wa-logs.txt
+
+# Claude Code local state
+.claude/
+
+# Personal training data (user-specific, not shippable)
+training/recordings_*/
 
 # Test / coverage
 .coverage
