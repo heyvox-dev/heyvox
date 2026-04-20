@@ -47,9 +47,13 @@ from heyvox.constants import (
 log = logging.getLogger(__name__)
 
 # File-based log handler — matches herald_log() in config.sh
+# DEF-064: force INFO level so voice-selection lines reach the log file.
+# Without this, root logger defaults to WARNING, silencing forensic "Generating TTS" entries.
 _file_handler = logging.FileHandler(HERALD_DEBUG_LOG, delay=True)
 _file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-logging.getLogger("heyvox.herald").addHandler(_file_handler)
+_herald_logger = logging.getLogger("heyvox.herald")
+_herald_logger.addHandler(_file_handler)
+_herald_logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # Voice constants (from worker.sh)
@@ -135,32 +139,33 @@ def detect_mood(text: str) -> str:
 def detect_language(text: str) -> tuple[str, str | None]:
     """Detect language and return (lang_code, voice_override_or_None).
 
-    Ports detect_language() from worker.sh lines 105-130.
-    Returns e.g. ('en-us', None), ('ja', 'jf_alpha'), ('fr-fr', 'ff_siwis').
+    DEF-064: Latin-script language detection disabled by default.
+    The French regex `c.est` false-positives on "chest"/"crest" and the
+    Italian regex triggered on common English words, producing accented
+    English speech. Kokoro's English voices are the user's baseline.
+    CJK detection is retained (character-set based, zero false-positive).
+
+    Opt-in via env var HEYVOX_DETECT_LATIN_LANGS=1 for multilingual users.
     """
-    # CJK detection — Chinese or Japanese characters
+    # CJK detection — Chinese or Japanese characters (safe, char-set based)
     if re.search(r"[\u4e00-\u9fff]", text):
         return "cmn", "zf_xiaoxiao"
     if re.search(r"[\u3040-\u309f\u30a0-\u30ff]", text):
         return "ja", "jf_alpha"
 
-    # French
-    if re.search(
-        r"\b(je suis|merci|bonjour|s.il vous|c.est|nous avons|vous avez)\b",
-        text, re.IGNORECASE
-    ):
-        return "fr-fr", "ff_siwis"
-
-    # Italian
-    if re.search(
-        r"\b(grazie|buongiorno|ciao|sono|questo|quello|perch.)\b",
-        text, re.IGNORECASE
-    ):
-        return "it", "if_sara"
-
-    # German detection disabled — Kokoro has no German voice, and the British
-    # fallback (bf_emma) was triggering on common English words that overlap
-    # with German stopwords (regex false positives). Keep config voice instead.
+    if os.environ.get("HEYVOX_DETECT_LATIN_LANGS") == "1":
+        # French — anchored on distinctive bigrams, not ambiguous ones.
+        if re.search(
+            r"\b(je suis|s'il vous pla[îi]t|nous avons|vous avez|merci beaucoup)\b",
+            text, re.IGNORECASE
+        ):
+            return "fr-fr", "ff_siwis"
+        # Italian — multi-word phrases only, single words cause false positives.
+        if re.search(
+            r"\b(buongiorno|buonasera|grazie mille|prego signore|mi scusi)\b",
+            text, re.IGNORECASE
+        ):
+            return "it", "if_sara"
 
     return "en-us", None
 
