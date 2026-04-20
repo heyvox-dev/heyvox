@@ -139,33 +139,62 @@ def detect_mood(text: str) -> str:
 def detect_language(text: str) -> tuple[str, str | None]:
     """Detect language and return (lang_code, voice_override_or_None).
 
-    DEF-064: Latin-script language detection disabled by default.
-    The French regex `c.est` false-positives on "chest"/"crest" and the
-    Italian regex triggered on common English words, producing accented
-    English speech. Kokoro's English voices are the user's baseline.
-    CJK detection is retained (character-set based, zero false-positive).
-
-    Opt-in via env var HEYVOX_DETECT_LATIN_LANGS=1 for multilingual users.
+    Kokoro supports English, French, Italian, Spanish, Portuguese,
+    Japanese, Mandarin, Hindi. For those we return the matching voice.
+    German is explicitly detected but routed to English — Kokoro has
+    no German voice and the Piper Thorsten fallback sounds unnatural.
+    All regexes use tight multi-word phrases or unambiguous single
+    tokens only (DEF-064: earlier `c.est` / `sono` patterns flipped
+    English text to accented voices).
     """
-    # CJK detection — Chinese or Japanese characters (safe, char-set based)
-    if re.search(r"[\u4e00-\u9fff]", text):
-        return "cmn", "zf_xiaoxiao"
+    # CJK detection — character-range based, zero false-positive risk.
+    # Japanese check first: JP text mixes kana + kanji, and kanji alone
+    # would misroute to Mandarin. Kana presence is the Japanese tell.
     if re.search(r"[\u3040-\u309f\u30a0-\u30ff]", text):
         return "ja", "jf_alpha"
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "cmn", "zf_xiaoxiao"
 
-    if os.environ.get("HEYVOX_DETECT_LATIN_LANGS") == "1":
-        # French — anchored on distinctive bigrams, not ambiguous ones.
-        if re.search(
-            r"\b(je suis|s'il vous pla[îi]t|nous avons|vous avez|merci beaucoup)\b",
-            text, re.IGNORECASE
-        ):
-            return "fr-fr", "ff_siwis"
-        # Italian — multi-word phrases only, single words cause false positives.
-        if re.search(
-            r"\b(buongiorno|buonasera|grazie mille|prego signore|mi scusi)\b",
-            text, re.IGNORECASE
-        ):
-            return "it", "if_sara"
+    # German — umlauts + anchored ich/wir phrases. Kokoro has no German
+    # voice, and the Piper Thorsten fallback is disliked. Keep English.
+    if re.search(r"[äöüÄÖÜß]", text) or re.search(
+        r"\b(ich bin|ich habe|wir haben|das ist|was ist|guten (morgen|tag|abend)|"
+        r"danke sch[öo]n|bitte sch[öo]n|auf wiedersehen|entschuldigung)\b",
+        text, re.IGNORECASE,
+    ):
+        return "en-us", None
+
+    # French — anchored phrases only. No `c.est` wildcard (matched "chest"/"crest").
+    if re.search(
+        r"\b(je suis|nous sommes|nous avons|vous avez|c'est|il y a|"
+        r"s'il vous pla[îi]t|merci beaucoup|bonjour monsieur)\b",
+        text, re.IGNORECASE,
+    ):
+        return "fr-fr", "ff_siwis"
+
+    # Italian — multi-word phrases; single `sono` is a real English word.
+    if re.search(
+        r"\b(buongiorno|buonasera|buonanotte|grazie mille|prego signore|"
+        r"mi scusi|non capisco|parla italiano|come stai|arrivederci)\b",
+        text, re.IGNORECASE,
+    ):
+        return "it", "if_sara"
+
+    # Spanish — greetings and unambiguous phrases.
+    if re.search(
+        r"\b(hola|buenos d[íi]as|buenas (tardes|noches)|por favor|"
+        r"muchas gracias|lo siento|c[óo]mo est[áa]s|hasta luego)\b",
+        text, re.IGNORECASE,
+    ):
+        return "es", "ef_dora"
+
+    # Portuguese — greetings; "obrigado/a" is the cleanest tell.
+    if re.search(
+        r"\b(ol[áa]|bom dia|boa (tarde|noite)|obrigad[oa]|"
+        r"por favor|at[ée] logo|como vai)\b",
+        text, re.IGNORECASE,
+    ):
+        return "pt", "pf_dora"
 
     return "en-us", None
 
@@ -383,8 +412,8 @@ class HeraldWorker:
         if self._generate_kokoro(text, voice, lang, speed, temp_wav, timestamp):
             return True
 
-        log.warning("Kokoro daemon unavailable — falling back to Piper")
-        return self._generate_piper(text, voice, temp_wav, timestamp)
+        log.warning("Kokoro daemon unavailable — falling back to Piper (lang=%s)", lang)
+        return self._generate_piper(text, voice, temp_wav, timestamp, lang)
 
     def _generate_kokoro(
         self,
@@ -546,14 +575,15 @@ class HeraldWorker:
         voice: str,
         temp_wav: str,
         timestamp: str,
+        lang: str = "en-us",
     ) -> bool:
         """Generate WAV via Piper TTS (fallback path).
 
         Ports the CLI fallback from worker.sh lines 247-260.
         Normalizes output via normalize_wav_in_place() per HERALD-02.
         """
-        # Find piper model path
-        model_path = self._find_piper_model()
+        # Find piper model path matching the requested language
+        model_path = self._find_piper_model(lang)
         if not model_path:
             log.warning("Piper model not found — TTS unavailable")
             return False
@@ -684,20 +714,59 @@ class HeraldWorker:
 
         return sys.executable
 
-    def _find_piper_model(self) -> str | None:
-        """Find a Piper TTS model file."""
+    def _find_piper_model(self, lang: str = "en-us") -> str | None:
+        """Find a Piper TTS model file.
+
+        DEF-065: Previous implementation returned `matches[0]` from an
+        alphabetical glob, so `de_DE-thorsten-*.onnx` always beat
+        `en_US-*.onnx`. English text then played with a German voice.
+        Now we score candidates: (a) exact lang prefix match first
+        (e.g. `en_US` for en-us), (b) any `en_*` as second choice,
+        (c) never silently fall to a different language. German
+        (`de_*`) is skipped unless explicitly requested.
+        """
+        import glob
+
         search_dirs = [
             os.path.expanduser("~/.local/share/piper"),
+            os.path.expanduser("~/.local/share/piper-voices"),
             os.path.expanduser("~/.piper"),
             "/usr/local/share/piper",
         ]
+        candidates: list[str] = []
         for d in search_dirs:
-            for pattern in ["*.onnx"]:
-                import glob
-                matches = glob.glob(os.path.join(d, "**", pattern), recursive=True)
-                if matches:
-                    return matches[0]
-        return None
+            candidates.extend(glob.glob(os.path.join(d, "**", "*.onnx"), recursive=True))
+
+        if not candidates:
+            return None
+
+        # Map request language → piper file prefix
+        lang_prefix = {
+            "en-us": "en_US", "en-gb": "en_GB",
+            "fr-fr": "fr_FR", "it": "it_IT",
+            "es": "es_ES", "pt": "pt_PT",
+            "ja": "ja_JP", "cmn": "zh_CN",
+        }.get(lang, "en_US")
+
+        def score(path: str) -> int:
+            # Match against both filename and parent dir (piper-voices layout
+            # uses `<lang>/<voice>.onnx` with unprefixed basenames).
+            base = os.path.basename(path).lower()
+            parent = os.path.basename(os.path.dirname(path)).lower()
+            tokens = f"{parent}/{base}"
+            if lang_prefix.lower() in tokens or parent == lang_prefix.split("_")[0].lower():
+                return 0  # exact lang match
+            if "en_" in tokens or parent == "en":
+                return 1  # English fallback
+            if "de_" in tokens or "thorsten" in base or parent == "de":
+                return 99  # German last resort only (user dislikes Thorsten)
+            return 50  # other language, ahead of German
+
+        best = sorted(candidates, key=score)[0]
+        if score(best) >= 99:
+            log.warning("No suitable Piper model; only German present — skipping TTS")
+            return None
+        return best
 
     # ------------------------------------------------------------------
     # Private: socket communication
