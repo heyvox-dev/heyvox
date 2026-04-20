@@ -113,7 +113,7 @@ def strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
 
     Args:
         text: Raw transcription from STT.
-        start_model: Wake word model name for start trigger (e.g. "hey_jarvis_v0.1").
+        start_model: Wake word model name for start trigger (e.g. "hey_vox").
         stop_model: Wake word model name for stop trigger.
 
     Returns:
