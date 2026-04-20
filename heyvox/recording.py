@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from heyvox.text_processing import is_garbled, strip_wake_words
-from heyvox.constants import RECORDING_FLAG, TTS_PLAYING_FLAG, STT_DEBUG_DIR
+from heyvox.constants import RECORDING_FLAG, STT_DEBUG_DIR
 
 if TYPE_CHECKING:
     from heyvox.app_context import AppContext
@@ -22,8 +22,9 @@ if TYPE_CHECKING:
 
 # Minimum audio energy (dBFS) to proceed with STT. Recordings below this
 # threshold are treated as silence — skips Whisper to avoid hallucinations.
-# -60 dBFS catches only true silence/near-silence. Normal quiet speech is ~-45 to -35 dBFS.
-_MIN_AUDIO_DBFS = -60.0
+# Normal speech is -30 to -42 dBFS. False triggers on background noise are
+# typically -48 to -55 dBFS. Set to -48 to catch those while allowing quiet speech.
+_MIN_AUDIO_DBFS = -48.0
 
 
 def _audio_rms(chunks: list, sample_rate: int) -> float:
@@ -399,6 +400,15 @@ class RecordingStateMachine:
                             f"Post-trim audio too short ({_post_trim_secs:.1f}s), "
                             f"cancelling (Whisper hallucination risk)"
                         )
+                        # Training: trigger fired but recording has no real content → FP.
+                        if self.training_collector:
+                            if self.training_collector.reclassify_tp_start_as_fp(
+                                "post-trim-short"
+                            ):
+                                self._log(
+                                    "Training: reclassified tp_start → FP "
+                                    "(post-trim-short)"
+                                )
                         _release_recording_guard()
                         with self.ctx.lock:
                             self.ctx.busy = False
@@ -470,8 +480,7 @@ class RecordingStateMachine:
         from heyvox.audio.stt import transcribe_audio
         from heyvox.audio.cues import audio_cue, get_cues_dir
         from heyvox.input.injection import (
-            type_text, save_frontmost_pid, restore_frontmost,
-            _settle_delay_for,
+            type_text, save_frontmost_pid, _settle_delay_for,
         )
         from heyvox.input.target import restore_target
         from heyvox.audio.tts import check_voice_command, execute_voice_command
@@ -483,6 +492,19 @@ class RecordingStateMachine:
                 self._log(
                     f"Recording too quiet ({raw_rms_db:.1f} dBFS < {_MIN_AUDIO_DBFS} dBFS), skipping STT"
                 )
+                # Training: wake fired but mic captured only noise → FP.
+                if self.training_collector:
+                    if self.training_collector.reclassify_tp_start_as_fp(
+                        "low-energy"
+                    ):
+                        self._log(
+                            "Training: reclassified tp_start → FP (low-energy)"
+                        )
+                    # Also save the noise tail with FP label for training.
+                    self.training_collector.save_fp(
+                        audio_chunks, self.config.audio.sample_rate,
+                        reason="low-energy",
+                    )
                 cues_dir = get_cues_dir(self.config.cues_dir)
                 audio_cue("paused", cues_dir)
                 return
@@ -575,12 +597,37 @@ class RecordingStateMachine:
 
             if not text:
                 self._log("WARNING: Empty transcription, skipping")
+                # Training: STT returned nothing from a triggered recording → FP.
+                if self.training_collector:
+                    if self.training_collector.reclassify_tp_start_as_fp(
+                        "empty-stt"
+                    ):
+                        self._log(
+                            "Training: reclassified tp_start → FP (empty-stt)"
+                        )
+                    if _training_chunks:
+                        self.training_collector.save_fp(
+                            _training_chunks, _training_sr, reason="empty-stt"
+                        )
                 audio_cue("paused", cues_dir)
                 return
 
             # Check if cancelled during transcription
             if self.ctx.cancel_transcription.is_set():
                 self._log("Transcription cancelled by user (Escape)")
+                # Training: user explicitly cancelled → likely FP (trigger was wrong).
+                if self.training_collector:
+                    if self.training_collector.reclassify_tp_start_as_fp(
+                        "user-cancelled"
+                    ):
+                        self._log(
+                            "Training: reclassified tp_start → FP (user-cancelled)"
+                        )
+                    if _training_chunks:
+                        self.training_collector.save_fp(
+                            _training_chunks, _training_sr,
+                            reason="user-cancelled",
+                        )
                 audio_cue("paused", cues_dir)
                 self.ctx.cancel_transcription.clear()
                 return
@@ -733,8 +780,16 @@ class RecordingStateMachine:
                 # Only send focus shortcut if a workspace switch actually happened
                 # (sidebar click steals focus from text input, Cmd+L restores it).
                 # When no switch was needed, focus is already on the text input.
+                # EXCEPT: if activate failed (multi-PID Electron rotation), we
+                # skipped AX refocus in restore_target — force focus shortcut so
+                # paste lands in the current frontmost helper's text input.
                 ws_switched = getattr(recording_target, '_workspace_switched', False)
-                _focus = profile.focus_shortcut if (profile and ws_switched) else ""
+                activate_failed = getattr(recording_target, '_activate_failed', False)
+                _focus = (
+                    profile.focus_shortcut
+                    if (profile and (ws_switched or activate_failed))
+                    else ""
+                )
                 paste_ok = type_text(
                     paste_text,
                     app_name=target_app,
