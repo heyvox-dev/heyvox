@@ -23,9 +23,16 @@ from typing import Any
 
 
 def _log(msg: str) -> None:
-    """Log to stderr with [target] prefix."""
+    """Log to stderr with [HH:MM:SS] [target] prefix.
+
+    Timestamp is needed for sub-step timing inside restore_target
+    (DEF-061) — without it, multi-second hangs inside a single call
+    are invisible because only the caller's entry/exit lines carry
+    timestamps.
+    """
     try:
-        print(f"[target] {msg}", file=sys.stderr, flush=True)
+        ts = _time.strftime("%H:%M:%S")
+        print(f"[{ts}] [target] {msg}", file=sys.stderr, flush=True)
     except (BrokenPipeError, OSError):
         pass
 
@@ -395,10 +402,25 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
     # Step 1: Activate the app (skip if already frontmost)
     if _already_frontmost:
         _log(f"restore: {snap.app_name} already frontmost, skipping activate")
+        activate_ok = True
     else:
         _log(f"restore: activating {snap.app_name} (pid={snap.app_pid})")
-        _activate_app(snap.app_pid, snap.app_name)
+        activate_ok = _activate_app(snap.app_pid, snap.app_name)
         _time.sleep(0.3)
+
+    # When activate fails (target PID != frontmost — common for multi-PID
+    # Electron bundles rotating helper PIDs between capture and restore), the
+    # captured AX element lives on a background helper. Any AX call on it
+    # blocks ~6 s waiting for the unfocused helper's AX server (DEF-059).
+    # Skip AX refocus; the paste path's focus shortcut (Cmd+L) will target
+    # the current frontmost helper and land the keystrokes correctly.
+    if not activate_ok:
+        _log(
+            f"restore: skipping AX refocus (activate failed — stale element "
+            f"would hang); relying on paste-path focus shortcut"
+        )
+        snap._activate_failed = True
+        return True
 
     # Step 2: Try to refocus the captured element directly.
     # Skip AXWebArea -- in Electron/Tauri apps this is the conversation content
