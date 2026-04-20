@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import math
 import struct
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 # ---------------------------------------------------------------------------
 # Constants (shared defaults, int16 scale)

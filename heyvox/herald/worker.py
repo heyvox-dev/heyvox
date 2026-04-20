@@ -22,12 +22,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -160,12 +158,9 @@ def detect_language(text: str) -> tuple[str, str | None]:
     ):
         return "it", "if_sara"
 
-    # German
-    if re.search(
-        r"\b(ich|nicht|haben|werden|k.nnen|m.ssen|danke|bitte)\b",
-        text, re.IGNORECASE
-    ):
-        return "en-gb", "bf_emma"
+    # German detection disabled — Kokoro has no German voice, and the British
+    # fallback (bf_emma) was triggering on common English words that overlap
+    # with German stopwords (regex false positives). Keep config voice instead.
 
     return "en-us", None
 
@@ -762,11 +757,21 @@ if __name__ == "__main__":
     # Entry point for hook shims: python3 -m heyvox.herald.worker [raw_file]
     worker = HeraldWorker()
 
+    raw_file = None
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        raw = Path(sys.argv[1]).read_text()
+        raw_file = sys.argv[1]
+        raw = Path(raw_file).read_text()
     else:
         raw = sys.stdin.read()
 
     hook_type = os.environ.get("HERALD_HOOK_TYPE", "response")
     success = worker.process_response(raw, hook_type=hook_type)
+
+    # Clean up temp file created by async hook shims
+    if raw_file and raw_file.startswith("/tmp/herald-hook."):
+        try:
+            os.unlink(raw_file)
+        except OSError:
+            pass
+
     sys.exit(0 if success else 1)

@@ -103,13 +103,13 @@ def _hush_command(action: str, **kwargs) -> dict | None:
         resp = json.loads(data)
         return resp if "error" not in resp else None
     except ConnectionRefusedError:
-        # Stale socket file from a dead hush_host — clean it up so we don't
-        # waste time on every subsequent call.
-        _log("Hush socket connection refused (stale socket), removing")
-        try:
-            os.unlink(_HUSH_SOCK)
-        except OSError:
-            pass
+        # ECONNREFUSED can be transient (accept backlog full, host briefly
+        # hung). Do NOT unlink — the Hush host owns the socket lifecycle
+        # (DEF-039, DEF-041). Unlinking strands the live host holding an
+        # orphaned inode, and Chrome NativeMessaging won't respawn it because
+        # the host is still alive. If the host truly died, its atexit handler
+        # clears the file; Chrome relaunches on next extension action.
+        _log("Hush socket connection refused (leaving file, host owns lifecycle)")
         return None
     except (OSError, json.JSONDecodeError, ValueError):
         return None
@@ -326,6 +326,31 @@ end tell'''
         return False
 
 
+def _has_audible_chrome_tab() -> bool:
+    """Check if Chrome has any audible tab (no JS required, uses AppleScript properties)."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", '''
+tell application "System Events"
+    if not (exists process "Google Chrome") then return "no"
+end tell
+tell application "Google Chrome"
+    repeat with w in every window
+        repeat with t in every tab of w
+            if URL of t contains "youtube.com" or URL of t contains "twitch.tv" or URL of t contains "vimeo.com" or URL of t contains "netflix.com" then
+                return "yes"
+            end if
+        end repeat
+    end repeat
+end tell
+return "no"'''],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        return r.stdout.strip() == "yes"
+    except Exception:
+        return False
+
+
 def _send_media_key():
     """Send the system play/pause media key via Quartz.
 
@@ -431,6 +456,16 @@ def pause_media() -> bool:
                 _log(f"pause_media: {app_name} video already paused by user")
                 return False
             continue
+
+    # --- Tier 4: Media key (blind toggle) ---
+    # If Hush is down and Chrome JS is disabled, the above tiers all miss
+    # browser media. Use tab.audible detection + media key as last resort.
+    if _has_audible_chrome_tab():
+        _log("pause_media: audible Chrome tab detected, sending media key")
+        if _send_media_key():
+            with open(_PAUSE_FLAG, "w") as f:
+                f.write("media-key")
+            return True
 
     # Nothing playing — cache this result so subsequent TTS sentences
     # skip the slow detection chain (Hush + nowplaying + Chrome JS).

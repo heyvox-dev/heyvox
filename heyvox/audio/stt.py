@@ -314,12 +314,18 @@ def transcribe_audio(
 
 
 def model_loaded() -> bool:
-    """Return True if the MLX model is currently loaded in memory."""
+    """Return True if the MLX model is currently loaded in memory.
+
+    Kept for test_stress.py memory introspection.
+    """
     return _mlx_loaded.is_set()
 
 
 def memory_mb() -> float:
-    """Return approximate memory used by the STT model (MB)."""
+    """Return approximate memory used by the STT model (MB).
+
+    Kept for test_stress.py memory introspection.
+    """
     if _mlx_loaded.is_set():
         return 855.0  # Measured: whisper-small-mlx baseline
     return 0.0

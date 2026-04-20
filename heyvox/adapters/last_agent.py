@@ -52,7 +52,6 @@ class LastAgentAdapter:
         """Start a daemon thread that polls NSWorkspace for frontmost app."""
 
         def _poll() -> None:
-            import sys
             try:
                 import AppKit
                 workspace = AppKit.NSWorkspace.sharedWorkspace()

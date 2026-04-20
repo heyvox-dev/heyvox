@@ -159,11 +159,6 @@ def init_aec(delay_ms: int = AEC_DEFAULT_DELAY_MS) -> bool:
             return False
 
 
-def is_aec_available() -> bool:
-    """Check if AEC has been initialized and is ready."""
-    return _aec_available is True
-
-
 def process_mic_frame(audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
     """Process a microphone audio frame through the AEC.
 
@@ -217,54 +212,3 @@ def process_mic_frame(audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray
         return audio
 
 
-def process_speaker_frame(audio: np.ndarray, sample_rate: int = 24000) -> None:
-    """Feed a speaker audio frame to the AEC as the reference signal.
-
-    Must be called for every audio chunk played through the speakers.
-    The AEC uses this to know what to subtract from the mic input.
-
-    Args:
-        audio: Speaker audio as float32 or int16 numpy array.
-        sample_rate: Sample rate in Hz (Kokoro TTS uses 24000).
-
-    Requirement: ECHO-05
-    """
-    if _apm is None or not _aec_available:
-        return
-
-    try:
-        from livekit.rtc import AudioFrame
-
-        # Convert float32 TTS audio to int16
-        if audio.dtype == np.float32:
-            audio_i16 = (audio * 32767).clip(-32768, 32767).astype(np.int16)
-        else:
-            audio_i16 = audio.astype(np.int16)
-
-        # Resample to mic sample rate (16kHz) if needed — AEC needs matching rates
-        if sample_rate != 16000:
-            # Simple decimation for 24000->16000 (ratio 2:3)
-            # For production, use scipy.signal.resample_poly
-            target_len = int(len(audio_i16) * 16000 / sample_rate)
-            indices = np.linspace(0, len(audio_i16) - 1, target_len).astype(int)
-            audio_i16 = audio_i16[indices]
-            sample_rate = 16000
-
-        samples_per_10ms = sample_rate // 100
-
-        for offset in range(0, len(audio_i16), samples_per_10ms):
-            chunk = audio_i16[offset:offset + samples_per_10ms]
-            if len(chunk) < samples_per_10ms:
-                chunk = np.pad(chunk, (0, samples_per_10ms - len(chunk)))
-
-            frame = AudioFrame(
-                data=chunk.tobytes(),
-                sample_rate=sample_rate,
-                num_channels=1,
-                samples_per_channel=samples_per_10ms,
-            )
-
-            _apm.process_reverse_stream(frame)
-
-    except Exception as e:
-        log.debug("AEC process_speaker_frame error: %s", e)

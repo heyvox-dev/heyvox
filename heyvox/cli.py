@@ -141,13 +141,18 @@ def _cmd_logs(args):
 def _cmd_speak(args):
     """Synthesize and play text via Kokoro TTS, then exit.
 
-    Starts the TTS worker, enqueues the text, waits for playback to finish,
-    then shuts down. Designed as a fire-and-forget CLI command.
+    Starts the TTS worker, enqueues the text, waits for Herald to finish
+    playing all queued WAVs, then shuts down. Designed as a fire-and-forget
+    CLI command.
 
     Requirement: CLI-05
     """
-    from heyvox.audio.tts import speak, start_worker, shutdown, _tts_queue
+    import os
+    import time
+
+    from heyvox.audio.tts import speak, start_worker, shutdown
     from heyvox.config import load_config
+    from heyvox.constants import HERALD_QUEUE_DIR, HERALD_PLAYING_PID
 
     config = load_config()
     start_worker(config)
@@ -160,8 +165,29 @@ def _cmd_speak(args):
         verbosity=args.verbosity,
     )
 
-    # Wait for all enqueued items to finish playing
-    _tts_queue.join()
+    # Herald is a separate process — poll queue + playing PID until drained.
+    # Cap at 120s so a stuck queue doesn't hang the CLI forever.
+    deadline = time.time() + 120.0
+    # Brief grace so the speak() call's enqueue hits Herald before we check.
+    time.sleep(0.3)
+    while time.time() < deadline:
+        queue_empty = True
+        if os.path.isdir(HERALD_QUEUE_DIR):
+            queue_empty = not any(
+                f.endswith(".wav") for f in os.listdir(HERALD_QUEUE_DIR)
+            )
+        playing = False
+        if os.path.exists(HERALD_PLAYING_PID):
+            try:
+                pid = int(open(HERALD_PLAYING_PID).read().strip())
+                os.kill(pid, 0)
+                playing = True
+            except (OSError, ValueError):
+                playing = False
+        if queue_empty and not playing:
+            break
+        time.sleep(0.2)
+
     shutdown()
 
 
@@ -479,12 +505,10 @@ def _cmd_calibrate(args):
     """
     import json
     import time
-    from pathlib import Path
 
     import numpy as np
 
     from heyvox.audio.profile import MicProfileManager
-    from heyvox.config import MicProfileEntryConfig
 
     cache_dir = _calibrate_get_cache_dir()
 
@@ -557,7 +581,7 @@ def _cmd_calibrate(args):
                 default = pa.get_default_input_device_info()
                 target_index = default.get("index", 0)
                 target_name = default["name"]
-            except OSError as e:
+            except OSError:
                 # No default input device — try any input device
                 found = False
                 for i in range(pa.get_device_count()):

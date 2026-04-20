@@ -4,7 +4,6 @@ Handles voice output: Kokoro TTS generation, queue management, audio ducking,
 media pause/resume, and workspace-aware playback.
 """
 
-import os
 from pathlib import Path
 
 # Package root — used by hook shims
