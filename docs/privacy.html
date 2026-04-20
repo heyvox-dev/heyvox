@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy — HeyVox &amp; Hush</title>
+<style>
+    :root { color-scheme: light dark; }
+    body {
+        font: 16px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, sans-serif;
+        max-width: 720px;
+        margin: 3rem auto;
+        padding: 0 1.25rem;
+        color: #1d1d1f;
+        background: #fff;
+    }
+    @media (prefers-color-scheme: dark) {
+        body { color: #f0f0f0; background: #121212; }
+        a { color: #7cb1ff; }
+    }
+    h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.25rem; margin-top: 2.25rem; }
+    .meta { color: #888; font-size: 0.9rem; margin-bottom: 2rem; }
+    ul { padding-left: 1.25rem; }
+    li { margin: 0.25rem 0; }
+    .rule { border: none; border-top: 1px solid #e5e5e5; margin: 2rem 0; }
+    @media (prefers-color-scheme: dark) { .rule { border-top-color: #2a2a2a; } }
+    code { background: #f2f2f2; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+    @media (prefers-color-scheme: dark) { code { background: #1f1f1f; } }
+    footer { margin-top: 3rem; color: #888; font-size: 0.85rem; }
+    footer a { color: inherit; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy</h1>
+<p class="meta">HeyVox and the Hush Chrome extension &middot; Last updated: 20 April 2026</p>
+
+<p>
+    This policy covers both <strong>HeyVox</strong>, the desktop voice layer for AI coding
+    agents, and <strong>Hush</strong>, the companion Chrome extension that pauses
+    in-browser media while HeyVox is speaking or listening. The short version:
+    nothing you do with either product is sent anywhere, ever.
+</p>
+
+<hr class="rule">
+
+<h2>Summary — the one-paragraph version</h2>
+<p>
+    HeyVox and Hush are 100% local. We do not collect, store, transmit, sell, or share any
+    personal data. Your microphone audio, speech transcriptions, browsing activity, tab
+    contents, configuration, and usage patterns never leave your computer. There are no
+    servers operated by us that process any of your data. There are no analytics, no
+    telemetry, no ads, and no user accounts.
+</p>
+
+<h2>Data we collect</h2>
+<p>
+    None. There is no account creation, no signup, no login, no usage reporting. HeyVox
+    runs entirely on your Mac; Hush runs entirely inside your copy of Chrome and a local
+    companion process on your Mac.
+</p>
+
+<h2>Audio, speech, and transcription</h2>
+<ul>
+    <li>Wake-word detection runs locally on-device via openwakeword.</li>
+    <li>Speech-to-text runs locally on-device via MLX Whisper (Apple Silicon) or
+        sherpa-onnx (Intel).</li>
+    <li>Text-to-speech runs locally on-device via Kokoro or Piper.</li>
+    <li>No audio, no transcripts, no model outputs, and no training data are
+        transmitted off your device. Nothing is shared with Anthropic, OpenAI,
+        Google, Apple, or anyone else.</li>
+    <li>A local transcript history (if enabled) is stored in
+        <code>~/.config/heyvox/</code> on your Mac. Deleting that file or the
+        config directory removes it.</li>
+</ul>
+
+<h2>Browser data (Hush extension)</h2>
+<p>
+    Hush reads the <code>tab.audible</code> property of tabs to find which one is
+    producing audio, and executes a small pause/resume script against the
+    matching tab. Hush does <strong>not</strong>:
+</p>
+<ul>
+    <li>Read tab content, page HTML, form contents, passwords, cookies, or any other
+        page data.</li>
+    <li>Read or store URLs, titles, or browsing history.</li>
+    <li>Send any data over the network.</li>
+</ul>
+<p>
+    The <code>&lt;all_urls&gt;</code> host permission is used only because media can
+    play on any site. The extension does not examine or transmit anything about the
+    sites you visit.
+</p>
+
+<h2>Native messaging</h2>
+<p>
+    Hush talks to its desktop companion via Chrome's standard
+    <code>nativeMessaging</code> API. This is a process-to-process channel on your
+    local machine — it does not reach the internet. Messages contain only
+    pause/resume commands and acknowledgements; no user content is exchanged.
+</p>
+
+<h2>Model downloads</h2>
+<p>
+    First-time setup downloads speech-recognition and text-to-speech models from
+    their respective open-source repositories (Hugging Face, GitHub). These are
+    one-off downloads directly from those hosts — we do not proxy them, log them,
+    or see that they happened. You can audit the download URLs in the source code
+    at <a href="https://github.com/heyvox-dev/heyvox">github.com/heyvox-dev/heyvox</a>.
+</p>
+
+<h2>Analytics, crash reporting, telemetry</h2>
+<p>
+    None. There is no analytics integration, no crash reporter phoning home, no
+    feature-usage tracking, no error beaconing. If something crashes, the stack
+    trace stays on your Mac.
+</p>
+
+<h2>Third parties</h2>
+<p>
+    We do not share any data with third parties, because we do not collect any. The
+    open-source speech and text-to-speech models (Whisper, Kokoro, Piper,
+    openwakeword, sherpa-onnx) run entirely on your device and are licensed under
+    their respective open-source licences.
+</p>
+
+<h2>Children's privacy</h2>
+<p>
+    HeyVox and Hush are developer tools not directed at children under 13. Because
+    we do not collect any personal data, we do not knowingly collect data from
+    children or anyone else.
+</p>
+
+<h2>International users / GDPR / CCPA</h2>
+<p>
+    HeyVox and Hush do not collect personal data, so there is no personal data to
+    subject to cross-border transfer, access, or deletion requests. You are welcome
+    to delete the applications, the Chrome extension, and the
+    <code>~/.config/heyvox</code> directory at any time and no data will remain on
+    any system we control (because no data is on any system we control).
+</p>
+
+<h2>Changes to this policy</h2>
+<p>
+    If we ever materially change how HeyVox or Hush handles data, we will update
+    this page and the "Last updated" date at the top. Since the software is
+    open-source, any such change would also be visible in the public repository's
+    commit history at
+    <a href="https://github.com/heyvox-dev/heyvox">github.com/heyvox-dev/heyvox</a>.
+</p>
+
+<h2>Contact</h2>
+<p>
+    Questions, concerns, or anything else: email
+    <a href="mailto:hello@heyvox.dev">hello@heyvox.dev</a>
+    or open an issue at
+    <a href="https://github.com/heyvox-dev/heyvox/issues">github.com/heyvox-dev/heyvox/issues</a>.
+</p>
+
+<footer>
+    &copy; 2026 HeyVox. MIT-licensed open source.
+    &middot; <a href="/">Home</a>
+</footer>
+
+</body>
+</html>
