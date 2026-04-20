@@ -17,6 +17,7 @@ Engine: mlx-audio (Metal GPU via MLX framework) — ~5-10x faster than kokoro-on
 Fallback: kokoro-onnx (CPU) if mlx-audio is not available.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -49,6 +50,10 @@ shutdown_event = threading.Event()
 
 # Engine flag: "mlx" or "onnx"
 ENGINE = "mlx"
+
+# Held open for the lifetime of the daemon to serialise startup.
+# Kernel releases the flock automatically on process exit.
+_pid_lock_fd = None
 
 
 def log(msg):
@@ -357,12 +362,47 @@ def idle_watchdog():
         shutdown_event.wait(timeout=10)
 
 
-def cleanup():
-    for f in (SOCKET_PATH, PID_FILE):
-        try:
-            os.unlink(f)
-        except FileNotFoundError:
-            pass
+def is_pid_alive(pid):
+    """Return True if a process with the given PID exists."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def check_and_acquire_pid_lock():
+    """Acquire an exclusive flock on PID_FILE or exit.
+
+    DEF-062: Prevents overlapping daemons during the idle-timeout shutdown
+    window (where the socket was closed but the MLX teardown hadn't yet
+    exited the process). The flock is held for the life of the process
+    and released automatically by the kernel on exit, so a new daemon can
+    only start once the old one has genuinely gone away.
+    """
+    global _pid_lock_fd
+
+    # Soft check first — gives a clearer log message than just BlockingIOError
+    try:
+        with open(PID_FILE, "r") as f:
+            existing = int(f.read().strip() or "0")
+        if existing and existing != os.getpid() and is_pid_alive(existing):
+            log(f"Another kokoro-daemon already running (pid={existing}), exiting")
+            sys.exit(0)
+    except (FileNotFoundError, ValueError):
+        pass
+
+    _pid_lock_fd = os.open(PID_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(_pid_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("Another kokoro-daemon holds the PID lock, exiting")
+        os.close(_pid_lock_fd)
+        _pid_lock_fd = None
+        sys.exit(0)
+
+    os.ftruncate(_pid_lock_fd, 0)
+    os.pwrite(_pid_lock_fd, f"{os.getpid()}\n".encode(), 0)
 
 
 def main():
@@ -373,25 +413,28 @@ def main():
     except OSError:
         pass
 
-    cleanup()
+    # DEF-062: acquire lock BEFORE loading the model. Prevents two daemons
+    # from both spending seconds in load_model() only to collide at bind().
+    check_and_acquire_pid_lock()
 
     model = load_model()
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # We hold the flock, so any socket at this path is from a crashed
+    # prior daemon — safe to unlink.
+    try:
+        os.unlink(SOCKET_PATH)
+    except FileNotFoundError:
+        pass
     try:
         server.bind(SOCKET_PATH)
     except OSError as e:
-        log(f"Cannot bind {SOCKET_PATH}: {e} — another daemon may be running")
+        log(f"Cannot bind {SOCKET_PATH}: {e}")
         server.close()
         return
     server.listen(2)
     server.settimeout(5.0)
     os.chmod(SOCKET_PATH, 0o600)
-
-    # Write PID file AFTER successful bind to avoid stale PID from a
-    # second daemon that crashes on bind (race condition → HUD shows "crashed")
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
 
     log(f"Listening on {SOCKET_PATH} (engine={ENGINE}, idle timeout: {IDLE_TIMEOUT}s)")
 
@@ -420,8 +463,22 @@ def main():
                     break
                 raise
     finally:
-        server.close()
-        cleanup()
+        # DEF-062: unlink the socket BEFORE MLX teardown (which runs during
+        # interpreter shutdown via GC and can take several seconds). This
+        # narrows the window where the orchestrator might spawn a replacement
+        # daemon while this one is still alive from seconds to milliseconds.
+        try:
+            server.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+        try:
+            os.unlink(PID_FILE)
+        except FileNotFoundError:
+            pass
         log("Daemon stopped")
 
 
