@@ -74,22 +74,49 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     def callback(proxy, event_type, event, refcon):
         nonlocal ptt_held, _last_keydown_time, _stop_in_progress
 
+        # CRITICAL: Any unhandled exception in this Quartz C callback causes
+        # macOS to permanently disable the event tap. All action callbacks
+        # (recording.cancel, stop_tts, etc.) do heavy I/O that can throw.
+        # Wrap everything so the tap survives.
+        try:
+            return _callback_inner(proxy, event_type, event, refcon)
+        except Exception as e:
+            _log(f"ERROR in event tap callback (tap preserved): {e}")
+            return event  # pass event through on error
+
+    def _callback_inner(proxy, event_type, event, refcon):
+        nonlocal ptt_held, _last_keydown_time, _stop_in_progress
+
         # Handle Escape key — consume it (return None) when HeyVox acts on it,
         # so it doesn't propagate to the foreground app (e.g. exit fullscreen).
         if event_type == Quartz.kCGEventKeyDown:
             _last_keydown_time = time.time()
             keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
             if keycode == ESCAPE_KEYCODE:
+                # Diagnose source: pid==0 → real HID keypress; pid>0 → synthesized
+                # by that process via CGEventPost. Flags show modifiers at keydown.
+                try:
+                    src_pid = Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGEventSourceUnixProcessID
+                    )
+                except Exception:
+                    src_pid = -1
+                try:
+                    src_flags = Quartz.CGEventGetFlags(event)
+                except Exception:
+                    src_flags = 0
+                esc_src = f"src_pid={src_pid} flags=0x{src_flags:x}"
                 if callbacks.get("is_busy", lambda: False)():
                     cancel_t = callbacks.get("on_cancel_transcription")
                     if cancel_t:
                         cancel_t()
-                    _log("Escape: cancelling transcription")
+                    _log(f"Escape: cancelling transcription ({esc_src})")
                     return None  # consume — don't pass to app
                 elif callbacks.get("is_recording", lambda: False)():
                     cancel_r = callbacks.get("on_cancel_recording")
                     if cancel_r:
                         cancel_r()
+                    _log(f"Escape: cancelling recording ({esc_src})")
                     return None  # consume — don't pass to app
                 elif callbacks.get("is_speaking", lambda: False)():
                     cancel_tts = callbacks.get("on_cancel_tts")
@@ -110,7 +137,14 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             ptt_held = True
             is_busy = callbacks.get("is_busy", lambda: False)()
             is_rec = callbacks.get("is_recording", lambda: False)()
-            if is_busy or is_rec:
+            if is_busy:
+                return event
+            if is_rec:
+                # Recording active (wake-word-triggered) — FN tap stops it
+                _log("PTT key pressed during wake-word recording, stopping")
+                on_stop = callbacks.get("on_stop")
+                if on_stop:
+                    on_stop()
                 return event
             _log("PTT key pressed, starting recording")
             on_start = callbacks.get("on_start")
@@ -170,4 +204,26 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
 
     t = threading.Thread(target=run_loop, daemon=True)
     t.start()
+
+    # Health monitor: macOS silently disables event taps when the system is
+    # under load or after transient Accessibility permission changes.
+    # Poll every 5s and re-enable if needed. Without this, ESC and fn stop
+    # working with no visible error.
+    def _tap_watchdog():
+        _consecutive_reenable = 0
+        while True:
+            time.sleep(1.0)
+            try:
+                if not Quartz.CGEventTapIsEnabled(tap):
+                    _consecutive_reenable += 1
+                    Quartz.CGEventTapEnable(tap, True)
+                    _log(f"WARNING: CGEventTap was disabled by macOS, re-enabled (#{_consecutive_reenable})")
+                else:
+                    _consecutive_reenable = 0
+            except Exception:
+                break  # Tap object gone — thread exits
+
+    wd = threading.Thread(target=_tap_watchdog, daemon=True)
+    wd.start()
+
     return t

@@ -122,6 +122,10 @@ STT_DEBUG_LOG = f"{_TMP}/heyvox-stt-debug.log"
 # Requirement: HUD-08
 HUD_SOCKET_PATH = f"{_TMP}/heyvox-hud.sock"
 
+# Mic mute flag — when this file exists, wake word detection is paused.
+# Written/removed by HUD menu toggle or CLI.
+MIC_MUTE_FLAG = f"{_TMP}/heyvox-mic-mute"
+
 # Active mic name file — written by main.py on startup and device switch.
 # Read by HUD overlay to display the current mic in the menu bar.
 ACTIVE_MIC_FILE = f"{_TMP}/heyvox-active-mic"
@@ -239,12 +243,19 @@ def cleanup_ipc_files(herald_too: bool = True):
     Called on clean shutdown or via ``heyvox cleanup`` CLI command.
     Does NOT remove log files or debug dirs.
     """
+    # NOTE: Do NOT include HUSH_SOCK here. The Hush host is a Chrome-launched
+    # native-messaging process with its own socket lifecycle (bind on startup,
+    # atexit cleanup). If HeyVox unlinks the file while the host process is
+    # still alive, the listener keeps its in-kernel bind but the socket file
+    # vanishes from the filesystem — no client can connect, media pause
+    # silently falls through to the less reliable MediaRemote/media-key tiers.
+    # See DEF-039.
     for path in (RECORDING_FLAG, TTS_PLAYING_FLAG, TTS_CMD_FILE,
                  VERBOSITY_FILE, HUD_SOCKET_PATH, ACTIVE_MIC_FILE,
                  MIC_SWITCH_REQUEST_FILE, HEYVOX_PID_FILE,
                  HEYVOX_HEARTBEAT_FILE, HEYVOX_STATE_FILE,
                  HUD_POSITION_FILE, TTS_STYLE_FILE,
-                 HEYVOX_MEDIA_PAUSED_REC, HUSH_SOCK):
+                 HEYVOX_MEDIA_PAUSED_REC):
         try:
             os.unlink(path)
         except FileNotFoundError:

@@ -176,10 +176,13 @@ class TestDetectLanguage:
         assert lang == "it"
         assert voice is not None
 
-    def test_german_keywords(self):
+    def test_german_keywords_fall_through_to_english(self):
+        # German detection intentionally disabled — Kokoro has no German voice
+        # and the British fallback (bf_emma) triggered on English words that
+        # overlap German stopwords. Keep the config voice instead of remapping.
         lang, voice = detect_language("Ich werde das machen")
-        assert lang == "en-gb"  # German mapped to en-gb voice (bf_emma)
-        assert voice is not None
+        assert lang == "en-us"
+        assert voice is None
 
     def test_instance_method_matches(self, worker):
         """HeraldWorker._detect_language delegates to module-level function."""

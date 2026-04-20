@@ -413,7 +413,6 @@ def run_setup(config) -> None:
 
         ext_dir = HUSH_EXTENSION
         host_script = str(Path(HUSH_HOME) / "host" / "hush_host.py")
-        manifest_src = str(Path(HUSH_HOME) / "host" / "com.hush.bridge.json")
 
         if not Path(ext_dir).exists():
             console.print(f"  [red]✗[/red] Extension directory not found: {ext_dir}")
@@ -439,32 +438,16 @@ def run_setup(config) -> None:
                 console.print("  [yellow]![/yellow] Extension IDs are exactly 32 lowercase letters. Try again.")
 
             if ext_id:
-                # Step 8b: Install native messaging host
-                import json as _json
+                # Step 8b: Install native messaging host to stable path
+                from heyvox.hush import install_hush_host
 
-                nmh_dir = Path.home() / "Library" / "Application Support" / "Google" / "Chrome" / "NativeMessagingHosts"
-                nmh_dir.mkdir(parents=True, exist_ok=True)
-
-                # Build manifest with correct paths
-                manifest = {
-                    "name": "com.hush.bridge",
-                    "description": "Hush native messaging host for media control",
-                    "path": host_script,
-                    "type": "stdio",
-                    "allowed_origins": [f"chrome-extension://{ext_id}/"],
-                }
-
-                manifest_dst = nmh_dir / "com.hush.bridge.json"
-                with open(manifest_dst, "w") as f:
-                    _json.dump(manifest, f, indent=2)
-                    f.write("\n")
-
-                # Make host script executable
-                Path(host_script).chmod(0o755)
-
-                console.print(f"  [green]✓[/green] Native messaging host installed: {manifest_dst}")
-                console.print("  [dim]Reload the extension in Chrome to activate.[/dim]")
-                hush_installed = True
+                ok, msg = install_hush_host(extension_id=ext_id)
+                if ok:
+                    console.print(f"  [green]✓[/green] {msg}")
+                    console.print("  [dim]Reload the extension in Chrome to activate.[/dim]")
+                    hush_installed = True
+                else:
+                    console.print(f"  [red]✗[/red] {msg}")
             else:
                 console.print("  [yellow]![/yellow] Skipped — could not get a valid Extension ID.")
                 console.print("  [dim]Run the manual install later: bash heyvox/hush/scripts/install.sh[/dim]")

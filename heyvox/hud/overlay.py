@@ -330,7 +330,36 @@ def _apply_state(
             if crashed:
                 icon = "\u26a0\ufe0f"
                 label = f" {'+'.join(crashed)} crashed"
-        status_item.button().setTitle_(f"{icon}{label}")
+        # Build menu bar title with SF Symbol-style mute indicators
+        _bar_title = f"{icon}{label}"
+        if state_str == "idle" and not crashed:
+            from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE
+            _mic_muted = os.path.exists(_MIC_MUTE)
+            _spk_muted = False
+            try:
+                from heyvox.audio.tts import get_verbosity
+                _spk_muted = get_verbosity() == "skip"
+            except Exception:
+                pass
+            # Use NSImage SF Symbols for clean native look
+            from AppKit import NSImage, NSImageSymbolConfiguration
+            btn = status_item.button()
+            _mic_symbol = "mic.slash" if _mic_muted else "mic"
+            _mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                _mic_symbol, "Microphone muted" if _mic_muted else "Microphone",
+            )
+            if _mic_muted:
+                _cfg = NSImageSymbolConfiguration.configurationWithPaletteColors_([
+                    NSColor.systemRedColor(),
+                    NSColor.secondaryLabelColor(),
+                ])
+                _mic_img = _mic_img.imageWithSymbolConfiguration_(_cfg)
+            btn.setImage_(_mic_img)
+            btn.setTitle_(" \U0001f507" if _spk_muted else "")
+        else:
+            # Non-idle states or crashed: use emoji text, clear image
+            status_item.button().setImage_(None)
+            status_item.button().setTitle_(_bar_title)
         # Refresh menu on state change (updates transcript list, mute state)
         if update_status_menu is not None:
             update_status_menu()
@@ -530,7 +559,7 @@ def _make_menu_action_class():
     from Foundation import NSObject
     from AppKit import NSPasteboard, NSPasteboardTypeString
 
-    from heyvox.constants import HERALD_MUTE_FLAG
+    from heyvox.constants import HERALD_MUTE_FLAG, MIC_MUTE_FLAG
     _TTS_MUTE_FLAGS = [HERALD_MUTE_FLAG]
 
     class _MenuActionHandler(NSObject):
@@ -546,6 +575,63 @@ def _make_menu_action_class():
             currently_muted = is_muted()
             set_muted(not currently_muted)
             sender.setState_(0 if currently_muted else 1)
+
+        def _refreshMenuBarIcon(self):
+            """Update the menu bar icon to reflect current mic/speaker mute state."""
+            try:
+                from AppKit import NSImage, NSColor, NSImageSymbolConfiguration
+                si = getattr(self.__class__, '_status_item_ref', None)
+                if si is None:
+                    return
+                btn = si.button()
+                mic_muted = os.path.exists(MIC_MUTE_FLAG)
+                spk_muted = False
+                try:
+                    from heyvox.audio.tts import get_verbosity
+                    spk_muted = get_verbosity() == "skip"
+                except Exception:
+                    pass
+                mic_symbol = "mic.slash" if mic_muted else "mic"
+                mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    mic_symbol, "Microphone muted" if mic_muted else "Microphone",
+                )
+                if mic_muted:
+                    # Red slash, dimmed mic body
+                    cfg = NSImageSymbolConfiguration.configurationWithPaletteColors_([
+                        NSColor.systemRedColor(),
+                        NSColor.secondaryLabelColor(),
+                    ])
+                    mic_img = mic_img.imageWithSymbolConfiguration_(cfg)
+                btn.setImage_(mic_img)
+                btn.setTitle_(" \U0001f507" if spk_muted else "")
+            except Exception:
+                pass
+
+        def toggleMicMute_(self, sender):
+            """Toggle mic mute (pauses wake word detection)."""
+            try:
+                from pathlib import Path
+                flag = Path(MIC_MUTE_FLAG)
+                if flag.exists():
+                    flag.unlink()
+                else:
+                    flag.touch()
+            except Exception:
+                pass
+            self._refreshMenuBarIcon()
+
+        def toggleMuteVerbosity_(self, sender):
+            """Toggle between muted (skip) and full verbosity."""
+            try:
+                from heyvox.audio.tts import get_verbosity, set_verbosity
+                from heyvox.config import update_config
+                currently_muted = get_verbosity() == "skip"
+                new_level = "full" if currently_muted else "skip"
+                set_verbosity(new_level)
+                update_config(**{"tts.verbosity": new_level})
+            except Exception:
+                pass
+            self._refreshMenuBarIcon()
 
         def setVerbosity_(self, sender):
             """Set verbosity to the level stored in the menu item's representedObject.
@@ -748,6 +834,7 @@ def _build_transcript_menu(handler):
     menu.setAutoenablesItems_(False)
     menu.setMinimumWidth_(200)
 
+
     _font = NSFont.systemFontOfSize_(13)
     _font_small = NSFont.systemFontOfSize_(12)
     _font_bold = NSFont.boldSystemFontOfSize_(12)
@@ -833,10 +920,32 @@ def _build_transcript_menu(handler):
     if not _input_devices and _active_mic:
         _input_devices = [_active_mic]
 
-    mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f399 Mic: {_mic_short}", None, "",
-    )
-    _styled(mic_parent)
+    from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE_FLAG
+    _is_mic_muted = os.path.exists(_MIC_MUTE_FLAG)
+    if _is_mic_muted:
+        # Inline SF Symbol (mic.slash) as text attachment — same position as emoji, no layout shift
+        from AppKit import NSTextAttachment, NSImage, NSImageSymbolConfiguration, NSMutableAttributedString
+        _att = NSTextAttachment.alloc().init()
+        _mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_("mic.slash", "Muted")
+        _color_cfg = NSImageSymbolConfiguration.configurationWithPaletteColors_([
+            NSColor.systemRedColor(), NSColor.secondaryLabelColor(),
+        ])
+        _mic_img = _mic_img.imageWithSymbolConfiguration_(_color_cfg)
+        _mic_img.setSize_((14, 14))
+        _att.setImage_(_mic_img)
+        _icon_str = NSAttributedString.attributedStringWithAttachment_(_att)
+        _text_attrs = NSDictionary.dictionaryWithObject_forKey_(_font, NSFontAttributeName)
+        _text_str = NSAttributedString.alloc().initWithString_attributes_(" Mic: Muted", _text_attrs)
+        _full = NSMutableAttributedString.alloc().init()
+        _full.appendAttributedString_(_icon_str)
+        _full.appendAttributedString_(_text_str)
+        mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Mic: Muted", None, "")
+        mic_parent.setAttributedTitle_(_full)
+    else:
+        mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"\U0001f399 Mic: {_mic_short}", None, "",
+        )
+        _styled(mic_parent)
     mic_sub = NSMenu.alloc().init()
     mic_sub.setAutoenablesItems_(False)
 
@@ -861,6 +970,20 @@ def _build_transcript_menu(handler):
         _styled(_no_mic)
         mic_sub.addItem_(_no_mic)
 
+    # Mic mute toggle at bottom of mic submenu
+    from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE_FLAG
+    _is_mic_muted = os.path.exists(_MIC_MUTE_FLAG)
+    mic_sub.addItem_(NSMenuItem.separatorItem())
+    _mic_mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Mute Microphone", "toggleMicMute:", "",
+    )
+    _mic_mute_item.setTarget_(handler)
+    _mic_mute_item.setEnabled_(True)
+    if _is_mic_muted:
+        _mic_mute_item.setState_(1)
+    _styled(_mic_mute_item)
+    mic_sub.addItem_(_mic_mute_item)
+
     mic_parent.setSubmenu_(mic_sub)
     menu.addItem_(mic_parent)
 
@@ -875,8 +998,10 @@ def _build_transcript_menu(handler):
         _active_output = next((d for d in _output_devices if d.is_default), None)
         _output_short = friendly_output_name(_active_output.name) if _active_output else "System Default"
 
+        _is_verbosity_muted_for_label = current_verbosity == "skip"
+        _output_label = f"\U0001f507 Output: Muted" if _is_verbosity_muted_for_label else f"\U0001f508 Output: {_output_short}"
         output_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"\U0001f508 Output: {_output_short}", None, "",
+            _output_label, None, "",
         )
         _styled(output_parent)
         output_sub = NSMenu.alloc().init()
@@ -894,54 +1019,38 @@ def _build_transcript_menu(handler):
             _styled(_out_item)
             output_sub.addItem_(_out_item)
 
+        # Speaker mute toggle at bottom of output submenu
+        _is_verbosity_muted = current_verbosity == "skip"
+        output_sub.addItem_(NSMenuItem.separatorItem())
+        _spk_mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Mute Speaker", "toggleMuteVerbosity:", "",
+        )
+        _spk_mute_item.setTarget_(handler)
+        _spk_mute_item.setEnabled_(True)
+        if _is_verbosity_muted:
+            _spk_mute_item.setState_(1)
+        _styled(_spk_mute_item)
+        output_sub.addItem_(_spk_mute_item)
+
         output_parent.setSubmenu_(output_sub)
         menu.addItem_(output_parent)
 
-    # ── Section 2: Speech (verbosity + style in one submenu) ──
+    # ── Section 2: Speech style ──
     from heyvox.audio.tts import get_tts_style
     current_style = get_tts_style()
-    _TTS_LABELS = {
-        "full": "Speak All", "short": "First Sentence", "skip": "Mute",
-    }
     _STYLE_LABELS = {
         "detailed": "Detailed", "concise": "Concise",
         "technical": "Technical", "casual": "Casual",
     }
+    style_display = _STYLE_LABELS.get(current_style, "Detailed")
     voice_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"\U0001f4ac Speech: {_TTS_LABELS.get(current_verbosity, 'Speak All')} \u00b7 {_STYLE_LABELS.get(current_style, 'Detailed')}", None, "",
+        f"\U0001f4ac Style: {style_display}", None, "",
     )
     _styled(voice_parent)
     voice_sub = NSMenu.alloc().init()
     voice_sub.setAutoenablesItems_(False)
 
-    # -- Output mode --
-    header_output = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Output", None, "")
-    header_output.setEnabled_(False)
-    _styled(header_output)
-    voice_sub.addItem_(header_output)
-    for level, label in [
-        ("full", "Speak All"),
-        ("short", "First Sentence"),
-        ("skip", "Mute"),
-    ]:
-        v_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"  {label}", "setVerbosity:", "",
-        )
-        v_item.setTarget_(handler)
-        v_item.setRepresentedObject_(level)
-        v_item.setEnabled_(True)
-        if level == current_verbosity:
-            v_item.setState_(1)
-        _styled(v_item)
-        voice_sub.addItem_(v_item)
-
-    voice_sub.addItem_(NSMenuItem.separatorItem())
-
     # -- Style --
-    header_style = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Style", None, "")
-    header_style.setEnabled_(False)
-    _styled(header_style)
-    voice_sub.addItem_(header_style)
     for style_key, style_desc in [
         ("detailed", "Detailed"),
         ("concise", "Concise"),
@@ -1084,7 +1193,6 @@ def _build_transcript_menu(handler):
 
     orch_state = _daemon_state(HERALD_ORCH_PID)
     kokoro_state = _daemon_state(KOKORO_DAEMON_PID, KOKORO_DAEMON_SOCK)
-    orch_ok = orch_state == "running"
     kokoro_ok = kokoro_state == "running"
     hud_ok = os.path.exists(HUD_SOCKET_PATH)
 
@@ -1406,9 +1514,16 @@ def main(menu_bar_only: bool = False):
         "processing": "\U0001f7e1",     # 🟡 yellow circle
         "speaking":   "\U0001f7e2",     # 🟢 green circle
     }
-    status_button.setTitle_(_STATUS_ICONS["idle"])
+    # Initial state: use SF Symbol mic image
+    from AppKit import NSImage as _NSImage
+    _init_mic_img = _NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+        "mic", "Microphone",
+    )
+    status_button.setImage_(_init_mic_img)
+    status_button.setTitle_("")
 
     MenuActionHandler = _make_menu_action_class()
+    MenuActionHandler._status_item_ref = status_item
     menu_handler = MenuActionHandler.alloc().init()
 
     def _update_status_menu():

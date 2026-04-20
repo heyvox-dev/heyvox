@@ -2,13 +2,20 @@
 
 Registers Herald hook shims in ~/.claude/settings.json so that Claude Code
 triggers TTS on responses, ambient sounds, notifications, and session lifecycle.
+
+Hook scripts are installed to ~/.claude/hooks/herald/ (a stable path that
+survives Conductor workspace archiving) rather than pointing directly into
+the heyvox package directory.
 """
 
 import json
+import shutil
 from pathlib import Path
 
 from heyvox.herald import HERALD_HOOKS
 
+# Stable install location — survives workspace archival
+_STABLE_HOOKS_DIR = Path.home() / ".claude" / "hooks" / "herald"
 
 # Hook event → shell script mapping
 _HOOKS = {
@@ -30,12 +37,22 @@ _HOOKS = {
 def install_herald_hooks() -> list[tuple[bool, str]]:
     """Install Herald hooks into ~/.claude/settings.json.
 
-    Returns list of (success, message) tuples.
+    Copies hook scripts from the package to ~/.claude/hooks/herald/ (stable path)
+    and registers them in settings.json. Returns list of (success, message) tuples.
     """
     settings_path = Path.home() / ".claude" / "settings.json"
     results = []
 
     try:
+        # Copy hook scripts to stable location
+        _STABLE_HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+        for info in _HOOKS.values():
+            src = HERALD_HOOKS / info["script"]
+            if src.exists():
+                dest = _STABLE_HOOKS_DIR / info["script"]
+                shutil.copy2(src, dest)
+                dest.chmod(0o755)
+
         if settings_path.exists():
             with open(settings_path) as f:
                 settings = json.load(f)
@@ -46,7 +63,7 @@ def install_herald_hooks() -> list[tuple[bool, str]]:
             settings["hooks"] = {}
 
         for event, info in _HOOKS.items():
-            hook_script = HERALD_HOOKS / info["script"]
+            hook_script = _STABLE_HOOKS_DIR / info["script"]
 
             if not hook_script.exists():
                 results.append((False, f"{info['desc']}: script not found ({hook_script})"))
