@@ -8,7 +8,11 @@ Collects labeled audio clips across all 4 categories during normal operation:
   - **fn/** False Negatives — missed wake words (detected via STT strip or retry pattern)
 
 Clips are saved as 2-second 16kHz mono WAVs with naming:
-    {category}_{timestamp}_score{score:.2f}.wav
+    {category}_{suffix?}_{mic-tag?}_{timestamp}_score{score:.2f}.wav
+
+The mic tag (sanitized device name, e.g. "jabra-elite-7-pro") is included
+when a `get_mic_name` callback is supplied. This lets retraining filter
+or balance by recording device to avoid one mic's timbre dominating.
 
 Enable via config:
     wake_words:
@@ -20,16 +24,26 @@ reclassified as FN (moved from tn/ to fn/).
 """
 
 import logging
-import os
+import re
 import shutil
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 _MIN_SPEECH_RMS = 300
+_MIC_TAG_MAX_LEN = 40
+
+
+def _sanitize_mic_tag(name: str) -> str:
+    """Turn a device name into a filesystem-safe kebab-case tag."""
+    if not name:
+        return ""
+    tag = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return tag[:_MIC_TAG_MAX_LEN] if tag else ""
 
 
 class TrainingCollector:
@@ -44,6 +58,7 @@ class TrainingCollector:
         sample_rate: int = 16000,
         clip_duration_secs: float = 2.0,
         fn_reclassify_window_secs: float = 5.0,
+        get_mic_name: Callable[[], str] | None = None,
     ):
         self._base = Path(base_dir)
         self._dirs = {}
@@ -58,6 +73,7 @@ class TrainingCollector:
         self._sample_rate = sample_rate
         self._clip_samples = int(clip_duration_secs * sample_rate)
         self._fn_window = fn_reclassify_window_secs
+        self._get_mic_name = get_mic_name
 
         # Rolling audio buffer for idle-time collection (TP-start, TN, FN-start)
         self._audio_buffer: list[np.ndarray] = []
@@ -69,6 +85,10 @@ class TrainingCollector:
         # Recent TN saves for retrospective FN-start reclassification
         # List of (timestamp, filepath) — pruned on each trigger
         self._recent_tn: list[tuple[float, Path]] = []
+
+        # Recent TP-start saves for retrospective FP reclassification
+        # (when a trigger's recording aborts with no speech, the TP was likely false)
+        self._recent_tp_start: list[tuple[float, Path]] = []
 
     # ------------------------------------------------------------------
     # Audio buffer (fed from main loop during idle)
@@ -98,11 +118,45 @@ class TrainingCollector:
     # ------------------------------------------------------------------
 
     def save_tp_start(self, score: float) -> bool:
-        """Save a confirmed start-trigger positive from the rolling buffer."""
+        """Save a confirmed start-trigger positive from the rolling buffer.
+
+        Tracks the save path so `reclassify_tp_start_as_fp` can retroactively
+        move it to fp/ if the recording aborts with no speech.
+        """
         audio = self._extract_buffer_clip()
         if audio is None:
             return False
-        return self._save("tp", audio, score, suffix="start")
+        now = time.time()
+        filepath = self._save("tp", audio, score, suffix="start", return_path=True)
+        if filepath:
+            self._recent_tp_start.append((now, filepath))
+            self._recent_tp_start = [
+                (t, p) for t, p in self._recent_tp_start
+                if now - t < 30.0
+            ]
+            return True
+        return False
+
+    def reclassify_tp_start_as_fp(self, reason: str = "no-speech") -> int:
+        """Move the most recent tp_start clip to fp/ (trigger led to aborted recording).
+
+        Called when a trigger fires but the recording aborts before speech is detected
+        — the trigger was almost certainly false. Pops LIFO so it matches the just-fired
+        trigger. Returns 1 if reclassified, 0 otherwise.
+        """
+        while self._recent_tp_start:
+            save_time, tp_path = self._recent_tp_start.pop()
+            if not tp_path.exists():
+                continue
+            new_name = tp_path.name.replace("tp_start_", f"fp_{reason}_", 1)
+            fp_path = self._dirs["fp"] / new_name
+            try:
+                shutil.move(str(tp_path), str(fp_path))
+                logger.debug("Reclassified TP → FP: %s", new_name)
+                return 1
+            except OSError:
+                return 0
+        return 0
 
     def save_tp_stop(self, audio_chunks: list, sample_rate: int, score: float = 0.0) -> bool:
         """Save a confirmed stop-trigger positive from recording tail."""
@@ -227,6 +281,13 @@ class TrainingCollector:
         parts = [category]
         if suffix:
             parts.append(suffix)
+        if self._get_mic_name is not None:
+            try:
+                mic_tag = _sanitize_mic_tag(self._get_mic_name() or "")
+            except Exception:
+                mic_tag = ""
+            if mic_tag:
+                parts.append(mic_tag)
         parts.append(timestamp)
         parts.append(f"score{score:.2f}")
         filename = "_".join(parts) + ".wav"
