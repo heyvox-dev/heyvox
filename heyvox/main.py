@@ -606,9 +606,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Consecutive-frame detection: require N consecutive above-threshold frames
     # before triggering. Filters single-frame false positives from passing speech.
     # Bumped to 3 after DEF-045 — model emits 2-frame high-score bursts during
-    # silence; 3 consecutive high-scores in silence is essentially never seen.
-    _CONSECUTIVE_FRAMES_REQUIRED = 3
+    # silence. DEF-063 (2026-04-20): dropped back to 2 because the VAD gate
+    # (`not _vad_silent` guard on line ~1124) already blocks silence-burst hits
+    # from incrementing this counter, so the 3-frame rationale was redundant.
+    # 2 × 80 ms = 160 ms post-detection floor instead of 240 ms — saves one
+    # audio chunk of latency on every wake word without weakening the filter.
+    _CONSECUTIVE_FRAMES_REQUIRED = 2
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
+    # DEF-063: timestamp of the first confirmed hit in the current accumulation run.
+    # Used to report wake→recording.start latency so future slowdowns are measurable.
+    _first_hit_time: float = 0.0
     # VAD gate multiplier: skip wake-word eval when idle and audio level is below
     # silence_threshold * this factor. Prevents silence-driven false triggers.
     _VAD_GATE_MULT = 0.8
@@ -1122,13 +1129,26 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # will self-stop within ~4s. Feature-continuity is preserved because
                 # we still call model.predict above.
                 if s > active_threshold and not _vad_silent:
-                    _consecutive_hits[ww_name] = _consecutive_hits.get(ww_name, 0) + 1
+                    prev = _consecutive_hits.get(ww_name, 0)
+                    _consecutive_hits[ww_name] = prev + 1
+                    # DEF-063: capture the moment the run of consecutive hits
+                    # started, so wake→start latency can be measured below.
+                    if prev == 0 and not _is_rec:
+                        _first_hit_time = time.time()
                 else:
                     _consecutive_hits[ww_name] = 0
 
                 if _consecutive_hits.get(ww_name, 0) >= _CONSECUTIVE_FRAMES_REQUIRED:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
+                        # DEF-063: wake→trigger latency (first hit → accumulation complete).
+                        # Does not include model feature-window lag (~500 ms) or afplay
+                        # subprocess spawn, but gives an apples-to-apples number for
+                        # regressions inside the consecutive-frame gate.
+                        if not _is_rec and _first_hit_time > 0:
+                            log(f"[TIMING] wake→trigger: {(now - _first_hit_time) * 1000:.0f}ms "
+                                f"({_CONSECUTIVE_FRAMES_REQUIRED} frames)")
+                            _first_hit_time = 0.0
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
                             _training_collector.save_tp_start(s)
