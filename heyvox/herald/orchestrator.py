@@ -320,14 +320,16 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
     if not cfg.workspace_app_name:
         return False
     app_lower = cfg.workspace_app_name.lower()
+    detected = ""
     try:
         import AppKit  # type: ignore
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        if app is None:
-            return False
-        return app.localizedName().lower() == app_lower
-    except Exception:
-        pass
+        if app is not None:
+            detected = (app.localizedName() or "").lower()
+            if detected == app_lower:
+                return True
+    except Exception as e:
+        _herald_log(f"ORCH: NSWorkspace frontmost lookup failed: {e}", cfg.debug_log)
     # Fallback: osascript (System Events returns lowercase process names)
     try:
         r = subprocess.run(
@@ -335,9 +337,16 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
              "tell application \"System Events\" to get name of first application process whose frontmost is true"],
             capture_output=True, text=True, timeout=3.0,
         )
-        return r.stdout.strip().lower() == app_lower
-    except Exception:
-        return False
+        detected_osa = r.stdout.strip().lower()
+        if detected_osa == app_lower:
+            return True
+        _herald_log(
+            f"ORCH: frontmost check: want={app_lower!r} ns={detected!r} osa={detected_osa!r}",
+            cfg.debug_log,
+        )
+    except Exception as e:
+        _herald_log(f"ORCH: osascript frontmost lookup failed: {e}", cfg.debug_log)
+    return False
 
 
 def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
@@ -357,9 +366,14 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
         else:
             return
     try:
-        subprocess.run(
+        r = subprocess.run(
             [switch_cmd, workspace],
-            capture_output=True, timeout=5.0,
+            capture_output=True, text=True, timeout=5.0,
+        )
+        _herald_log(
+            f"ORCH: switching to workspace={workspace!r} rc={r.returncode} "
+            f"stdout={(r.stdout or '').strip()[:200]!r} stderr={(r.stderr or '').strip()[:200]!r}",
+            cfg.debug_log,
         )
     except Exception as e:
         _herald_log(f"ORCH: workspace switch failed: {e}", cfg.debug_log)
