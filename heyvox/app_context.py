@@ -54,6 +54,12 @@ class AppContext:
     recording_target: object = None
     """TargetSnapshot: app + text field captured at recording start."""
 
+    tts_seen_during_recording: bool = False
+    """DEF-078: True if TTS_PLAYING_FLAG was observed at any point during the
+    current (or most recent) recording window. Causes filter_tts_echo() to
+    apply an aggressive overlap threshold when stripping echo from the STT
+    output."""
+
     cancel_transcription: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )

@@ -847,6 +847,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 _last_model_reset = time.time()
                 _rec_started_at = time.time()  # for stop-word warmup suppression
 
+            # DEF-078: While recording, observe whether TTS is playing. The
+            # recording path also checks at start(), but Herald can fire a
+            # notify-hook or a held message can release mid-recording; any of
+            # those puts speaker bleed into the audio buffer. Sticky flag:
+            # once set during a recording, stays set until the recording ends
+            # (cleared at the end of _send_local).
+            if _is_rec and not ctx.tts_seen_during_recording:
+                if os.path.exists(TTS_PLAYING_FLAG):
+                    ctx.tts_seen_during_recording = True
+
             # Send live audio level to HUD at ~20fps during recording (HUD-08)
             if _is_rec:
                 now_level = time.time()

@@ -330,6 +330,17 @@ class HeraldWorker:
         lang, lang_voice = self._detect_language(speech)
         voice = self._select_voice(mood, lang, lang_voice)
 
+        # DEF-078: Register the finalized speech text with the cross-process
+        # echo buffer BEFORE generation. The heyvox daemon's STT filter reads
+        # the shared journal to strip speaker-to-mic bleed from transcriptions.
+        # This worker runs in its own short-lived process spawned by a Claude
+        # Code hook, so the in-process buffer wouldn't reach the STT filter.
+        try:
+            from heyvox.audio.echo import register_tts_text
+            register_tts_text(speech)
+        except Exception as e:
+            log.debug("DEF-078: register_tts_text failed (non-fatal): %s", e)
+
         # Generate WAV
         log.info("Generating TTS: mood=%s lang=%s voice=%s len=%d", mood, lang, voice, len(speech))
         ok = self._generate(speech, voice, lang, DEFAULT_SPEED)

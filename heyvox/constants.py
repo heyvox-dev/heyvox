@@ -96,6 +96,12 @@ SPEAKER_MODE_THRESHOLD_MULT = 1.4
 # Requirement: ECHO-03
 TTS_ECHO_BUFFER_SECS = 30.0
 
+# DEF-078: Cross-process echo journal. Herald's TTS worker runs in a separate
+# process (spawned by Claude Code hooks), so the in-process echo buffer never
+# sees Herald-initiated TTS. Every TTS producer appends to this JSONL file;
+# filter_tts_echo() reads it in addition to the in-memory buffer.
+TTS_ECHO_JOURNAL = f"{_TMP}/heyvox-tts-echo.jsonl"
+
 # Default AEC stream delay (ms) for built-in speakers.
 # Used by livekit WebRTC APM when no calibrated value is configured.
 # Requirement: ECHO-06
@@ -254,6 +260,7 @@ def cleanup_ipc_files(herald_too: bool = True):
                  MIC_SWITCH_REQUEST_FILE, HEYVOX_PID_FILE,
                  HEYVOX_HEARTBEAT_FILE, HEYVOX_STATE_FILE,
                  HUD_POSITION_FILE, TTS_STYLE_FILE,
+                 TTS_ECHO_JOURNAL,
                  HEYVOX_MEDIA_PAUSED_REC):
         try:
             os.unlink(path)
