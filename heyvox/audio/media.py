@@ -5,17 +5,19 @@ Pauses system media (YouTube, Spotify, etc.) during TTS playback and recording,
 resumes afterward.
 
 Detection & control strategy (in priority order):
-1. Hush (Chrome extension) — for browser media via Unix socket (most reliable)
+1. Hush (Chrome extension) — for browser media via Unix socket
 2. nowplaying-cli + MediaRemote — for native apps (Spotify, Music, Podcasts)
-3. AppleScript + Chrome JavaScript — for browser media if Hush unavailable
-   Requires: Chrome → View → Developer → Allow JavaScript from Apple Events
-4. Fallback: Chrome tab URL detection + media key — if JS is disabled
 
-Hush is optional — if not running, falls back to existing methods.
-Only resumes if we were the ones who paused — tracked via /tmp/heyvox-media-paused flag.
+If Hush isn't installed/running and the media is browser-based, we no longer
+try to guess via Chrome JavaScript-from-AppleEvents or blindly toggle the
+media key — those tiers were unreliable, can actively *start* music that
+wasn't playing, and the fix is "install Hush." We log a one-time banner the
+first time we see Hush missing while trying to pause.
+
+Only resumes if we were the ones who paused — tracked via the pause-flag file.
 This prevents resuming media the user manually paused.
 
-Configurable via tts.pause_media in config.yaml.
+Configurable via ``tts.pause_media`` in config.yaml.
 """
 
 import ctypes
@@ -45,30 +47,15 @@ _MR_PAUSE = 1
 
 # Flag file to track whether vox (recording) paused the media.
 # The TTS orchestrator uses /tmp/heyvox-media-paused-orch separately.
-# Contents: "hush" (Hush extension), "mr" (MediaRemote), "chrome-js" (Chrome JS),
-#           "media-key" (media key toggle)
+# Contents: "hush" (Hush extension) or "mr" (MediaRemote).
 from heyvox.constants import HEYVOX_MEDIA_PAUSED_REC as _PAUSE_FLAG
 
 # Lazy-loaded framework handle (guarded by _mr_lock for thread-safe init)
 _mr_lib = None
 _mr_lock = threading.Lock()
 
-# Whether Chrome JS access has been tested and works (guarded by _chrome_lock)
-_chrome_js_available = None  # None = untested, True/False = tested
-_chrome_lock = threading.Lock()
-
-# Browsers to check for video playback (in priority order)
-_BROWSERS = [
-    ("Google Chrome", "google-chrome"),
-    ("Arc", "arc"),
-    ("Safari", "safari"),
-]
-
-# Video sites to detect in browser tabs
-_VIDEO_SITES = ["youtube.com", "twitch.tv", "vimeo.com", "netflix.com", "notebooklm.google.com"]
-# Sites where we should only check <video> (to avoid false positives on background ad audio)
-# All other sites: check both <video> and <audio>
-_MEDIA_SELECTOR = "video, audio"
+# One-time banner when Hush socket is missing and we had browser media to pause.
+_hush_missing_banner_shown = False
 
 
 # ---------------------------------------------------------------------------
@@ -157,226 +144,6 @@ def _is_media_playing_native() -> bool | None:
         return None
 
 
-def _test_chrome_js_access() -> bool:
-    """Test if Chrome allows JavaScript from Apple Events.
-
-    Only caches definitive results (explicitly enabled or disabled).
-    Transient failures (timeout, Chrome not running) are retried next call.
-    Thread-safe: uses _chrome_lock for the test-and-cache operation.
-    """
-    global _chrome_js_available
-    if _chrome_js_available is not None:
-        return _chrome_js_available
-
-    with _chrome_lock:
-        # Re-check after acquiring lock (another thread may have tested)
-        if _chrome_js_available is not None:
-            return _chrome_js_available
-
-    # Run the actual test outside the lock (subprocess can be slow).
-    # We accept that two threads might both test concurrently on first call —
-    # that's benign, and better than holding a lock during a 2s subprocess.
-    try:
-        r = subprocess.run(
-            ["osascript", "-e", '''
-tell application "System Events"
-    if not (exists process "Google Chrome") then return "no-app"
-end tell
-tell application "Google Chrome"
-    execute front window's active tab javascript "'js-ok'"
-end tell'''],
-            capture_output=True, text=True, timeout=2.0,
-        )
-        if "Executing JavaScript through AppleScript is turned off" in r.stderr:
-            _chrome_js_available = False  # Definitive: user disabled it
-            _log("WARNING: Chrome JS from Apple Events is DISABLED. "
-                 "Enable via: View → Developer → Allow JavaScript from Apple Events. "
-                 "Using media key fallback instead.")
-        elif r.stdout.strip() == "js-ok" or r.returncode == 0:
-            _chrome_js_available = True  # Definitive: it works
-            _log("Chrome JS from Apple Events: enabled")
-        elif r.stdout.strip() == "no-app":
-            # Chrome not running — don't cache, retry next time
-            _log("Chrome not running, skipping JS test (will retry)")
-            return False
-        else:
-            # Inconclusive — don't cache, retry next time
-            _log(f"Chrome JS test inconclusive: rc={r.returncode} stderr={r.stderr.strip()[:100]}")
-            return False
-    except subprocess.TimeoutExpired:
-        # Transient — don't cache, retry next time
-        _log("Chrome JS test timed out (will retry)")
-        return False
-    except Exception as e:
-        # Transient — don't cache, retry next time
-        _log(f"Chrome JS test failed: {e} (will retry)")
-        return False
-
-    return _chrome_js_available
-
-
-
-def _browser_video_state_js(app_name: str) -> str | None:
-    """Check if a browser has playing media via AppleScript + JavaScript.
-
-    Checks both <video> and <audio> elements across all audible tabs.
-    Returns "playing", "paused", or None (no media / app not running / error).
-    Requires Chrome → View → Developer → Allow JavaScript from Apple Events.
-    """
-    if app_name == "Safari":
-        js_exec = 'do JavaScript'
-        js_in = 'in t'
-    else:
-        js_exec = 'execute t javascript'
-        js_in = ''
-
-    # Check all tabs for media elements — not just known video sites.
-    # The JS checks both <video> and <audio> elements.
-    js_check = (
-        "var els = document.querySelectorAll('video, audio'); "
-        "var state = 'no-media'; "
-        "for (var i = 0; i < els.length; i++) { "
-        "  if (!els[i].paused) { state = 'playing'; break; } "
-        "  state = 'paused'; "
-        "} "
-        "state"
-    )
-
-    script = f'''
-tell application "System Events"
-    if not (exists process "{app_name}") then return "no-app"
-end tell
-tell application "{app_name}"
-    repeat with w in every window
-        repeat with t in every tab of w
-            try
-                set r to {js_exec} "{js_check}" {js_in}
-                if r is "playing" then return "playing"
-                if r is "paused" then return "paused"
-            end try
-        end repeat
-    end repeat
-    return "no-media"
-end tell'''
-
-    try:
-        r = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=1.5,
-        )
-        result = r.stdout.strip()
-        if result in ("playing", "paused"):
-            return result
-        if r.stderr and "JavaScript" in r.stderr:
-            _log(f"_browser_video_state_js: JS disabled in {app_name}: {r.stderr.strip()[:80]}")
-        return None
-    except subprocess.TimeoutExpired:
-        _log(f"_browser_video_state_js: timeout for {app_name}")
-        return None
-    except Exception as e:
-        _log(f"_browser_video_state_js: error for {app_name}: {e}")
-        return None
-
-
-def _browser_video_control_js(app_name: str, action: str) -> bool:
-    """Pause or play browser media via AppleScript + JavaScript.
-
-    Handles both <video> and <audio> elements across all tabs.
-    action: "pause" or "play"
-    """
-    # JS that pauses/plays ALL media elements in the tab
-    js_cmd = (
-        f"var els = document.querySelectorAll('video, audio'); "
-        f"var count = 0; "
-        f"for (var i = 0; i < els.length; i++) {{ els[i].{action}(); count++; }} "
-        f"count"
-    )
-
-    if app_name == "Safari":
-        js_exec = 'do JavaScript'
-        js_in = 'in t'
-    else:
-        js_exec = 'execute t javascript'
-        js_in = ''
-
-    script = f'''
-tell application "{app_name}"
-    repeat with w in every window
-        repeat with t in every tab of w
-            try
-                set r to {js_exec} "{js_cmd}" {js_in}
-                if r is not "0" and r is not 0 then return "ok"
-            end try
-        end repeat
-    end repeat
-    return "no-media"
-end tell'''
-
-    try:
-        r = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=1.5,
-        )
-        success = r.stdout.strip() == "ok"
-        if not success and r.stderr:
-            _log(f"_browser_video_control_js({app_name}, {action}): {r.stderr.strip()[:80]}")
-        return success
-    except Exception as e:
-        _log(f"_browser_video_control_js({app_name}, {action}): {e}")
-        return False
-
-
-def _has_audible_chrome_tab() -> bool:
-    """Check if Chrome has any audible tab (no JS required, uses AppleScript properties)."""
-    try:
-        r = subprocess.run(
-            ["osascript", "-e", '''
-tell application "System Events"
-    if not (exists process "Google Chrome") then return "no"
-end tell
-tell application "Google Chrome"
-    repeat with w in every window
-        repeat with t in every tab of w
-            if URL of t contains "youtube.com" or URL of t contains "twitch.tv" or URL of t contains "vimeo.com" or URL of t contains "netflix.com" then
-                return "yes"
-            end if
-        end repeat
-    end repeat
-end tell
-return "no"'''],
-            capture_output=True, text=True, timeout=2.0,
-        )
-        return r.stdout.strip() == "yes"
-    except Exception:
-        return False
-
-
-def _send_media_key():
-    """Send the system play/pause media key via Quartz.
-
-    This is a TOGGLE — use only when you're sure media is playing (to pause)
-    or paused by us (to resume). Never use blindly.
-    """
-    try:
-        import Quartz
-
-        # Key down
-        e1 = Quartz.NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
-            14, (0, 0), 0xA00, 0, 0, None, 8, (16 << 16) | (0xA << 8), -1
-        )
-        Quartz.CGEventPost(0, e1.CGEvent())
-        time.sleep(0.05)
-        # Key up
-        e2 = Quartz.NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
-            14, (0, 0), 0xB00, 0, 0, None, 8, (16 << 16) | (0xB << 8), -1
-        )
-        Quartz.CGEventPost(0, e2.CGEvent())
-        return True
-    except Exception as e:
-        _log(f"_send_media_key failed: {e}")
-        return False
-
-
 # Cache: when pause_media() finds nothing playing, skip the slow detection
 # for this many seconds.  Worst case: media started during the window gets
 # missed for one TTS utterance, then detected on the next.
@@ -388,14 +155,14 @@ def pause_media() -> bool:
     """Pause system media and set flag so we know we did it.
 
     Strategy:
-    1. If Hush extension is running → use it for browser media (most reliable)
-    2. If nowplaying-cli detects active playback → use MediaRemote (precise)
-    3. If media is registered but paused → don't touch (user paused it)
-    4. If no native media → check browsers:
-       a. If Chrome JS enabled → use video.pause() (precise)
-       b. If Chrome JS disabled → detect video tab + send media key (toggle)
+    1. If Hush extension is running → use it for browser media.
+    2. If nowplaying-cli detects active playback → use MediaRemote.
+    3. If media is registered but paused → don't touch (user paused it).
+
+    Browser media without Hush is not handled — the user should install Hush
+    if they want browser audio paused during TTS/recording. See heyvox/hush/.
     """
-    global _no_media_cache_until
+    global _no_media_cache_until, _hush_missing_banner_shown
     t0 = time.time()
 
     if os.path.exists(_PAUSE_FLAG):
@@ -407,7 +174,7 @@ def pause_media() -> bool:
         _log("pause_media: skipped (no-media cache hit)")
         return False
 
-    # --- Tier 1: Try Hush for browser media (most reliable) ---
+    # --- Tier 1: Try Hush for browser media ---
     hush_resp = _hush_command("pause")
     if hush_resp is not None:
         paused_count = hush_resp.get("pausedCount", 0)
@@ -417,6 +184,12 @@ def pause_media() -> bool:
             _log(f"pause_media: paused {paused_count} browser tab(s) via Hush ({time.time()-t0:.2f}s)")
             return True
         _log("pause_media: Hush available but no browser media playing")
+    elif not os.path.exists(_HUSH_SOCK) and not _hush_missing_banner_shown:
+        _hush_missing_banner_shown = True
+        _log(
+            "pause_media: Hush not installed/running — browser media will not be "
+            "paused. Install via `heyvox setup` or the Hush Chrome extension."
+        )
 
     # --- Tier 2: Try native media (Spotify, Music, Podcasts) ---
     native_state = _is_media_playing_native()
@@ -438,47 +211,16 @@ def pause_media() -> bool:
         _log("pause_media: native media paused by user, skipping")
         return False
 
-    # --- Tier 3: No native media session: check browsers (fallback) ---
-    _log("pause_media: no native media, checking browsers...")
-
-    for app_name, short in _BROWSERS:
-        # Try JS-based detection first (precise)
-        if app_name == "Google Chrome" and _test_chrome_js_access():
-            state = _browser_video_state_js(app_name)
-            _log(f"pause_media: {app_name} JS state={state}")
-            if state == "playing":
-                if _browser_video_control_js(app_name, "pause"):
-                    with open(_PAUSE_FLAG, "w") as f:
-                        f.write("chrome-js")
-                    _log(f"pause_media: paused {app_name} video via JS")
-                    return True
-            elif state == "paused":
-                _log(f"pause_media: {app_name} video already paused by user")
-                return False
-            continue
-
-    # --- Tier 4: Media key (blind toggle) ---
-    # If Hush is down and Chrome JS is disabled, the above tiers all miss
-    # browser media. Use tab.audible detection + media key as last resort.
-    if _has_audible_chrome_tab():
-        _log("pause_media: audible Chrome tab detected, sending media key")
-        if _send_media_key():
-            with open(_PAUSE_FLAG, "w") as f:
-                f.write("media-key")
-            return True
-
-    # Nothing playing — cache this result so subsequent TTS sentences
-    # skip the slow detection chain (Hush + nowplaying + Chrome JS).
+    # Nothing we can control — cache this result so subsequent TTS sentences
+    # skip the slow detection chain (Hush + nowplaying).
     _no_media_cache_until = time.monotonic() + _NO_MEDIA_CACHE_TTL
-    _log(f"pause_media: no playing media found (native or browser) ({time.time()-t0:.2f}s), "
+    _log(f"pause_media: no playing media found ({time.time()-t0:.2f}s), "
          f"caching for {_NO_MEDIA_CACHE_TTL:.0f}s")
     return False
 
 
 # Delay before resuming media (seconds). Gives natural breathing room.
 RESUME_DELAY = 1.0
-# Rewind browser media by this many seconds on resume.
-REWIND_SECS = 4
 # Hush resume: rewind N seconds before playing.
 HUSH_REWIND_SECS = 3
 # Hush resume: fade volume in over N milliseconds (0 = instant).
@@ -534,7 +276,6 @@ def resume_media() -> bool:
         if hush_resp is not None:
             _log(f"resume_media: Hush resume result={hush_resp}")
             return True
-        # Hush unavailable — can't fall back since we don't know what was playing
         _log("resume_media: Hush unavailable for resume, media may stay paused")
         return False
 
@@ -548,14 +289,5 @@ def resume_media() -> bool:
             except Exception as e:
                 _log(f"resume_media: MediaRemote failed: {e}")
                 return False
-
-    elif method == "chrome-js":
-        success = _browser_video_control_js("Google Chrome", "play")
-        _log(f"resume_media: Chrome JS play result={success}")
-        return success
-
-    elif method == "media-key":
-        _log("resume_media: sending media key to resume")
-        return _send_media_key()
 
     return False

@@ -403,6 +403,23 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
     if _already_frontmost:
         _log(f"restore: {snap.app_name} already frontmost, skipping activate")
         activate_ok = True
+    elif snap.detected_workspace:
+        # Workspace-managed apps (Conductor/Cursor/VS Code/etc.) are Electron
+        # multi-PID bundles. PID-level activateWithOptions_ burns ~7s polling
+        # WindowServer because it cannot rotate between sibling helper PIDs.
+        # Use app-level osascript activate and let the paste-path Cmd+L focus
+        # shortcut land keystrokes in whichever helper is frontmost. (DEF-067)
+        _log(
+            f"restore: workspace-managed app ({snap.app_name}) — "
+            f"using app-level activate + Cmd+L fallback (skipping PID-level)"
+        )
+        _t0 = _time.time()
+        from heyvox.input.injection import focus_app
+        focus_app(snap.app_name)
+        _time.sleep(0.15)
+        _log(f"restore: [TIMING] app-level activate: {int((_time.time()-_t0)*1000)}ms")
+        snap._activate_failed = True  # Signal paste to include Cmd+L focus shortcut
+        return True
     else:
         _log(f"restore: activating {snap.app_name} (pid={snap.app_pid})")
         activate_ok = _activate_app(snap.app_pid, snap.app_name)
@@ -508,18 +525,33 @@ def _activate_app(pid: int, app_name: str) -> bool:
                 # burn on a 5-poll retry). Bail immediately — the paste-path
                 # focus shortcut (Cmd+L) lands keystrokes in the current
                 # frontmost helper's text input. See DEF-061.
+                #
+                # DEF-067: Always fall back to process-name comparison. The
+                # stale helper's bundleIdentifier() frequently returns an
+                # empty string, so the bundle-based check misses and we burn
+                # ~7s on retries. Name comparison catches the same case.
                 same_bundle = False
-                if front is not None and target_bundle:
+                if front is not None:
                     try:
-                        same_bundle = front.bundleIdentifier() == target_bundle
+                        front_bundle = front.bundleIdentifier()
+                        if target_bundle and front_bundle:
+                            same_bundle = front_bundle == target_bundle
                     except Exception:
-                        front_name = front.localizedName() or ""
-                        same_bundle = front_name.lower() == (app_name or "").lower()
+                        pass
+                    if not same_bundle:
+                        try:
+                            front_name = front.localizedName() or ""
+                            same_bundle = (
+                                bool(front_name)
+                                and front_name.lower() == (app_name or "").lower()
+                            )
+                        except Exception:
+                            pass
                 if same_bundle:
                     _log(
                         f"activate: sibling helper frontmost (pid={front_pid}, "
                         f"target={pid}) — same bundle, skipping further "
-                        f"retries (DEF-061)"
+                        f"retries (DEF-061/067)"
                     )
                     return False
                 if i < 4:
