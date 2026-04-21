@@ -165,7 +165,14 @@ def _get_default_output_device() -> int | None:
 
 
 def _get_volume_coreaudio(device_id: int) -> float | None:
-    """Read master output volume scalar [0.0, 1.0] via CoreAudio."""
+    """Read master output volume scalar [0.0, 1.0] via CoreAudio.
+
+    DEF-072: Some devices (USB DACs, HDMI, Bluetooth) accept the scalar-volume
+    query with err=0 but always return 0.0 because they have no software volume
+    control. If we read 0.0 on a device that isn't actually muted, treat it as
+    a lying device and return None — the caller falls back to osascript and a
+    safe default instead of saving a bogus zero to the duck sidecar.
+    """
     ca = _load_coreaudio()
     if ca is None:
         return None
@@ -187,7 +194,14 @@ def _get_volume_coreaudio(device_id: int) -> float | None:
             ctypes.byref(vol),
         )
         if err == 0:
-            return float(vol.value)
+            value = float(vol.value)
+            if value == 0.0 and _get_mute_coreaudio(device_id) is not True:
+                log.debug(
+                    "DEF-072: device %d reports vol=0.0 but not muted; treating as lying device",
+                    device_id,
+                )
+                return None
+            return value
     return None
 
 

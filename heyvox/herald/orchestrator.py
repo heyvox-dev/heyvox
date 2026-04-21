@@ -487,6 +487,17 @@ def _duck_audio(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
 
     original_vol = get_system_volume_cached(cfg.volume_cache_ttl)
     dev_id = _get_default_output_device()
+    # DEF-072: If we read a near-zero volume the device is either actually
+    # muted (in which case ducking is pointless) or lying about having software
+    # volume control (in which case saving 0.0 would zero the output on
+    # restore). Either way, skip the sidecar + skip ducking entirely.
+    if original_vol is None or original_vol < 0.05:
+        _herald_log(
+            f"ORCH: skipping duck — original_vol={original_vol} (dev={dev_id}) "
+            f"looks bogus or muted; not writing sidecar",
+            debug_log,
+        )
+        return None
     try:
         if dev_id is not None:
             cfg.original_vol_file.write_text(f"{dev_id}:{original_vol}")
@@ -936,7 +947,16 @@ class HeraldOrchestrator:
         except OSError:
             pass
 
-        _herald_log(f"ORCH: started (pid={os.getpid()})", debug_log)
+        # DEF-072: If a previous orchestrator crashed mid-duck, the sidecar may
+        # contain a stale (possibly bogus 0.0) original volume. Clear it so we
+        # don't "restore" to a dead value on the first TTS event.
+        stale_sidecar = cfg.original_vol_file.exists()
+        cfg.original_vol_file.unlink(missing_ok=True)
+
+        _herald_log(
+            f"ORCH: started (pid={os.getpid()}) stale_sidecar={stale_sidecar}",
+            debug_log,
+        )
 
         original_vol: float | None = None
         current_workspace: str = ""
