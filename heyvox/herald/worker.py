@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -636,6 +637,11 @@ class HeraldWorker:
         if self._kokoro_daemon_alive():
             return True
 
+        # DEF-069: a stale daemon (process alive, socket missing) will trip the
+        # new daemon's PID-lock soft-check and abort spawn, causing Piper
+        # fallback. Reap it before spawning so the new daemon can take over.
+        self._reap_stale_kokoro_daemon()
+
         log.info("Starting Kokoro daemon...")
         daemon_script = self._find_kokoro_daemon_script()
         if not daemon_script:
@@ -676,6 +682,51 @@ class HeraldWorker:
             return True
         except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
             return False
+
+    def _reap_stale_kokoro_daemon(self) -> None:
+        """Terminate a live-but-socketless Kokoro daemon blocking new spawns.
+
+        DEF-069: The kokoro-daemon PID-lock's soft check (is_pid_alive) aborts
+        startup whenever the PID file points to any live process — even one
+        that has already closed its socket or is stuck in MLX teardown. The
+        worker then waits 8 s for a socket that will never appear and falls
+        back to Piper. Proactively SIGTERM the stuck daemon so the lock
+        releases and the new daemon can bind.
+        """
+        try:
+            pid_str = Path(KOKORO_DAEMON_PID).read_text().strip()
+            pid = int(pid_str)
+        except (FileNotFoundError, ValueError):
+            return
+        if pid <= 0 or pid == os.getpid():
+            return
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        log.warning(
+            "Stale Kokoro daemon pid=%d has no socket — terminating before respawn",
+            pid,
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        for _ in range(30):  # up to ~3 s
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.1)
+
+        log.warning("Stale Kokoro daemon pid=%d ignored SIGTERM — SIGKILL", pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        time.sleep(0.2)
 
     def _find_kokoro_daemon_script(self) -> Path | None:
         """Find the kokoro-daemon.py script path."""
