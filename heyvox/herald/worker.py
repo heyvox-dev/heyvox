@@ -482,6 +482,24 @@ class HeraldWorker:
                 except OSError as exc:
                     log.warning("Failed to enqueue part %d: %s", part_num, exc)
 
+        # DEF-073: Safety net for part 1.
+        # The _early_enqueue_watcher polls at 100ms intervals to copy part 1
+        # from temp_wav -> queue. For short generations (~0.26s, one part),
+        # the watcher's stop signal can fire before a single poll has seen
+        # temp_wav, and its final-sweep path handles parts 2+ only. Result:
+        # part 1 is left at temp_wav, the unlink below deletes it, and the
+        # message is silently dropped with no "ORCH: playing" ever logged.
+        part1_name = f"{timestamp}-01.wav"
+        part1_dest = os.path.join(HERALD_QUEUE_DIR, part1_name)
+        if not os.path.isfile(part1_dest) and os.path.isfile(temp_wav):
+            try:
+                os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
+                shutil.move(temp_wav, part1_dest)
+                self._write_workspace_sidecar(part1_dest)
+                log.info("DEF-073: rescued part 1 via main-thread fallback -> %s", part1_name)
+            except OSError as exc:
+                log.warning("Failed to rescue part 1: %s", exc)
+
         # Remove parts manifest now that all parts are enqueued
         parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
         try:
@@ -489,7 +507,7 @@ class HeraldWorker:
         except FileNotFoundError:
             pass
 
-        # Clean up temp file if not moved by watcher
+        # Clean up temp file if not moved by watcher or rescue above
         try:
             os.unlink(temp_wav)
         except FileNotFoundError:
