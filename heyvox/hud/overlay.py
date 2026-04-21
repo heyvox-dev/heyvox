@@ -730,76 +730,58 @@ def _make_menu_action_class():
                 pass
 
         def restartHeyVox_(self, sender):
-            """Kill heyvox.main, relaunch it (which spawns a new overlay), then quit this overlay."""
+            """Signal heyvox.main to exit non-zero so launchd respawns it (DEF-071).
+
+            Previous approach (Popen relaunch from the HUD) was unreliable:
+            DEF-066 bit us via a dead cwd; DEF-071 hit a silent spawn failure
+            that left HeyVox fully dead with no respawn since clean SIGTERM
+            exits 0 and the plist uses KeepAlive: SuccessfulExit=false.
+
+            New approach: send SIGUSR2 → main's signal handler does
+            os._exit(42). Non-zero exit triggers launchd's respawn, which
+            reads WorkingDirectory and env fresh from the plist — the HUD
+            is no longer in the process-supervision business.
+            """
             import subprocess
-            import sys
             import time
             import os
             import signal as _sig
 
-            # Send SIGTERM to main process and wait for clean shutdown
-            # (atexit handler releases PID lock). Avoid pkill which can
-            # also kill the newly spawned process.
-            from heyvox.constants import HEYVOX_PID_FILE, HEYVOX_RESTART_LOG
+            from heyvox.constants import HEYVOX_PID_FILE
             pid_file = HEYVOX_PID_FILE
             old_pid = 0
+            delivered = False
             try:
                 with open(pid_file) as f:
                     old_pid = int(f.read().strip())
-                os.kill(old_pid, _sig.SIGTERM)
+                os.kill(old_pid, _sig.SIGUSR2)
+                delivered = True
             except (FileNotFoundError, ValueError, ProcessLookupError):
-                # No PID file or process already dead — try pkill as fallback
-                subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+                # No PID file or process already dead — use pkill as fallback.
+                result = subprocess.run(
+                    ["pkill", "-USR2", "-f", "heyvox.main"],
+                    capture_output=True,
+                )
+                delivered = result.returncode == 0
 
-            # Wait for process to exit and release PID lock
-            if old_pid:
-                for _ in range(20):  # up to 2 seconds
+            # Best-effort: wait briefly for the process to exit so launchd
+            # reliably sees the non-zero code. If it won't exit, SIGKILL —
+            # launchd treats a signal-induced kill as non-success as well.
+            if delivered and old_pid:
+                for _ in range(30):  # up to 3s
                     time.sleep(0.1)
                     try:
-                        os.kill(old_pid, 0)  # Check if still alive
+                        os.kill(old_pid, 0)
                     except ProcessLookupError:
-                        break  # Process exited
+                        break
                 else:
-                    # Force kill if still alive after 2s
                     try:
                         os.kill(old_pid, _sig.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    time.sleep(0.3)
 
-            # Clean up stale PID file in case atexit didn't run
-            try:
-                os.unlink(pid_file)
-            except FileNotFoundError:
-                pass
-
-            # Relaunch main process — it will spawn its own overlay.
-            # Log stderr so startup failures are diagnosable.
-            # DEF-066: pass explicit cwd. If the current process's cwd was
-            # invalidated (e.g. Conductor archived the workspace mid-run),
-            # inheriting that dead cwd cascades into import failures in the
-            # new process (numba/coverage touches os.getcwd; heyvox submodule
-            # imports fail because sys.path[0]="" resolves to dead cwd).
-            import heyvox as _heyvox_pkg
-            _heyvox_root = os.path.dirname(os.path.dirname(os.path.abspath(_heyvox_pkg.__file__)))
-            _restart_cwd = _heyvox_root if os.path.isdir(_heyvox_root) else os.path.expanduser("~")
-            restart_log = open(HEYVOX_RESTART_LOG, "w")
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "heyvox.main"],
-                stdout=subprocess.DEVNULL, stderr=restart_log,
-                start_new_session=True,  # Detach so our exit doesn't kill it
-                cwd=_restart_cwd,
-            )
-
-            # Wait briefly and verify the new process is alive before quitting
-            time.sleep(0.5)
-            if proc.poll() is not None:
-                # New process already exited — don't quit overlay so user
-                # still has the menu bar icon and can see something went wrong.
-                restart_log.close()
-                return
-
-            # Quit this overlay — the new main process launches a fresh one
+            # Quit this overlay; launchd will respawn heyvox.main, which
+            # spawns a fresh overlay on startup.
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
 
