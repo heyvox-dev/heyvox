@@ -366,8 +366,11 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
         else:
             return
     try:
+        # --force bypasses the switch script's idle gate (skips when user is
+        # actively typing). When TTS plays, we assume the user is listening
+        # rather than typing, so the idle guard produced false-skips.
         r = subprocess.run(
-            [switch_cmd, workspace],
+            [switch_cmd, workspace, "--force"],
             capture_output=True, text=True, timeout=5.0,
         )
         _herald_log(
