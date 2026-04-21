@@ -360,9 +360,21 @@ def _setup(config: HeyvoxConfig):
         """
         ctx.cancel_requested.set()
 
+    def handle_relaunch(signum, frame):
+        """SIGUSR2 = exit non-zero so launchd respawns us (DEF-071).
+
+        The plist uses KeepAlive: { SuccessfulExit: false }, so clean exit 0
+        is treated as a user-initiated quit (no respawn). Exit code 42
+        tells launchd this was NOT a successful exit, triggering the
+        respawn path. os._exit skips atexit handlers so the non-zero code
+        is reported verbatim.
+        """
+        os._exit(42)
+
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGUSR1, handle_cancel)
+    signal.signal(signal.SIGUSR2, handle_relaunch)
 
     # Wake word settings
     start_word = config.wake_words.start
