@@ -382,13 +382,29 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
         _herald_log(f"ORCH: workspace switch failed: {e}", cfg.debug_log)
 
 
+def _hammerspoon_running() -> bool:
+    """True iff the Hammerspoon.app process is running.
+
+    DEF-074: When Hammerspoon is not running, `hs -c` can trigger the macOS
+    "Hammerspoon is not running — Launch?" dialog, interrupting the user.
+    Gate every `hs` invocation with this check.
+    """
+    try:
+        return subprocess.call(
+            ["pgrep", "-q", "Hammerspoon"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ) == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
     """Send a Hammerspoon notification for a held workspace message."""
     held = list(cfg.hold_dir.glob("*.wav"))
     count = len(held)
     ws_escaped = workspace.replace("'", "\\'")
     hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
-    if not Path(hs).exists():
+    if not Path(hs).exists() or not _hammerspoon_running():
         return
     script = (
         f"hs.notify.new({{"
@@ -1112,7 +1128,7 @@ class HeraldOrchestrator:
     def _show_alert(self, message: str) -> None:
         """Show a transient Hammerspoon alert."""
         hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
-        if not Path(hs).exists():
+        if not Path(hs).exists() or not _hammerspoon_running():
             return
         try:
             subprocess.Popen(
