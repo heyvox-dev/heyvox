@@ -697,7 +697,17 @@ def _play_wav(
             try:
                 ws = workspace_file.read_text().strip()
                 current_workspace = ws
-                if _workspace_app_is_frontmost(cfg):
+                # DEF-070: Skip switch while HeyVox is recording/injecting. The
+                # forced Hammerspoon sidebar click steals focus mid-paste, so
+                # `keystroke return` lands on a sidebar item instead of the chat
+                # text field and the message never submits.
+                if Path(RECORDING_FLAG).exists():
+                    _herald_log(
+                        f"ORCH: skipping workspace switch to {ws!r} "
+                        f"(HeyVox recording/injecting)",
+                        debug_log,
+                    )
+                elif _workspace_app_is_frontmost(cfg):
                     _switch_workspace(ws, cfg)
                     time.sleep(0.3)
                 else:
