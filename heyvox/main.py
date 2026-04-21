@@ -611,7 +611,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # from incrementing this counter, so the 3-frame rationale was redundant.
     # 2 × 80 ms = 160 ms post-detection floor instead of 240 ms — saves one
     # audio chunk of latency on every wake word without weakening the filter.
-    _CONSECUTIVE_FRAMES_REQUIRED = 2
+    # DEF-067 (2026-04-21): bifurcated — START stays at 2 (fast wake), STOP
+    # requires 3. User reported mid-sentence false stops at score 0.997 during
+    # natural speech; 2 frames = 160 ms is too easy for phoneme runs to hit,
+    # while start-word latency matters much more than stop-word latency.
+    _CONSECUTIVE_FRAMES_REQUIRED_START = 2
+    _CONSECUTIVE_FRAMES_REQUIRED_STOP = 3
+    # Backward-compat alias used by log lines — resolved dynamically below.
+    _CONSECUTIVE_FRAMES_REQUIRED = _CONSECUTIVE_FRAMES_REQUIRED_START
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
     # DEF-063: timestamp of the first confirmed hit in the current accumulation run.
     # Used to report wake→recording.start latency so future slowdowns are measurable.
@@ -1102,6 +1109,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # mid-sentence phonemes to falsely stop recording (DEF-043).
                 active_threshold = min(0.95, base_thr * _speaker_mult)
                 active_cooldown = stop_cooldown if _is_rec else cooldown
+                # DEF-067: stop-wake requires more frames than start-wake to
+                # resist mid-sentence false stops on phoneme runs. User-facing
+                # wake latency matters far more than stop latency.
+                active_frames_required = (
+                    _CONSECUTIVE_FRAMES_REQUIRED_STOP if _is_rec
+                    else _CONSECUTIVE_FRAMES_REQUIRED_START
+                )
                 log_threshold = active_threshold * 0.5
                 if s > log_threshold:
                     triggered = s > active_threshold
@@ -1114,7 +1128,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         _hits_now = _consecutive_hits.get(ww_name, 0)
                         _hit_info = (
                             f" vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)}"
-                            f" silent={_vad_silent} hits={_hits_now}/{_CONSECUTIVE_FRAMES_REQUIRED}"
+                            f" silent={_vad_silent} hits={_hits_now}/{active_frames_required}"
                         )
                     msg = (
                         f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) "
@@ -1138,7 +1152,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 else:
                     _consecutive_hits[ww_name] = 0
 
-                if _consecutive_hits.get(ww_name, 0) >= _CONSECUTIVE_FRAMES_REQUIRED:
+                if _consecutive_hits.get(ww_name, 0) >= active_frames_required:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         # DEF-063: wake→trigger latency (first hit → accumulation complete).
@@ -1147,7 +1161,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         # regressions inside the consecutive-frame gate.
                         if not _is_rec and _first_hit_time > 0:
                             log(f"[TIMING] wake→trigger: {(now - _first_hit_time) * 1000:.0f}ms "
-                                f"({_CONSECUTIVE_FRAMES_REQUIRED} frames)")
+                                f"({active_frames_required} frames)")
                             _first_hit_time = 0.0
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
