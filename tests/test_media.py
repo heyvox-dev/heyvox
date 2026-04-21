@@ -61,8 +61,7 @@ class TestPauseMedia:
 
     @patch("heyvox.audio.media._hush_command", return_value=None)
     @patch("heyvox.audio.media._is_media_playing_native", return_value=None)
-    @patch("heyvox.audio.media._test_chrome_js_access", return_value=False)
-    def test_noop_when_no_session(self, mock_js, mock_state, mock_hush):
+    def test_noop_when_no_session(self, mock_state, mock_hush):
         """No native session and no browser media → returns False, no flag created."""
         result = media.pause_media()
         assert result is False
@@ -83,10 +82,9 @@ class TestPauseMedia:
         assert result is True  # Returns True but doesn't re-pause
 
     @patch("heyvox.audio.media._hush_command", return_value=None)
-    @patch("heyvox.audio.media._send_media_key", return_value=True)
     @patch("heyvox.audio.media._get_mr")
     @patch("heyvox.audio.media._is_media_playing_native", return_value=True)
-    def test_uses_mediaremote_when_playing(self, mock_state, mock_mr, mock_key, mock_hush):
+    def test_uses_mediaremote_when_playing(self, mock_state, mock_mr, mock_hush):
         mr_lib = MagicMock()
         mr_lib.MRMediaRemoteSendCommand.return_value = True
         mock_mr.return_value = mr_lib
@@ -94,13 +92,11 @@ class TestPauseMedia:
         assert result is True
         mr_lib.MRMediaRemoteSendCommand.assert_called_once_with(media._MR_PAUSE, None)
         assert open(media._PAUSE_FLAG).read() == "mr"
-        mock_key.assert_not_called()
 
     @patch("heyvox.audio.media._hush_command", return_value=None)
-    @patch("heyvox.audio.media._test_chrome_js_access", return_value=False)
     @patch("heyvox.audio.media._get_mr", return_value=None)
     @patch("heyvox.audio.media._is_media_playing_native", return_value=True)
-    def test_falls_back_gracefully_when_mr_unavailable(self, mock_state, mock_mr, mock_js, mock_hush):
+    def test_falls_back_gracefully_when_mr_unavailable(self, mock_state, mock_mr, mock_hush):
         """When MediaRemote unavailable and no browser video, pause returns False."""
         result = media.pause_media()
         # MediaRemote unavailable + no browser media → cannot pause → False

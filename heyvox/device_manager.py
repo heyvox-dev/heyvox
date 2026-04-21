@@ -10,7 +10,6 @@ import os
 import sys
 import time
 import logging
-from collections import deque
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -107,9 +106,6 @@ class DeviceManager:
 
         # Health check state
         self._last_health_check: float = time.time()
-        self._health_cv_history: deque = deque(maxlen=6)  # Last 30s of CV values
-        self._zero_streak: int = 0
-        self._silent_recover_count: int = 0  # For exponential backoff
         self._last_resort_until: float = 0.0  # Suppress health checks until this time
 
         # Cooldown tracking (per-DeviceManager, separate from module-level in mic.py)
@@ -299,7 +295,6 @@ class DeviceManager:
         self._write_active_mic(self.dev_name)
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
-        self._health_cv_history.clear()
         self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
         self.ctx.dead_mic_zero_chunks = 0
         self.ctx.dead_mic_low_chunks = 0
@@ -310,18 +305,21 @@ class DeviceManager:
     # -------------------------------------------------------------------------
 
     def health_check(self, audio: np.ndarray) -> None:
-        """Check audio for silent-mic or zombie-stream conditions.
+        """Track audio activity for the time-based dead-mic detector.
 
-        Called from the main loop when not recording and not busy.  Uses two
-        detection strategies:
+        Zombie detection itself lives in :meth:`check_dead_mic_timeout`
+        (AUDIO-13), which reinits when no real audio has been seen for
+        DEAD_MIC_TIMEOUT seconds.  This method just:
 
-        - **Zero-streak** (AUDIO-08): consecutive health-check intervals with
-          audio level below 10 → flag for reinit.
-        - **Variance / CV** (AUDIO-12): audio level above 10 but coefficient of
-          variation suspiciously stable → likely a zombie stream.
+        - Cancels the last-resort grace period once real audio returns.
+        - Clears the current device's hotplug cooldown so it stays eligible
+          on the next scan.
 
-        When either condition is detected, sets ``ctx.zombie_mic_reinit = True``
-        so the main loop handles the actual reinit on the next iteration.
+        The previous CV/variance zombie detector (AUDIO-12) was removed —
+        its coverage overlapped the time-based detector (AUDIO-13) and the
+        recording-empty detector, but it relied on magic constants
+        (``std < 0.05``, ``mean ∈ (0.45, 0.70)``) that were fragile across
+        devices and could misfire on steady-noise environments.
 
         Args:
             audio: Raw audio chunk as int16 numpy array.
@@ -333,157 +331,17 @@ class DeviceManager:
 
         level = int(np.abs(audio).max())
 
-        # Last-resort grace period: when we're stuck on the only available
-        # device (all others in cooldown), suppress recovery to prevent flapping.
         if now < self._last_resort_until:
+            # Last-resort grace period: stuck on the only available device
+            # (others in cooldown).  Cancel the grace period if the device
+            # wakes up; otherwise just wait it out.
             if level >= 10:
-                # Real audio detected — device woke up, cancel grace period
                 self._last_resort_until = 0.0
-                self._zero_streak = 0
-                self._silent_recover_count = 0
             return
 
-        # Variance-based zombie stream detection (AUDIO-12)
+        # Producing real audio → keep this device eligible for hotplug scans.
         if level >= 10:
-            abs_audio = np.abs(audio.astype(np.float32))
-            _mean = float(abs_audio.mean())
-            if _mean > 1e-6:
-                _cv = float(abs_audio.std() / _mean)
-                self._health_cv_history.append(_cv)
-                if len(self._health_cv_history) >= 4:
-                    _cv_values = list(self._health_cv_history)
-                    _cv_std = float(np.std(_cv_values))
-                    _cv_mean = float(np.mean(_cv_values))
-                    if _cv_std < 0.05 and 0.45 < _cv_mean < 0.70:
-                        self._log(
-                            f"WARNING: Zombie stream detected "
-                            f"(CV={_cv_mean:.3f}±{_cv_std:.3f}), forcing recovery"
-                        )
-                        try:
-                            print(
-                                f"[mic] Zombie stream (CV={_cv_mean:.3f}±{_cv_std:.3f})",
-                                file=sys.stderr, flush=True,
-                            )
-                        except BrokenPipeError:
-                            pass
-                        self._zero_streak = 2  # Force recovery path below
-
-        # Silence (level < 10) means a quiet room, not a dead mic.
-        # Only trigger recovery on zombie stream detection (CV check above
-        # sets _zero_streak = 2) or actual IOErrors (handled separately).
-        if self._zero_streak >= 2:  # Zombie stream forced by CV check
-            self._silent_recover_count += 1
-            _dead_mic_name = self.pa.get_device_info_by_index(self.dev_index)['name']
-            _backoff = min(5, max(1, 5 * (2 ** (self._silent_recover_count - 2))))
-            self._log(
-                f"WARNING: Zombie stream detected ({_dead_mic_name}), re-scanning devices... "
-                f"(attempt {self._silent_recover_count}, backoff {_backoff}s)"
-            )
-            try:
-                print(
-                    f"[mic] Zombie stream detected ({_dead_mic_name}), re-scanning...",
-                    file=sys.stderr, flush=True,
-                )
-            except BrokenPipeError:
-                pass
-            self._hud_send({"type": "error", "text": f"Mic zombie: {_dead_mic_name}"})
-            self._zero_streak = 0
-            self._mic_pinned = False
-            self._recover_silent_mic(_dead_mic_name, _backoff)
-        else:
-            # Reset recovery backoff when we see real audio.
-            if self._silent_recover_count > 0:
-                self._silent_recover_count = 0
-            # Clear this device's cooldown — it's producing audio, so
-            # hotplug scan shouldn't skip it on the next cycle.
-            if level >= 10:
-                clear_device_cooldown(self.dev_name)
-
-    def _recover_silent_mic(self, dead_mic_name: str, backoff: float) -> None:
-        """Internal: close stream, sleep backoff, try to re-open a working mic.
-
-        Called only from health_check when a silent/zombie mic is confirmed.
-        Updates self.pa, self.stream, self.dev_index, self.dev_name.
-        Sets ctx.zombie_mic_reinit = True if no mic is found, so the main loop
-        can handle the retry.
-        """
-        mic_priority = self.config.mic_priority if self.config else None
-        sample_rate = self.config.audio.sample_rate if self.config else 16000
-        chunk_size = self.config.audio.chunk_size if self.config else 1280
-
-        try:
-            self.stream.stop_stream()
-            self.stream.close()
-        except Exception:
-            pass
-        self.pa.terminate()
-        time.sleep(backoff)
-        self.pa = pyaudio.PyAudio()
-
-        # Mark the dead device in cooldown so hotplug scan won't re-select it
-        add_device_cooldown(dead_mic_name)
-        # Exclude the dead device to try alternatives first
-        _exclude_prio = [
-            p for p in (mic_priority or [])
-            if p.lower() not in dead_mic_name.lower()
-        ]
-        dev_index = find_best_mic(
-            self.pa,
-            mic_priority=_exclude_prio or mic_priority,
-            sample_rate=sample_rate,
-            chunk_size=chunk_size,
-            require_audio=True,
-        )
-        if dev_index is None:
-            dev_index = find_best_mic(
-                self.pa,
-                mic_priority=mic_priority,
-                sample_rate=sample_rate,
-                chunk_size=chunk_size,
-                require_audio=True,
-            )
-        if dev_index is None:
-            self._log(f"No mic after reinit, retrying in 2s...")
-            time.sleep(2)
-            self.ctx.zombie_mic_reinit = True
-            return
-
-        self.dev_index = dev_index
-        new_name = self.pa.get_device_info_by_index(dev_index)['name']
-
-        # If we recovered to the SAME device that was just dead, don't reset
-        # backoff — this isn't a real recovery, it's the system default fallback
-        # returning the only available device.
-        if new_name.lower() == dead_mic_name.lower():
-            self._log(f"Mic recovered to SAME device: [{dev_index}] {new_name} (not resetting backoff)")
-            try:
-                print(f"[mic] Recovered to same device: [{dev_index}] {new_name}", file=sys.stderr, flush=True)
-            except (BrokenPipeError, OSError):
-                pass
-        else:
-            self._log(f"Mic recovered: [{dev_index}] {new_name}")
-            try:
-                print(f"[mic] Recovered: [{dev_index}] {new_name}", file=sys.stderr, flush=True)
-            except (BrokenPipeError, OSError):
-                pass
-            self._silent_recover_count = 0  # Reset backoff only on genuine device switch
-
-        self.dev_name = new_name
-        self.stream = open_mic_stream(
-            self.pa, dev_index,
-            sample_rate=sample_rate,
-            chunk_size=chunk_size,
-        )
-        self.headset_mode = detect_headset(self.pa, dev_index)
-        if self.profile_manager:
-            self.active_profile = self.profile_manager.get_profile(self.dev_name)
-        self._write_active_mic(self.dev_name)
-        device_change_cue(self.dev_name, "input")
-        self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
-        self._health_cv_history.clear()
-        self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
-        self.ctx.dead_mic_zero_chunks = 0
-        self.ctx.dead_mic_low_chunks = 0
+            clear_device_cooldown(self.dev_name)
 
     # -------------------------------------------------------------------------
     # Dead mic timeout (AUDIO-13)

@@ -247,9 +247,8 @@ def cleanup_ipc_files(herald_too: bool = True):
     # native-messaging process with its own socket lifecycle (bind on startup,
     # atexit cleanup). If HeyVox unlinks the file while the host process is
     # still alive, the listener keeps its in-kernel bind but the socket file
-    # vanishes from the filesystem — no client can connect, media pause
-    # silently falls through to the less reliable MediaRemote/media-key tiers.
-    # See DEF-039.
+    # vanishes from the filesystem — no client can connect, and browser media
+    # simply won't be paused during TTS. See DEF-039.
     for path in (RECORDING_FLAG, TTS_PLAYING_FLAG, TTS_CMD_FILE,
                  VERBOSITY_FILE, HUD_SOCKET_PATH, ACTIVE_MIC_FILE,
                  MIC_SWITCH_REQUEST_FILE, HEYVOX_PID_FILE,

@@ -775,11 +775,20 @@ def _make_menu_action_class():
 
             # Relaunch main process — it will spawn its own overlay.
             # Log stderr so startup failures are diagnosable.
+            # DEF-066: pass explicit cwd. If the current process's cwd was
+            # invalidated (e.g. Conductor archived the workspace mid-run),
+            # inheriting that dead cwd cascades into import failures in the
+            # new process (numba/coverage touches os.getcwd; heyvox submodule
+            # imports fail because sys.path[0]="" resolves to dead cwd).
+            import heyvox as _heyvox_pkg
+            _heyvox_root = os.path.dirname(os.path.dirname(os.path.abspath(_heyvox_pkg.__file__)))
+            _restart_cwd = _heyvox_root if os.path.isdir(_heyvox_root) else os.path.expanduser("~")
             restart_log = open(HEYVOX_RESTART_LOG, "w")
             proc = subprocess.Popen(
                 [sys.executable, "-m", "heyvox.main"],
                 stdout=subprocess.DEVNULL, stderr=restart_log,
                 start_new_session=True,  # Detach so our exit doesn't kill it
+                cwd=_restart_cwd,
             )
 
             # Wait briefly and verify the new process is alive before quitting
