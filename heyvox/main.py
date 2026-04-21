@@ -646,6 +646,24 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _VAD_SILENT_GRACE = 0.5
     _last_nonsilent_time: float = 0.0
 
+    # User-effort metric: timestamps of every above-threshold wake attempt while
+    # not recording. When recording finally starts, if the list has > 1 entry
+    # within the last _USER_EFFORT_WINDOW seconds, the user had to repeat the
+    # wake word — emit [USER_EFFORT] so the log-health digest can count those
+    # days. Cleared on every recording.start.
+    _recent_wake_attempts: list[float] = []
+    _USER_EFFORT_WINDOW = 10.0
+
+    def _flush_user_effort() -> None:
+        """Emit [USER_EFFORT] if multiple wake attempts piled up before start."""
+        if len(_recent_wake_attempts) > 1:
+            span = _recent_wake_attempts[-1] - _recent_wake_attempts[0]
+            log(
+                f"[USER_EFFORT] attempts={len(_recent_wake_attempts)} "
+                f"window={span:.1f}s"
+            )
+        _recent_wake_attempts.clear()
+
     def _hud_ensure_connected() -> None:
         """Attempt periodic reconnect if the HUD connection was lost."""
         if ctx.hud_client is None:
@@ -1149,6 +1167,41 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     log(msg)
                     if triggered:
                         _safe_stderr(f"[wakeword] {msg.strip()}")
+
+                    # Track every "model heard the wake word" attempt while not
+                    # recording — feeds USER_EFFORT when recording finally starts.
+                    # Includes triggers that get killed by VAD / accumulator /
+                    # cooldown, since each represents a real wake utterance.
+                    if triggered and not _is_rec:
+                        _now_attempt = time.time()
+                        _recent_wake_attempts[:] = [
+                            t for t in _recent_wake_attempts
+                            if _now_attempt - t < _USER_EFFORT_WINDOW
+                        ]
+                        _recent_wake_attempts.append(_now_attempt)
+
+                    # Dedicated tags for log-health digest grep:
+                    # WAKE_VAD_DROP — model triggered but VAD post-filter killed
+                    # it as silent. A confident wake word lost to over-rejection.
+                    if triggered and _vad_silent:
+                        log(
+                            f"[WAKE_VAD_DROP] [{ww_name}] score={s:.3f} "
+                            f"thr={active_threshold:.2f} "
+                            f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
+                            f"is_rec={_is_rec}"
+                        )
+                    # NEAR_MISS — strong score that didn't quite reach threshold
+                    # while idle. Aggregated counts surface model drift, mic
+                    # placement issues, or speaker_mult set too aggressively.
+                    elif (
+                        not triggered
+                        and not _is_rec
+                        and s > active_threshold * 0.7
+                    ):
+                        log(
+                            f"[NEAR_MISS] [{ww_name}] score={s:.3f} "
+                            f"thr={active_threshold:.2f}"
+                        )
                 # DEF-047: During recording, silent frames must not count toward a
                 # stop-trigger. The model emits silence-bursts on dead HFP streams;
                 # without this gate, a mic that stops delivering audio mid-recording
@@ -1197,6 +1250,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             pass
                         elif use_separate_words:
                             if start_word in ww_name and not _is_rec:
+                                _flush_user_effort()
                                 recording.start(preroll=_preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
                                 # Warmup: ignore stop-word in first _STOP_WARMUP_SECS
@@ -1207,6 +1261,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                     recording.stop()
                         else:
                             if not _is_rec:
+                                _flush_user_effort()
                                 recording.start(preroll=_preroll_buffer)
                             elif time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                 # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS

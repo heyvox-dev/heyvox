@@ -410,6 +410,195 @@ def _cmd_debug(args):
     print(f"  Log file:  {STT_DEBUG_LOG}")
 
 
+def _cmd_log_health(args):
+    """Daily digest of wake-word, STT, and Herald log health.
+
+    Aggregates counts of wake triggers, VAD-killed triggers (WAKE_VAD_DROP),
+    sub-threshold near misses (NEAR_MISS), recording sessions where the user
+    had to repeat themselves (USER_EFFORT), STT latencies, Herald violations,
+    workspace-switch outcomes, and Hammerspoon skips.
+
+    Designed to be run daily — surfaces patterns that no single log line shows.
+    """
+    import datetime
+    import re
+    from heyvox.constants import (
+        LOG_FILE,
+        STT_DEBUG_LOG,
+        HERALD_DEBUG_LOG,
+        HERALD_VIOLATIONS_LOG,
+    )
+
+    # Resolve the active log file from config — it can be overridden in
+    # config.yaml (default ships as /tmp/heyvox.log to match the launchd plist
+    # redirect). Reading the constant alone misses the live data.
+    try:
+        from heyvox.config import load_config
+        active_log_file = load_config().log_file or LOG_FILE
+    except Exception:
+        active_log_file = LOG_FILE
+
+    target_date = getattr(args, "date", None) or datetime.date.today().isoformat()
+    json_mode = getattr(args, "json", False)
+
+    def _say(*a, **kw) -> None:
+        """Suppress human-readable output when --json is requested."""
+        if not json_mode:
+            print(*a, **kw)
+
+    # Build a set of substring matchers covering the formats found in our logs:
+    #   ISO     "2026-04-21"        — herald-debug, herald-violations, hs lines
+    #   Short   "Apr 21"            — bash `date` default in conductor-switch-workspace
+    #   Ordinal "21 Apr"            — locale variant
+    # A line is "today" if any matcher hits.
+    try:
+        _dt = datetime.date.fromisoformat(target_date)
+        _short = _dt.strftime("%b %d").replace(" 0", " ")  # "Apr 21" not "Apr 21" with zero-pad
+        _short_alt = _dt.strftime("%b %d")                  # "Apr 21" with possible zero-pad
+        _ordinal = _dt.strftime("%d %b").lstrip("0")        # "21 Apr"
+    except ValueError:
+        _short = _short_alt = _ordinal = ""
+    _date_matchers = {target_date, _short, _short_alt, _ordinal}
+    _date_matchers.discard("")
+
+    def _read(path: str) -> list[str]:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.readlines()
+        except FileNotFoundError:
+            return []
+
+    def _today(lines: list[str], date: str) -> list[str]:
+        # Multi-format match — covers ISO and bash-date timestamps that appear
+        # in the various log files. Lines from heyvox.log carry only HH:MM:SS,
+        # so callers that need that file pass it directly without this filter.
+        return [ln for ln in lines if any(m in ln for m in _date_matchers)]
+
+    main_lines_all = _read(active_log_file)
+    stt_lines_all = _read(STT_DEBUG_LOG)
+    herald_lines = _today(_read(HERALD_DEBUG_LOG), target_date)
+    violation_lines = _today(_read(HERALD_VIOLATIONS_LOG), target_date)
+    claude_log_lines = _today(_read("/tmp/claude-tts-debug.log"), target_date)
+
+    _say(f"HeyVox log-health — {target_date}")
+    _say("=" * 60)
+    _say(f"Sources scanned:")
+    _say(f"  {active_log_file} ({len(main_lines_all)} lines, current rotation)")
+    _say(f"  {HERALD_DEBUG_LOG} ({len(herald_lines)} lines today)")
+    _say(f"  {HERALD_VIOLATIONS_LOG} ({len(violation_lines)} entries today)")
+
+    # ----- Wake word -----
+    triggers = sum(1 for ln in main_lines_all if ">>> TRIGGER" in ln)
+    vad_drops = [ln for ln in main_lines_all if "[WAKE_VAD_DROP]" in ln]
+    near_misses = [ln for ln in main_lines_all if "[NEAR_MISS]" in ln]
+    user_efforts = [ln for ln in main_lines_all if "[USER_EFFORT]" in ln]
+
+    _say(f"\n## Wake word (current rotation of heyvox.log)")
+    _say(f"  Triggers fired:        {triggers}")
+    _say(f"  VAD drops (lost):      {len(vad_drops)}")
+    _say(f"  Near-misses (sub-thr): {len(near_misses)}")
+    _say(f"  USER_EFFORT events:    {len(user_efforts)}")
+
+    if user_efforts:
+        _say(f"\n  Recent USER_EFFORT (user had to repeat 'Hey Vox'):")
+        for ln in user_efforts[-5:]:
+            ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
+            n_match = re.search(r"attempts=(\d+) window=([\d.]+)s", ln)
+            ts = ts_match.group(1) if ts_match else "??:??:??"
+            if n_match:
+                _say(f"    {ts}  {n_match.group(1)} attempts in {n_match.group(2)}s")
+
+    if vad_drops:
+        _say(f"\n  Recent WAKE_VAD_DROP (model heard it, VAD killed it):")
+        for ln in vad_drops[-5:]:
+            ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
+            score_match = re.search(r"score=([\d.]+)", ln)
+            ts = ts_match.group(1) if ts_match else "??:??:??"
+            score = score_match.group(1) if score_match else "?"
+            _say(f"    {ts}  score={score}")
+
+    # ----- STT -----
+    stt_finals = [ln for ln in stt_lines_all if '"label": "_final"' in ln or '"label":"_final"' in ln]
+    stt_durations: list[float] = []
+    stt_times: list[float] = []
+    for ln in stt_lines_all:
+        if '"label": "_stt_result"' in ln or '"label":"_stt_result"' in ln:
+            d = re.search(r'"stt_time_s":\s*([\d.]+)', ln)
+            if d:
+                stt_times.append(float(d.group(1)))
+        d = re.search(r'"duration_s":\s*([\d.]+)', ln)
+        if d:
+            stt_durations.append(float(d.group(1)))
+
+    _say(f"\n## STT (current rotation of heyvox-stt-debug.log)")
+    _say(f"  Finals logged:         {len(stt_finals)}")
+    stt_p50 = stt_p99 = None
+    if stt_times:
+        stt_times.sort()
+        stt_p50 = stt_times[len(stt_times) // 2]
+        stt_p99 = stt_times[min(len(stt_times) - 1, int(len(stt_times) * 0.99))]
+        _say(f"  STT time p50/p99:      {stt_p50:.2f}s / {stt_p99:.2f}s")
+    if stt_durations:
+        stt_durations.sort()
+        p50 = stt_durations[len(stt_durations) // 2]
+        p99 = stt_durations[min(len(stt_durations) - 1, int(len(stt_durations) * 0.99))]
+        _say(f"  Audio duration p50/p99: {p50:.2f}s / {p99:.2f}s")
+
+    # ----- Herald -----
+    _say(f"\n## Herald (TTS playback)")
+    _say(f"  Lines today:           {len(herald_lines)}")
+    _say(f"  Violations today:      {len(violation_lines)}")
+    if violation_lines:
+        _say(f"\n  Recent violations:")
+        for ln in violation_lines[-3:]:
+            _say(f"    {ln.strip()}")
+
+    # ----- Workspace switching -----
+    sw_skip_hs = sum(1 for ln in claude_log_lines if "Hammerspoon not running" in ln)
+    sw_skip_idle = sum(1 for ln in claude_log_lines if "SKIP switch" in ln and "idle=" in ln)
+    sw_done = sum(1 for ln in claude_log_lines if "Switching to:" in ln)
+    sw_fail = sum(1 for ln in claude_log_lines if "SWITCH FAILED" in ln)
+
+    _say(f"\n## Workspace switch (today)")
+    _say(f"  Switches done:         {sw_done}")
+    _say(f"  Skips (HS not running):{sw_skip_hs}")
+    _say(f"  Skips (user busy):     {sw_skip_idle}")
+    _say(f"  Failures (no DB match):{sw_fail}")
+
+    _say()
+    if not json_mode:
+        _say("Tip: 'heyvox log-health --date YYYY-MM-DD' to inspect a previous day.")
+        _say("Tip: 'heyvox log-health --json' for machine-readable output.")
+    else:
+        # Re-emit minimal counters as JSON for piping into other tools.
+        import json as _json
+        payload = {
+            "date": target_date,
+            "wake": {
+                "triggers": triggers,
+                "vad_drops": len(vad_drops),
+                "near_misses": len(near_misses),
+                "user_efforts": len(user_efforts),
+            },
+            "stt": {
+                "finals": len(stt_finals),
+                "stt_time_p50": stt_p50,
+                "stt_time_p99": stt_p99,
+            },
+            "herald": {
+                "lines": len(herald_lines),
+                "violations": len(violation_lines),
+            },
+            "workspace_switch": {
+                "done": sw_done,
+                "skips_hs_dead": sw_skip_hs,
+                "skips_user_busy": sw_skip_idle,
+                "failures": sw_fail,
+            },
+        }
+        print(_json.dumps(payload, indent=2))
+
+
 def _cmd_doctor(args):
     """Run system diagnostics to check HeyVox health."""
     from heyvox.doctor import run_doctor
@@ -799,6 +988,23 @@ def main():
         help="Remove the debug directory to stop capturing",
     )
     sub_debug.set_defaults(func=_cmd_debug)
+
+    # log-health — daily digest of wake/STT/Herald log signals
+    sub_loghealth = subparsers.add_parser(
+        "log-health",
+        help="Daily digest of wake/STT/Herald log signals (regression spotter)",
+    )
+    sub_loghealth.add_argument(
+        "--date",
+        default=None,
+        help="ISO date YYYY-MM-DD (default: today). Filters herald + workspace logs.",
+    )
+    sub_loghealth.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON payload instead of human-readable digest",
+    )
+    sub_loghealth.set_defaults(func=_cmd_log_health)
 
     # doctor — system diagnostics
     sub_doctor = subparsers.add_parser("doctor", help="Run system diagnostics")
