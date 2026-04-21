@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from heyvox.text_processing import is_garbled, strip_wake_words
-from heyvox.constants import RECORDING_FLAG, STT_DEBUG_DIR
+from heyvox.constants import RECORDING_FLAG, STT_DEBUG_DIR, TTS_PLAYING_FLAG
 
 if TYPE_CHECKING:
     from heyvox.app_context import AppContext
@@ -191,6 +191,11 @@ class RecordingStateMachine:
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
             self.ctx.recording_target = None  # Will be filled by background snapshot
+            # DEF-078: Seed tts-during-recording flag from the current TTS flag
+            # state. If Herald is mid-speech when the recording starts, the
+            # first ~100-500 ms of audio almost certainly contains speaker
+            # bleed. filter_tts_echo() uses this in aggressive mode.
+            self.ctx.tts_seen_during_recording = os.path.exists(TTS_PLAYING_FLAG)
 
         # === Instant feedback FIRST — before any blocking work ===
         from heyvox.audio.cues import audio_cue, get_cues_dir
@@ -561,17 +566,27 @@ class RecordingStateMachine:
 
             # ECHO-03: Filter TTS echo from transcription (speaker mode protection).
             # If the STT output matches recently spoken TTS text, it's echo, not the user.
+            # DEF-078: When TTS_PLAYING_FLAG was observed during the recording
+            # window, bleed is almost certain — escalate to aggressive mode
+            # (overlap threshold 0.4 instead of 0.6).
             echo_filtered = False
             if text and self.config.echo_suppression.stt_echo_filter:
                 try:
                     from heyvox.audio.echo import filter_tts_echo
-                    filtered = filter_tts_echo(text)
+                    aggressive = bool(getattr(self.ctx, "tts_seen_during_recording", False))
+                    filtered = filter_tts_echo(text, aggressive=aggressive)
                     if filtered != text:
-                        self._log(f"ECHO-03: Stripped TTS echo from transcription (was: {text[:60]})")
+                        mode = " (aggressive)" if aggressive else ""
+                        self._log(f"ECHO-03{mode}: Stripped TTS echo from transcription (was: {text[:60]})")
                         echo_filtered = True
                         text = filtered
                 except Exception:
                     pass
+            # Reset the flag so the next recording starts clean.
+            try:
+                self.ctx.tts_seen_during_recording = False
+            except Exception:
+                pass
 
             # Quality filter: discard garbled/nonsensical STT output
             if text and is_garbled(text):
