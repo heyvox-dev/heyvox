@@ -17,7 +17,7 @@
 
 const NATIVE_HOST = 'com.hush.bridge';
 const RECONNECT_DELAY_MS = 2000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_MAX_DELAY_MS = 60000;
 
 /** @type {Map<number, {title: string, url: string, timestamp: number}>} */
 const pausedTabs = new Map();
@@ -67,12 +67,14 @@ function connectNativeHost() {
  */
 function scheduleReconnect() {
   if (reconnectTimer !== null) return;
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error('[Hush] Max reconnect attempts reached — giving up.');
-    return;
-  }
 
-  const delay = RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts);
+  // Never give up — MV3 can terminate us mid-backoff; the next lifecycle
+  // event (onStartup/onInstalled/tabs.onUpdated) will re-enter module eval
+  // and re-run connectNativeHost(). Cap backoff so we don't wait minutes.
+  const delay = Math.min(
+    RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts),
+    RECONNECT_MAX_DELAY_MS
+  );
   reconnectAttempts += 1;
 
   console.log(`[Hush] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempts})`);
@@ -81,6 +83,19 @@ function scheduleReconnect() {
     reconnectTimer = null;
     connectNativeHost();
   }, delay);
+}
+
+/**
+ * Force a reconnect now: clear any pending backoff and reset counters.
+ */
+function forceReconnect(reason) {
+  console.log(`[Hush] Force reconnect (${reason})`);
+  reconnectAttempts = 0;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  connectNativeHost();
 }
 
 /**
@@ -513,8 +528,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 // ---------------------------------------------------------------------------
-// Startup
+// Lifecycle — MV3 service workers are ephemeral. Revive the native port
+// whenever Chrome re-runs this module (startup, install/update) and on
+// the tab events we already register for.
 // ---------------------------------------------------------------------------
+
+chrome.runtime.onStartup.addListener(() => forceReconnect('onStartup'));
+chrome.runtime.onInstalled.addListener(() => forceReconnect('onInstalled'));
 
 connectNativeHost();
 console.log('[Hush] Service worker started');
