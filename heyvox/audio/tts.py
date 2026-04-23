@@ -78,6 +78,7 @@ TTS_STYLE_PROMPTS = {
     "concise": "Key takeaway only. One or two short sentences, ~100-200 chars. Front-load the most important information.",
     "technical": "Include function names, file paths, error messages, and what changed in the code. Be precise and specific. 2-4 sentences, ~300-600 chars.",
     "casual": "Talk like a coworker who just finished the task. Conversational, friendly, maybe a light observation. 2-3 sentences, ~200-400 chars.",
+    "briefing": "Comprehensive spoken briefing — the user is listening, not reading, and needs enough context to act. First sentence: the key takeaway or decision at hand. Then cover what you did, what you found, what's surprising, any tradeoffs considered, and any open question the user must weigh in on. Include specific numbers, names, and paths — not just 'done'. 6-10 sentences, ~800-1500 chars. If there is genuinely nothing decision-relevant, say so in one sentence and stop — don't pad.",
 }
 
 

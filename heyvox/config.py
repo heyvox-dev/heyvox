@@ -157,7 +157,7 @@ class TTSConfig(BaseModel):
     @field_validator("style")
     @classmethod
     def validate_style(cls, v: str) -> str:
-        valid = {"detailed", "concise", "technical", "casual"}
+        valid = {"detailed", "concise", "technical", "casual", "briefing"}
         if v not in valid:
             raise ValueError(f"style must be one of {valid}, got '{v}'")
         return v

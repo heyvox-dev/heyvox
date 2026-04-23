@@ -1032,6 +1032,7 @@ def _build_transcript_menu(handler):
     _STYLE_LABELS = {
         "detailed": "Detailed", "concise": "Concise",
         "technical": "Technical", "casual": "Casual",
+        "briefing": "Briefing",
     }
     style_display = _STYLE_LABELS.get(current_style, "Detailed")
     voice_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -1047,6 +1048,7 @@ def _build_transcript_menu(handler):
         ("concise", "Concise"),
         ("technical", "Technical"),
         ("casual", "Casual"),
+        ("briefing", "Briefing"),
     ]:
         s_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             f"  {style_desc}", "setTTSStyle:", "",
