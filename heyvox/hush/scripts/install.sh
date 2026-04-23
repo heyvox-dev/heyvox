@@ -35,6 +35,13 @@ HOST_SCRIPT="${HOST_DIR}/hush_host.py"
 MANIFEST_SRC="${HOST_DIR}/com.hush.bridge.json"
 MANIFEST_NAME="com.hush.bridge.json"
 
+# Source for the Chrome extension and its stable install location. Loading
+# unpacked extensions from workspace dirs breaks when the workspace is
+# archived — Chrome silently drops the extension. Installing from a stable
+# path under $XDG_CONFIG_HOME avoids that.
+EXT_SRC="${REPO_ROOT}/extension"
+EXT_STABLE_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}/heyvox/hush/extension"
+
 info "Repo root: ${REPO_ROOT}"
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
@@ -64,6 +71,21 @@ info "Making hush_host.py executable..."
 chmod +x "${HOST_SCRIPT}"
 success "hush_host.py is now executable."
 
+# ── Step 1b: mirror the extension to a stable path ───────────────────────────
+if [[ -d "${EXT_SRC}" ]]; then
+  info "Mirroring extension to stable path: ${EXT_STABLE_HOME}"
+  mkdir -p "${EXT_STABLE_HOME}"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "${EXT_SRC}/" "${EXT_STABLE_HOME}/"
+  else
+    rm -rf "${EXT_STABLE_HOME:?}"/* "${EXT_STABLE_HOME:?}"/.??* 2>/dev/null || true
+    cp -R "${EXT_SRC}/." "${EXT_STABLE_HOME}/"
+  fi
+  success "Extension mirrored — Load unpacked this path in each Chrome profile: ${EXT_STABLE_HOME}"
+else
+  warn "Extension source not found at ${EXT_SRC} — skipping mirror step"
+fi
+
 # ── Step 2: inject absolute path into a working copy of the manifest ─────────
 MANIFEST_TMP="$(mktemp /tmp/com.hush.bridge.XXXXXX.json)"
 trap 'rm -f "${MANIFEST_TMP}"' EXIT
@@ -86,8 +108,9 @@ echo ""
 echo -e "${BOLD}Chrome Extension ID${RESET}"
 echo "  1. Open Chrome and go to:  chrome://extensions"
 echo "  2. Enable 'Developer mode' (top-right toggle)"
-echo "  3. Click 'Load unpacked' and select: ${REPO_ROOT}/extension"
+echo "  3. Click 'Load unpacked' and select: ${EXT_STABLE_HOME}"
 echo "  4. Copy the ID shown under the extension name (32 lowercase letters)"
+echo "  (Repeat in each Chrome profile you want Hush active in.)"
 echo ""
 while true; do
   read -rp "  Paste your extension ID here: " EXT_ID
