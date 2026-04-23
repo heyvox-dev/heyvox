@@ -360,8 +360,10 @@ class RecordingStateMachine:
                 # removing it would make the remaining audio seem quieter)
                 raw_rms_db = _audio_rms(recorded_chunks, self.config.audio.sample_rate)
 
-                # Save raw audio BEFORE any trimming (for debug analysis)
-                _save_debug_audio("raw", recorded_chunks, self.config.audio.sample_rate, {
+                # Save raw audio BEFORE any trimming (for debug analysis).
+                # DEF-081: capture the path so the garbled-filter branch can
+                # surface a recovery hint if the transcription is discarded.
+                _last_raw_wav = _save_debug_audio("raw", recorded_chunks, self.config.audio.sample_rate, {
                     "ptt": ptt_snapshot,
                     "raw_rms_dbfs": round(raw_rms_db, 1),
                 }, log_fn=self._log)
@@ -588,9 +590,23 @@ class RecordingStateMachine:
             except Exception:
                 pass
 
-            # Quality filter: discard garbled/nonsensical STT output
+            # Quality filter: discard garbled/nonsensical STT output.
+            # DEF-076 + DEF-081: surface the discard to the user with a HUD
+            # event and point at the raw WAV so the transcription is
+            # recoverable by re-running through MLX.
             if text and is_garbled(text):
-                self._log(f"FILTER: Discarding garbled transcription: {text[:80]}")
+                self._log(
+                    f"FILTER (garbled, stt={elapsed:.1f}s): Discarding transcription: {text[:80]}"
+                )
+                try:
+                    if _last_raw_wav:
+                        self._log(f"FILTER (garbled): raw audio preserved at {_last_raw_wav}")
+                except NameError:
+                    pass
+                self._hud_send({
+                    "type": "transcript",
+                    "text": f"Garbled STT ({elapsed:.1f}s) - try again",
+                })
                 # Training: save as false positive (trigger led to garbled output)
                 if self.training_collector and _training_chunks:
                     self.training_collector.save_fp(_training_chunks, _training_sr, reason="garbled")

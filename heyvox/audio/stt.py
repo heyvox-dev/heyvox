@@ -214,11 +214,14 @@ def transcribe_audio(
     samples = audio.astype(np.float32) / 32768.0
 
     if engine == "mlx":
-        # Split long audio into <=30s segments to prevent MLX Whisper memory
-        # ballooning. Each segment is transcribed separately and concatenated,
-        # matching the sherpa-onnx approach. Max recording is config-driven
-        # (default 300s / 5 minutes).
-        max_samples = 30 * sample_rate
+        # DEF-081: hard 30s splits cut mid-sentence and leaked silence/partial
+        # words into segment boundaries, producing repetition hallucinations
+        # that `is_garbled()` then discarded. mlx_whisper.transcribe handles
+        # long-form internally via 30s windows with proper context, so split
+        # only above 4 minutes (safety net against memory ballooning for very
+        # long recordings). Normal long dictations now use whole-file mode.
+        split_after_secs = 240
+        max_samples = split_after_secs * sample_rate
         segments = [samples[i:i + max_samples] for i in range(0, len(samples), max_samples)]
         if len(segments) > 1:
             _log(f"Long recording ({len(samples)/sample_rate:.1f}s), splitting into {len(segments)} segments for MLX")
@@ -241,6 +244,13 @@ def transcribe_audio(
         kwargs = dict(path_or_hf_repo=_mlx_model_id or mlx_model)
         if _mlx_language or language:
             kwargs["language"] = _mlx_language or language
+        # DEF-075: defensive Whisper config for interactive dictation.
+        # condition_on_previous_text=True amplifies repetition loops across
+        # segments; tighter compression_ratio + logprob thresholds let the
+        # temperature fallback escape degenerate decoding sooner.
+        kwargs["condition_on_previous_text"] = False
+        kwargs["compression_ratio_threshold"] = 2.2
+        kwargs["logprob_threshold"] = -0.8
 
         # Run transcription with timeout to prevent hangs.
         # Use context manager so the executor waits for completion on success,
