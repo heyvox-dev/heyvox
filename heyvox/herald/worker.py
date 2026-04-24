@@ -83,7 +83,7 @@ DEFAULT_SPEED = 1.2
 QWEN_MOOD_VOICES: dict[str, str] = {
     "neutral": "Serena",
     "cheerful": "Vivian",
-    "alert": "Davis",
+    "alert": "Aura",
     "thoughtful": "Aria",
 }
 
