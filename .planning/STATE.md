@@ -66,9 +66,16 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 13-audio-reliability]: RECORDING_FLAG written before tts.interrupt() so orchestrator sees recording before purging (Pitfall 3)
 - [Phase 13-audio-reliability]: _calibrate_open_pa() and _calibrate_get_cache_dir() injectable helpers enable testing heyvox calibrate without real hardware
 
+### Roadmap Evolution
+
+- Phase 15 added: Paste Target Lock — record-start snapshot + resolve ladder + fail-closed policy (2026-04-22)
+- Phase 15 SPEC.md written (8 requirements, ambiguity 0.12) — 2026-04-22
+- Phase 15 CONTEXT.md written (27 decisions across 4 gray areas + Conductor adapter shape + profile schema + log tags) — 2026-04-22
+- Phase 15 planning: 7 plans in 4 waves written (2026-04-22); plan-checker iterations 1+2 completed; iteration 3 rate-limited mid-flight. 4 BLOCKERs + minor WARNINGs captured in 15-REVISION-ADDENDUM.md for executor to apply inline.
+
 ### Pending Todos
 
-None.
+- Phase 15 execution: read 15-REVISION-ADDENDUM.md first; apply the B1/B2/B3/B4 corrections before touching source.
 
 ### Blockers/Concerns
 
