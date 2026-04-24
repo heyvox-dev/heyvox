@@ -142,6 +142,12 @@ class TTSConfig(BaseModel):
     # Env override: HEYVOX_TTS_LANGS="en-us,de"
     languages: list[str] | str = "auto"
 
+    # Voice overrides — when set, replace the mood-based voice selection.
+    # None (default) → mood → voice mapping picks (af_sarah/af_heart/af_nova/af_sky
+    # for Kokoro; Serena/Vivian/Aura/Aria for Qwen3).
+    voice_override: str | None = None        # Kokoro (English + 8 other langs)
+    qwen_voice_override: str | None = None   # Qwen3 (German etc.)
+
     # DEPRECATED: Path to external TTS control script (Phase 1 bridge).
     # No longer used by the native TTS engine. Kept for backward compatibility.
     script_path: str | None = None
@@ -577,10 +583,16 @@ def update_config(**kwargs) -> None:
 
         for key, value in kwargs.items():
             # Convert Python values to YAML scalars
-            if isinstance(value, bool):
+            if value is None:
+                yaml_val = "null"
+            elif isinstance(value, bool):
                 yaml_val = "true" if value else "false"
             elif isinstance(value, str):
                 yaml_val = _yaml_escape(value)
+            elif isinstance(value, (list, tuple)):
+                # Compact flow style for small lists
+                items = ", ".join(_yaml_escape(str(v)) for v in value)
+                yaml_val = f"[{items}]"
             else:
                 yaml_val = str(value)
 
@@ -602,20 +614,34 @@ def update_config(**kwargs) -> None:
                 # Nested key (e.g., tts.verbosity)
                 section, subkey = parts
                 in_section = False
+                section_start_idx = -1
+                section_last_idx = -1
+                section_indent = ""
                 for i, line in enumerate(lines):
                     stripped = line.lstrip()
                     if stripped.startswith(f"{section}:"):
                         in_section = True
+                        section_start_idx = i
                         continue
                     if in_section:
                         if stripped and not stripped.startswith("#") and not line[0].isspace():
                             in_section = False  # Left the section
                             continue
+                        # Track last indented (section-member) line for insertion point
+                        if line.strip() and line[0].isspace():
+                            section_last_idx = i
+                            if not section_indent:
+                                section_indent = line[:len(line) - len(stripped)]
                         if stripped.startswith(f"{subkey}:"):
                             indent = line[:len(line) - len(stripped)]
                             lines[i] = f"{indent}{subkey}: {yaml_val}\n"
                             found = True
                             break
+                if not found and section_start_idx >= 0:
+                    # Section exists but subkey missing — insert inside the section.
+                    insert_idx = (section_last_idx + 1) if section_last_idx >= 0 else (section_start_idx + 1)
+                    indent = section_indent or "  "
+                    lines.insert(insert_idx, f"{indent}{subkey}: {yaml_val}\n")
 
         # Atomic write: temp file + rename prevents partial writes on crash
         new_content = "".join(lines)
