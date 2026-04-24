@@ -196,6 +196,16 @@ class RecordingStateMachine:
             # first ~100-500 ms of audio almost certainly contains speaker
             # bleed. filter_tts_echo() uses this in aggressive mode.
             self.ctx.tts_seen_during_recording = os.path.exists(TTS_PLAYING_FLAG)
+            # DEF-084: Reset cancel_transcription at recording boundary so a
+            # stale Escape-set flag from a prior STT (e.g. one that took the
+            # garbled / empty-stt / voice-command early-return path and didn't
+            # clear it) can't spuriously cancel this recording's injection.
+            if self.ctx.cancel_transcription.is_set():
+                self._log(
+                    "CANCEL_LEAK: cancel_transcription was still set at start() — "
+                    "clearing (DEF-084)"
+                )
+            self.ctx.cancel_transcription.clear()
 
         # === Instant feedback FIRST — before any blocking work ===
         from heyvox.audio.cues import audio_cue, get_cues_dir
@@ -879,6 +889,14 @@ class RecordingStateMachine:
             _release_recording_guard()
             with self.ctx.lock:
                 self.ctx.busy = False
+            # DEF-084: Clear cancel_transcription unconditionally at STT-path
+            # exit. Every post-STT early-return (garbled, empty-stt,
+            # voice-command) used to leak this flag; the user-cancelled branch
+            # and the pre-type re-check each cleared it locally. Centralising
+            # the reset here keeps the flag's lifecycle symmetrical with the
+            # STT call — future filters can return early without reasoning
+            # about flag cleanup.
+            self.ctx.cancel_transcription.clear()
             # Resume media that we paused at recording start
             try:
                 from heyvox.audio.media import resume_media
