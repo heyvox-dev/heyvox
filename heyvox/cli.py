@@ -565,6 +565,106 @@ def _cmd_log_health(args):
     _say(f"  Skips (user busy):     {sw_skip_idle}")
     _say(f"  Failures (no DB match):{sw_fail}")
 
+    # --- Phase 15-07: Paste section ------------------------------------------
+    import re as _re
+    _paste_tier_re = _re.compile(
+        r"\[PASTE\]\s+tier_used=(\w+)\s+reason=(\S+)\s+elapsed_ms=(\d+)"
+    )
+    _paste_verify_re = _re.compile(
+        r"\[PASTE\]\s+verified=(true|false)\s+retried=(true|false)\s+drift=(true|false)"
+    )
+
+    paste_lines = [ln for ln in main_lines_all if "[PASTE]" in ln]
+
+    tier_counts = {"1": 0, "2": 0, "fail_closed": 0}
+    fail_reasons = {
+        "no_text_field_at_start": 0,
+        "multi_field_no_shortcut": 0,
+        "target_unreachable": 0,
+    }
+    elapsed_by_tier = {"1": [], "2": []}
+    for ln in paste_lines:
+        m = _paste_tier_re.search(ln)
+        if m:
+            tier, reason, ms = m.group(1), m.group(2), int(m.group(3))
+            if tier in tier_counts:
+                tier_counts[tier] += 1
+            if tier == "fail_closed" and reason in fail_reasons:
+                fail_reasons[reason] += 1
+            if tier in elapsed_by_tier:
+                elapsed_by_tier[tier].append(ms)
+
+    verify_total = 0
+    verify_drift = 0
+    verify_retried = 0
+    for ln in paste_lines:
+        m = _paste_verify_re.search(ln)
+        if m:
+            verify_total += 1
+            if m.group(3) == "true":
+                verify_drift += 1
+            if m.group(2) == "true":
+                verify_retried += 1
+
+    total_resolves = sum(tier_counts.values())
+    non_fail_resolves = tier_counts["1"] + tier_counts["2"]
+
+    def _paste_pct(num, den):
+        return (num / den * 100) if den > 0 else 0.0
+
+    def _paste_p95(values):
+        if not values:
+            return None
+        s = sorted(values)
+        return s[min(len(s) - 1, int(len(s) * 0.95))]
+
+    tier_1_hit_rate = (
+        _paste_pct(tier_counts["1"], non_fail_resolves) if non_fail_resolves else 0.0
+    )
+    tier_2_hit_rate = (
+        _paste_pct(tier_counts["2"], non_fail_resolves) if non_fail_resolves else 0.0
+    )
+    fail_closed_rate = (
+        _paste_pct(tier_counts["fail_closed"], total_resolves) if total_resolves else 0.0
+    )
+    drift_rate = _paste_pct(verify_drift, verify_total) if verify_total else 0.0
+    # B6: canonical names match JSON keys (no `_elapsed_` infix).
+    tier_1_p95_ms = _paste_p95(elapsed_by_tier["1"])
+    tier_2_p95_ms = _paste_p95(elapsed_by_tier["2"])
+
+    _say(f"\n## Paste (current rotation of heyvox.log)")
+    if total_resolves == 0 and verify_total == 0:
+        _say("  (no [PASTE] events in current rotation)")
+    else:
+        _say(f"  Total resolves:        {total_resolves}")
+        _say(
+            f"  Tier 1 hit rate:       {tier_1_hit_rate:.1f}%   "
+            f"({tier_counts['1']}/{non_fail_resolves} non-fail)"
+        )
+        _say(
+            f"  Tier 2 hit rate:       {tier_2_hit_rate:.1f}%   "
+            f"({tier_counts['2']}/{non_fail_resolves} non-fail)"
+        )
+        _say(
+            f"  Fail-closed rate:      {fail_closed_rate:.1f}%   "
+            f"({tier_counts['fail_closed']}/{total_resolves} total)"
+        )
+        if any(fail_reasons.values()):
+            _say(f"    by reason:")
+            for reason_k, n in fail_reasons.items():
+                if n > 0:
+                    _say(f"      {reason_k}: {n}")
+        if verify_total > 0:
+            _say(
+                f"  Verify-drift rate:     {drift_rate:.1f}%   "
+                f"({verify_drift}/{verify_total} verifies)"
+            )
+            _say(f"  Verify retried (1/N):  {verify_retried}/{verify_total}")
+        if tier_1_p95_ms is not None:
+            _say(f"  Tier 1 elapsed p95:    {tier_1_p95_ms}ms")
+        if tier_2_p95_ms is not None:
+            _say(f"  Tier 2 elapsed p95:    {tier_2_p95_ms}ms")
+
     _say()
     if not json_mode:
         _say("Tip: 'heyvox log-health --date YYYY-MM-DD' to inspect a previous day.")
@@ -594,6 +694,22 @@ def _cmd_log_health(args):
                 "skips_hs_dead": sw_skip_hs,
                 "skips_user_busy": sw_skip_idle,
                 "failures": sw_fail,
+            },
+            "paste": {
+                "total_resolves": total_resolves,
+                "tier_1_hit_count": tier_counts["1"],
+                "tier_2_hit_count": tier_counts["2"],
+                "fail_closed_count": tier_counts["fail_closed"],
+                "tier_1_hit_rate_pct": round(tier_1_hit_rate, 2),
+                "tier_2_hit_rate_pct": round(tier_2_hit_rate, 2),
+                "fail_closed_rate_pct": round(fail_closed_rate, 2),
+                "fail_closed_by_reason": dict(fail_reasons),
+                "verify_total": verify_total,
+                "verify_drift_count": verify_drift,
+                "verify_drift_rate_pct": round(drift_rate, 2),
+                "verify_retried_count": verify_retried,
+                "tier_1_p95_ms": tier_1_p95_ms,   # B6 canonical (no _elapsed_ infix)
+                "tier_2_p95_ms": tier_2_p95_ms,   # B6 canonical (no _elapsed_ infix)
             },
         }
         print(_json.dumps(payload, indent=2))
