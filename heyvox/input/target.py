@@ -43,10 +43,10 @@ from heyvox.adapters.conductor import get_active_workspace_and_session
 def _log(msg: str) -> None:
     """Log to stderr with [HH:MM:SS] [target] prefix.
 
-    Timestamp is needed for sub-step timing inside restore_target
-    (DEF-061) — without it, multi-second hangs inside a single call
-    are invisible because only the caller's entry/exit lines carry
-    timestamps.
+    Timestamp is needed for sub-step timing inside resolve_lock +
+    _activate_app (DEF-061) — without it, multi-second hangs inside
+    a single call are invisible because only the caller's entry/exit
+    lines carry timestamps.
     """
     try:
         ts = _time.strftime("%H:%M:%S")
