@@ -594,7 +594,10 @@ class RecordingStateMachine:
             # DEF-076 + DEF-081: surface the discard to the user with a HUD
             # event and point at the raw WAV so the transcription is
             # recoverable by re-running through MLX.
-            if text and is_garbled(text):
+            # DEF-083: pass STT elapsed + audio duration so the detector can
+            # catch hallucinations that slip past text-level checks when
+            # Whisper's temperature-fallback loop fires (abnormally slow STT).
+            if text and is_garbled(text, stt_secs=elapsed, audio_secs=duration):
                 self._log(
                     f"FILTER (garbled, stt={elapsed:.1f}s): Discarding transcription: {text[:80]}"
                 )

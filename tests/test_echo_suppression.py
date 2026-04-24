@@ -90,6 +90,88 @@ class TestIsGarbled:
     def test_not_garbled_command(self):
         assert is_garbled("run the tests") is False
 
+    # --- DEF-083: additional hallucination-pattern coverage ---
+
+    def test_garbled_consecutive_duplicate_words_tail(self):
+        """Clean prefix + run of identical words at the tail — the exact
+        pattern that slipped past the global unique-word ratio check."""
+        text = "hello there please go and fix the thing can can can can can can can"
+        assert is_garbled(text) is True
+
+    def test_garbled_consecutive_duplicate_words_with_punctuation(self):
+        """Run-length check must normalize punctuation: 'can,' and 'can.'
+        are the same word for duplicate detection."""
+        text = "one two three four five six seven can, can. can! can? can can"
+        assert is_garbled(text) is True
+
+    def test_garbled_intra_token_apostrophe_repetition(self):
+        """MLX temperature-fallback artifact: a single token with a 2-char
+        substring repeating many times (e.g. 'P's's's's's's's')."""
+        assert is_garbled("tell me about the P's's's's's's's's's's's project") is True
+
+    def test_garbled_intra_token_letter_repetition(self):
+        """Similar artifact with a 3-char substring repeated 4+ times."""
+        assert is_garbled("please check the foofoofoofoofoo report") is True
+
+    def test_not_garbled_legit_contraction(self):
+        """Real contractions like 'surpass's' have only one '.s' — must not
+        trip the intra-token repetition regex."""
+        assert is_garbled("can you put his surpass's request through") is False
+
+    def test_not_garbled_onomatopoeia(self):
+        """Drawn-out vowels ('sooo excited', 'ahhh') produce < 4 copies of
+        any 2-char substring — must pass."""
+        assert is_garbled("I am sooo excited about the ahhh new feature") is False
+
+    def test_garbled_tail_window_bigram_repetition(self):
+        """Clean first 60% + repetitive tail 40% — tail-window check catches
+        it even when the global bigram ratio looks fine."""
+        text = (
+            "hello there could you please tell me about "
+            "status check status check status check status check"
+        )
+        assert is_garbled(text) is True
+
+    def test_garbled_exact_def083_failure_case(self):
+        """Regression: the verbatim garbled transcription from the
+        2026-04-23 19:47:03 incident log — must now be caught."""
+        text = (
+            "Ok, now, let's go with his request, and his surpass's can "
+            "you put the P's, P's's's's's's's's's's's's can can can can "
+            "can can can"
+        )
+        assert is_garbled(text) is True
+
+    def test_garbled_slow_stt_on_non_trivial_audio(self):
+        """stt_secs/audio_secs > 0.3 over ≥ 5s both-ways signals temperature-
+        fallback ran multiple decoding passes — hallucination."""
+        # A plausible-looking sentence that doesn't trip text checks alone,
+        # but with abnormally slow STT timing is flagged as garbled.
+        text = "please fix the authentication bug in the login form today"
+        assert is_garbled(text) is False  # text alone is clean
+        assert is_garbled(text, stt_secs=10.0, audio_secs=26.0) is True
+
+    def test_not_garbled_cold_load_short_audio(self):
+        """Model cold-load can make stt_secs large for a short recording,
+        but audio_secs < 5 keeps it out of the ratio check — must not
+        false-positive."""
+        text = "please deploy the service"
+        assert is_garbled(text, stt_secs=8.0, audio_secs=2.0) is False
+
+    def test_not_garbled_warm_fast_stt(self):
+        """Normal warm MLX transcription: ratio well below 0.3 — must pass."""
+        text = "please check the deployment status"
+        assert is_garbled(text, stt_secs=0.5, audio_secs=5.0) is False
+
+    def test_not_garbled_long_sentence_with_natural_repetition(self):
+        """Real speech with some repetition ('the') must not trigger the
+        run-length or tail-window checks."""
+        text = (
+            "I want to check the server and the database and the cache "
+            "to make sure everything is working correctly"
+        )
+        assert is_garbled(text) is False
+
 
 class TestEchoTextBuffer:
     """Test the text-level echo filtering that strips TTS output from transcription."""
