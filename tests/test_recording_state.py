@@ -186,3 +186,81 @@ def test_cancel_clears_all_state(rsm_and_ctx, isolate_flags):
     assert ctx.is_recording is False
     assert ctx.busy is False
     assert len(ctx.audio_buffer) == 0
+
+
+# ---------------------------------------------------------------------------
+# DEF-084: cancel_transcription must not leak across recordings
+# ---------------------------------------------------------------------------
+
+def test_start_clears_stale_cancel_transcription(rsm_and_ctx, isolate_flags):
+    """DEF-084: if a prior STT's early-return left cancel_transcription set
+    (e.g. Escape-during-STT → garbled filter → return without clear), the next
+    start() must reset it so the new recording isn't spuriously cancelled."""
+    rsm, ctx = rsm_and_ctx
+    # Simulate the leaked state after a garbled-filter early return during
+    # which the user had pressed Escape.
+    ctx.cancel_transcription.set()
+    assert ctx.cancel_transcription.is_set()
+    with patch("heyvox.audio.tts.set_recording"), \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.audio.media.pause_media"), \
+         patch("heyvox.input.target.snapshot_target", return_value=None), \
+         patch("heyvox.ipc.update_state"):
+        rsm.start()
+    assert ctx.cancel_transcription.is_set() is False
+    assert ctx.is_recording is True
+
+
+def test_send_local_finally_clears_cancel_transcription(rsm_and_ctx, isolate_flags):
+    """DEF-084: _send_local's finally block must clear cancel_transcription
+    on every exit path (garbled, empty-stt, voice-command, happy path,
+    exception). This guards against future early-return paths forgetting to
+    reset the flag locally."""
+    rsm, ctx = rsm_and_ctx
+    # Arrange: Pretend Escape was pressed during STT.
+    ctx.cancel_transcription.set()
+    # Force the `_send_local` entry to take an early return by tripping the
+    # low-energy gate — raw_rms_db well below _MIN_AUDIO_DBFS. This exercises
+    # the shallowest path through the try/finally and doesn't require us to
+    # stub MLX or injection.
+    with patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.ipc.update_state"), \
+         patch("heyvox.recording._release_recording_guard"), \
+         patch("heyvox.audio.media.resume_media"):
+        rsm._send_local(
+            duration=1.0,
+            audio_chunks=[],
+            raw_rms_db=-90.0,  # below _MIN_AUDIO_DBFS, triggers early return
+            ptt=False,
+            recording_target=None,
+            stop_time=0.0,
+        )
+    # The finally block must have cleared the flag even though the low-energy
+    # path returned before the in-body consumer checks.
+    assert ctx.cancel_transcription.is_set() is False
+
+
+def test_send_local_exception_path_clears_cancel_transcription(rsm_and_ctx, isolate_flags):
+    """DEF-084: even if _send_local throws mid-pipeline, the finally block
+    must still reset cancel_transcription. Protects against the pattern where
+    a future filter raises and skips every local clear() call."""
+    rsm, ctx = rsm_and_ctx
+    ctx.cancel_transcription.set()
+    # Force an exception by making the cue dir lookup blow up deep in the
+    # pipeline. The outer except/finally in _send_local should absorb it.
+    with patch("heyvox.audio.cues.get_cues_dir", side_effect=RuntimeError("boom")), \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.ipc.update_state"), \
+         patch("heyvox.recording._release_recording_guard"), \
+         patch("heyvox.audio.media.resume_media"):
+        rsm._send_local(
+            duration=1.0,
+            audio_chunks=[],
+            raw_rms_db=-90.0,
+            ptt=False,
+            recording_target=None,
+            stop_time=0.0,
+        )
+    assert ctx.cancel_transcription.is_set() is False
