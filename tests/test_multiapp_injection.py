@@ -48,13 +48,17 @@ def _make_snap(
     ax_element=None,
     conductor_workspace: str = "",
 ):
-    """Return a minimal TargetSnapshot-like mock."""
+    """Return a minimal TargetLock-like mock (Phase 15-02 field shape)."""
     snap = MagicMock()
     snap.app_name = app_name
     snap.app_pid = app_pid
+    # Old-shape (retained for legacy consumers)
     snap.element_role = element_role
-    snap.app_bundle_id = app_bundle_id
     snap.ax_element = ax_element if ax_element is not None else MagicMock()
+    # TargetLock fields (new)
+    snap.leaf_role = element_role
+    snap.conductor_workspace_id = None
+    snap.app_bundle_id = app_bundle_id
     snap.conductor_workspace = conductor_workspace
     return snap
 

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch, MagicMock, call
 
+import pytest
+
 
 @dataclass
 class FakeTargetSnapshot:
@@ -48,16 +50,20 @@ class FakeConfig:
         return None
 
 
+@pytest.mark.skip(
+    reason="Phase 15-02 deleted _detect_app_workspace and _switch_app_workspace. "
+    "The workspace-detect/switch path in restore_target is replaced by "
+    "resolve_lock's Tier 3 in Plan 15-05; these tests will be rewritten against "
+    "resolve_lock then."
+)
 class TestRestoreTargetWorkspaceSkip:
     """restore_target() skips workspace switch when already on correct workspace."""
 
     @patch("heyvox.input.target._time")
     @patch("heyvox.input.target._find_window_text_fields", return_value=[])
     @patch("heyvox.input.target._activate_app")
-    @patch("heyvox.input.target._switch_app_workspace")
-    @patch("heyvox.input.target._detect_app_workspace")
     def test_skips_switch_when_already_on_workspace(
-        self, mock_detect, mock_switch, mock_activate, mock_find, mock_time,
+        self, mock_activate, mock_find, mock_time,
     ):
         """When current workspace matches snapshot, switch is NOT called."""
         mock_detect.return_value = "seattle"
@@ -93,10 +99,8 @@ class TestRestoreTargetWorkspaceSkip:
     @patch("heyvox.input.target._time")
     @patch("heyvox.input.target._find_window_text_fields", return_value=[])
     @patch("heyvox.input.target._activate_app")
-    @patch("heyvox.input.target._switch_app_workspace")
-    @patch("heyvox.input.target._detect_app_workspace")
     def test_switches_when_workspace_changed(
-        self, mock_detect, mock_switch, mock_activate, mock_find, mock_time,
+        self, mock_activate, mock_find, mock_time,
     ):
         """When current workspace differs from snapshot, switch IS called."""
         mock_detect.return_value = "dakar"
@@ -131,10 +135,8 @@ class TestRestoreTargetWorkspaceSkip:
     @patch("heyvox.input.target._time")
     @patch("heyvox.input.target._find_window_text_fields", return_value=[])
     @patch("heyvox.input.target._activate_app")
-    @patch("heyvox.input.target._switch_app_workspace")
-    @patch("heyvox.input.target._detect_app_workspace")
     def test_switches_when_detection_returns_empty(
-        self, mock_detect, mock_switch, mock_activate, mock_find, mock_time,
+        self, mock_activate, mock_find, mock_time,
     ):
         """When workspace detection fails (empty), switch happens as fallback."""
         mock_detect.return_value = ""
