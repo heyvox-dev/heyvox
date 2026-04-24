@@ -345,7 +345,7 @@ def _osascript_type_text(
 
     # Use the actual process name from System Events (frontmost_before) for the
     # AppleScript target, not the user-facing app_name — macOS process names are
-    # case-sensitive (e.g., "conductor" not "Conductor").
+    # case-sensitive and often differ from the app's display name (DEF-027).
     process_name = frontmost_before if frontmost_before and frontmost_before != "?" else app_name
     already_frontmost = process_name and frontmost_before and process_name.lower() == _get_frontmost_app().lower()
 
@@ -430,9 +430,9 @@ def _osascript_type_text(
         _log(f"paste: WARNING: target was {app_name} but frontmost is {frontmost_after} — may have pasted to wrong app!")
 
     # DEF-054: PID-level post-paste check. For multi-PID bundles the name
-    # guard above always passes ("conductor" == "conductor") even when paste
-    # lands in a different window within the same bundle. Compare PIDs to
-    # catch that case.
+    # guard above always passes (same process name on both sides) even when
+    # paste lands in a different window within the same bundle. Compare PIDs
+    # to catch that case.
     if expected_pid:
         frontmost_after_pid = _save_frontmost_pid()
         if frontmost_after_pid and frontmost_after_pid != expected_pid:
@@ -621,68 +621,98 @@ def focus_input(app_name: str, shortcuts: dict[str, str] | None = None) -> None:
         )
 
 
-def conductor_paste_and_send(text: str, enter_count: int = 1) -> bool:
-    """One-shot Conductor injection: Cmd+L → Cmd+V → Enter in a single osascript.
+def app_fast_paste(profile, text: str) -> bool:
+    """One-shot paste using profile-driven shortcuts: focus-shortcut -> Cmd+V -> Enter*N.
 
-    Combines focus-input + clipboard-paste + submit into one subprocess call,
-    saving ~0.3s over the multi-step approach. Clipboard is set via NSPasteboard
-    (no subprocess) before the osascript runs.
+    Combines focus + paste + Enter into a single osascript subprocess call
+    (saves ~0.3s vs multi-step). Clipboard is set via NSPasteboard before
+    the osascript runs.
+
+    Args:
+        profile: AppProfileConfig - provides focus_shortcut, enter_count,
+            settle_delay, is_electron. NEVER hardcoded.
+        text: Text to paste.
 
     Returns True on success, False on failure.
+
+    Process name for `tell process` is read from the LIVE frontmost app
+    (via _get_frontmost_app) rather than profile.name, because macOS process
+    names are case-sensitive and frequently differ from display names
+    (DEF-027 - lowercase System Events form vs TitleCase bundle display name).
+
+    Requirement: PASTE-15-R8
     """
     _t0 = time.time()
-    _log(f"conductor_paste_and_send: {len(text)} chars + Enter x{enter_count}")
+    _log(
+        f"app_fast_paste: profile={profile.name} focus_shortcut="
+        f"{profile.focus_shortcut!r} enter_count={profile.enter_count} "
+        f"text_len={len(text)}"
+    )
 
+    # 1. Clipboard write + verify
     ok, expected_count = _set_clipboard(text)
     if not ok:
-        _log("ERROR: failed to set clipboard")
+        _log("app_fast_paste: ERROR failed to set clipboard")
         audio_cue("error")
         return False
-
     verify = get_clipboard_text()
     if verify != text:
-        _log(f"ERROR: clipboard verify failed ({len(text)} vs {len(verify)} chars)")
+        _log(
+            f"app_fast_paste: ERROR clipboard verify failed "
+            f"({len(text)} vs {len(verify)} chars)"
+        )
         audio_cue("error")
         return False
 
-    # Build single script: Cmd+L (focus input) → brief delay → Cmd+V (paste) → Enter(s)
-    keystrokes = [
-        'keystroke "l" using command down',  # Focus text input
-        "delay 0.1",                          # Let input field focus
-        'keystroke "v" using command down',   # Paste
-    ]
-    if enter_count > 0:
-        keystrokes.append("delay 0.15")       # Electron needs time to process paste
-        for i in range(enter_count):
+    # 2. Build keystroke block from profile (NO hardcoded shortcuts)
+    keystrokes = []
+    if profile.focus_shortcut:
+        keystrokes.append(
+            f'keystroke "{profile.focus_shortcut}" using command down'
+        )
+        keystrokes.append("delay 0.1")  # Brief settle for input focus to land
+    keystrokes.append('keystroke "v" using command down')
+    if profile.enter_count > 0:
+        # Use profile.settle_delay for Electron/Tauri paste-IPC settle
+        keystrokes.append(f"delay {profile.settle_delay}")
+        for i in range(profile.enter_count):
             keystrokes.append("keystroke return")
-            if i < enter_count - 1:
+            if i < profile.enter_count - 1:
                 keystrokes.append("delay 0.05")
-
     keystroke_block = "\n        ".join(keystrokes)
 
-    # Always target "conductor" — System Events process name is lowercase.
-    # Include 'set frontmost to true' to ensure Conductor has focus before
-    # keystrokes, in case another app (e.g. Chrome) briefly stole focus.
+    # 3. Live frontmost name preserves DEF-027 lowercase fix
+    process_name = _get_frontmost_app()
+    if not process_name or process_name == "?":
+        process_name = profile.name
+    safe_name = process_name.replace('\\', '\\\\').replace('"', '\\"')
+
     script = (
         f'tell application "System Events"\n'
-        f'    tell process "conductor"\n'
+        f'    tell process "{safe_name}"\n'
         f'        set frontmost to true\n'
         f'        delay 0.1\n'
         f'        {keystroke_block}\n'
         f'    end tell\n'
         f'end tell'
     )
+
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT + 2,
     )
     if result.returncode != 0:
-        _log(f"conductor_paste_and_send: FAILED (rc={result.returncode}): "
-             f"{result.stderr.decode().strip()}")
+        _log(
+            f"app_fast_paste: FAILED rc={result.returncode}: "
+            f"{result.stderr.decode().strip()}"
+        )
         audio_cue("error")
         return False
 
-    _log(f"[TIMING] conductor_paste_and_send: OK in {(time.time() - _t0)*1000:.0f}ms")
+    _log(
+        f"[TIMING] app_fast_paste: OK profile={profile.name} "
+        f"in {(time.time() - _t0)*1000:.0f}ms"
+    )
     return True
 
 
