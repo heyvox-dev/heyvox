@@ -660,6 +660,45 @@ def _make_menu_action_class():
             except Exception:
                 pass
 
+        def setTTSLanguages_(self, sender):
+            """Set TTS languages allowlist. 'auto' or comma-list like 'en-us,de'."""
+            try:
+                val = sender.representedObject()
+                if not val:
+                    return
+                from heyvox.config import update_config
+                if val == "auto":
+                    update_config(**{"tts.languages": "auto"})
+                else:
+                    items = [s.strip() for s in val.split(",") if s.strip()]
+                    update_config(**{"tts.languages": items})
+                if update_status_menu is not None:
+                    update_status_menu()
+            except Exception:
+                pass
+
+        def setTTSVoiceEN_(self, sender):
+            """Set Kokoro (English) voice override. Empty string = mood-mapping."""
+            try:
+                voice = sender.representedObject()
+                from heyvox.config import update_config
+                update_config(**{"tts.voice_override": voice or None})
+                if update_status_menu is not None:
+                    update_status_menu()
+            except Exception:
+                pass
+
+        def setTTSVoiceDE_(self, sender):
+            """Set Qwen3 (German) voice override. Empty string = mood-mapping."""
+            try:
+                voice = sender.representedObject()
+                from heyvox.config import update_config
+                update_config(**{"tts.qwen_voice_override": voice or None})
+                if update_status_menu is not None:
+                    update_status_menu()
+            except Exception:
+                pass
+
         def switchMic_(self, sender):
             """Write mic switch request file for main.py to pick up (atomic)."""
             device_name = sender.representedObject()
@@ -1063,6 +1102,122 @@ def _build_transcript_menu(handler):
 
     voice_parent.setSubmenu_(voice_sub)
     menu.addItem_(voice_parent)
+
+    # ── TTS Languages submenu ──
+    try:
+        from heyvox.config import load_config as _load_cfg
+        _cfg = _load_cfg()
+        _cfg_langs = getattr(_cfg.tts, "languages", "auto")
+        _cfg_voice_en = getattr(_cfg.tts, "voice_override", None)
+        _cfg_voice_de = getattr(_cfg.tts, "qwen_voice_override", None)
+    except Exception:
+        _cfg_langs = "auto"
+        _cfg_voice_en = None
+        _cfg_voice_de = None
+
+    if isinstance(_cfg_langs, list):
+        _cfg_lang_key = ",".join(_cfg_langs)
+        _cfg_lang_label = " + ".join(_cfg_langs).upper()
+    else:
+        _cfg_lang_key = "auto"
+        _cfg_lang_label = "Auto"
+
+    lang_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f30d Languages: {_cfg_lang_label}", None, "",
+    )
+    _styled(lang_parent)
+    lang_sub = NSMenu.alloc().init()
+    lang_sub.setAutoenablesItems_(False)
+    for key, label in [
+        ("auto",       "  Auto (detect + route)"),
+        ("en-us",      "  English only"),
+        ("en-us,de",   "  English + German"),
+        ("de",         "  German only"),
+    ]:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setTTSLanguages:", "",
+        )
+        item.setTarget_(handler)
+        item.setRepresentedObject_(key)
+        item.setEnabled_(True)
+        if key == _cfg_lang_key:
+            item.setState_(1)
+        _styled(item)
+        lang_sub.addItem_(item)
+    lang_parent.setSubmenu_(lang_sub)
+    menu.addItem_(lang_parent)
+
+    # ── Voice (EN) submenu — Kokoro ──
+    _en_voices = [
+        ("",            "  Auto (mood-based)"),
+        ("af_sarah",    "  Sarah (neutral)"),
+        ("af_heart",    "  Heart (warm)"),
+        ("af_nova",     "  Nova (alert)"),
+        ("af_sky",      "  Sky (thoughtful)"),
+        ("af_bella",    "  Bella"),
+        ("af_nicole",   "  Nicole"),
+        ("af_jessica",  "  Jessica"),
+        ("af_river",    "  River"),
+        ("af_kore",     "  Kore"),
+        ("bf_emma",     "  Emma (British)"),
+        ("bf_alice",    "  Alice (British)"),
+    ]
+    _en_current = _cfg_voice_en or ""
+    _en_display = next((n.strip() for v, n in _en_voices if v == _en_current), "Auto")
+    en_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f5e3️ Voice (EN): {_en_display}", None, "",
+    )
+    _styled(en_parent)
+    en_sub = NSMenu.alloc().init()
+    en_sub.setAutoenablesItems_(False)
+    for v, label in _en_voices:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setTTSVoiceEN:", "",
+        )
+        item.setTarget_(handler)
+        item.setRepresentedObject_(v)
+        item.setEnabled_(True)
+        if v == _en_current:
+            item.setState_(1)
+        _styled(item)
+        en_sub.addItem_(item)
+    en_parent.setSubmenu_(en_sub)
+    menu.addItem_(en_parent)
+
+    # ── Voice (DE) submenu — Qwen3 ──
+    _de_voices = [
+        ("",          "  Auto (mood-based)"),
+        ("Serena",    "  Serena (neutral)"),
+        ("Vivian",    "  Vivian (cheerful)"),
+        ("Aura",      "  Aura (alert)"),
+        ("Aria",      "  Aria (thoughtful)"),
+        ("Chelsie",   "  Chelsie"),
+        ("Ethan",     "  Ethan ♂"),
+        ("Aidan",     "  Aidan ♂"),
+        ("Davis",     "  Davis ♂"),
+        ("Leo",       "  Leo ♂"),
+    ]
+    _de_current = _cfg_voice_de or ""
+    _de_display = next((n.strip() for v, n in _de_voices if v == _de_current), "Auto")
+    de_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f5e3️ Voice (DE): {_de_display}", None, "",
+    )
+    _styled(de_parent)
+    de_sub = NSMenu.alloc().init()
+    de_sub.setAutoenablesItems_(False)
+    for v, label in _de_voices:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setTTSVoiceDE:", "",
+        )
+        item.setTarget_(handler)
+        item.setRepresentedObject_(v)
+        item.setEnabled_(True)
+        if v == _de_current:
+            item.setState_(1)
+        _styled(item)
+        de_sub.addItem_(item)
+    de_parent.setSubmenu_(de_sub)
+    menu.addItem_(de_parent)
 
     menu.addItem_(NSMenuItem.separatorItem())
 

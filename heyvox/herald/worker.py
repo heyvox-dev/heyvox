@@ -489,6 +489,21 @@ class HeraldWorker:
             env_voice = os.environ.get("KOKORO_VOICE", "")
         if env_voice:
             voice = env_voice
+            return voice
+
+        # Config-level voice override (set via HUD menu or config.yaml).
+        # Env wins over config so per-workspace overrides still work.
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+            if engine == "qwen":
+                ov = getattr(cfg.tts, "qwen_voice_override", None)
+            else:
+                ov = getattr(cfg.tts, "voice_override", None)
+            if ov:
+                voice = ov
+        except Exception as exc:
+            log.debug("Could not read voice_override from config: %s", exc)
 
         return voice
 
