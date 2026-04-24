@@ -872,6 +872,35 @@ class RecordingStateMachine:
                         f"message={outcome.message}"
                     )
 
+            # --- 15-06: post-paste verification (SPEC R7) ---
+            # W12 — defensive guard: outcome may be None when recording_target
+            # was None (15-05 explicitly initializes outcome = None per W6).
+            # Gate on BOTH `outcome is not None` AND `outcome.ok` to avoid
+            # AttributeError on `outcome.element` when no resolution happened.
+            if paste_ok and recording_target is not None and outcome is not None and outcome.ok:
+                from heyvox.input.target import verify_paste
+                verify = verify_paste(
+                    recording_target,
+                    outcome.element,  # may be None for Tier 2 — verify_paste
+                                      # re-acquires via AXFocusedUIElement (W3)
+                    paste_text,
+                    profile,
+                )
+                self._log(
+                    f"[PASTE] verify result: verified={verify.verified} "
+                    f"retried={verify.retried} drift={verify.drift} "
+                    f"detail={verify.detail!r}"
+                )
+                if verify.drift:
+                    # Content WAS sent (just possibly to wrong place) — do
+                    # NOT downgrade paste_ok. Surface: error cue + toast.
+                    audio_cue("error", cues_dir)
+                    drift_message = (
+                        "HeyVox: paste verification failed — "
+                        "content may have landed in the wrong field."
+                    )
+                    show_failure_toast(drift_message, title="HeyVox paste drift")
+
             if paste_ok:
                 if combined_enter > 0:
                     self._log("Sent!")
