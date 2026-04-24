@@ -46,7 +46,10 @@ _MR_PLAY = 0
 _MR_PAUSE = 1
 
 # Flag file to track whether vox (recording) paused the media.
-# The TTS orchestrator uses /tmp/heyvox-media-paused-orch separately.
+# Shared with Herald orchestrator's _media_pause() — both callers go through
+# pause_media() in this module and write the same path (HEYVOX_MEDIA_PAUSED_REC).
+# Herald additionally drops its own namespace flag (/tmp/herald-media-paused-*)
+# from herald-media.sh for the cross-caller "keep paused" handoff checked below.
 # Contents: "hush" (Hush extension) or "mr" (MediaRemote).
 from heyvox.constants import HEYVOX_MEDIA_PAUSED_REC as _PAUSE_FLAG
 
@@ -256,12 +259,15 @@ def resume_media() -> bool:
 
     # Don't actually resume if another caller (orchestrator) still has it paused.
     # Check both heyvox and herald namespaces — Herald's TTS orchestrator uses
-    # /tmp/herald-media-paused-* for the same purpose.
+    # /tmp/herald-media-paused-* for the same purpose. Dedupe: the two prefixes
+    # can overlap when `_TMP` resolution ever drifts, producing duplicate
+    # entries in the log (DEF-085). `sorted(set(...))` keeps the list stable
+    # for logging while guaranteeing uniqueness.
     from heyvox.constants import HEYVOX_MEDIA_PAUSED_PREFIX, HERALD_MEDIA_PAUSED_PREFIX
-    other_flags = [
+    other_flags = sorted({
         f for f in glob.glob(HEYVOX_MEDIA_PAUSED_PREFIX + "*") + glob.glob(HERALD_MEDIA_PAUSED_PREFIX + "*")
         if f != _PAUSE_FLAG
-    ]
+    })
     if other_flags:
         _log(f"resume_media: other pause flags exist {other_flags}, not resuming")
         return False
