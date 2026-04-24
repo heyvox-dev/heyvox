@@ -627,8 +627,20 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # requires 3. User reported mid-sentence false stops at score 0.997 during
     # natural speech; 2 frames = 160 ms is too easy for phoneme runs to hit,
     # while start-word latency matters much more than stop-word latency.
+    # DEF-086 (2026-04-24): strict "consecutive" resets were too fragile — a
+    # single noisy below-threshold dip mid-"Hey Vox" zeroed the counter and
+    # the user's real stop intent had to wait for the 4 s silence_timeout.
+    # Miss-frames now DECAY the counter by _STOP_HIT_DECAY instead of zeroing
+    # it (see line ~1228), so 3 strong hits with one brief sag still fire.
+    # Start-wake keeps the hard reset (idle mic noise should not accumulate).
     _CONSECUTIVE_FRAMES_REQUIRED_START = 2
     _CONSECUTIVE_FRAMES_REQUIRED_STOP = 3
+    # DEF-086: on a miss frame during recording, subtract this many from the
+    # stop-hit accumulator instead of fully resetting. 1 tolerates exactly
+    # one transient dip in a 3-hit burst — enough for real "Hey Vox" stops
+    # while still rejecting isolated phoneme flares (which fire once and
+    # decay back to 0 before the next flare).
+    _STOP_HIT_DECAY = 1
     # Backward-compat alias used by log lines — resolved dynamically below.
     _CONSECUTIVE_FRAMES_REQUIRED = _CONSECUTIVE_FRAMES_REQUIRED_START
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
@@ -1224,6 +1236,15 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # started, so wake→start latency can be measured below.
                     if prev == 0 and not _is_rec:
                         _first_hit_time = time.time()
+                elif _is_rec:
+                    # DEF-086: while recording, decay instead of hard-reset so
+                    # one transient miss doesn't kill a real 3-hit "Hey Vox"
+                    # stop. Outside recording, keep the hard reset below —
+                    # idle-mic noise must not accumulate toward a false start.
+                    _consecutive_hits[ww_name] = max(
+                        0,
+                        _consecutive_hits.get(ww_name, 0) - _STOP_HIT_DECAY,
+                    )
                 else:
                     _consecutive_hits[ww_name] = 0
 
