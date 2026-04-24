@@ -53,13 +53,35 @@ _WAKE_WORD_PHRASES: dict[str, list[str]] = {
 }
 
 
-def is_garbled(text: str) -> bool:
+_INTRA_TOKEN_REPEAT = re.compile(r"(.{2,3})\1{3,}")
+
+
+def is_garbled(
+    text: str,
+    *,
+    stt_secs: float | None = None,
+    audio_secs: float | None = None,
+) -> bool:
     """Detect garbled/nonsensical STT output from accidental wake word triggers.
 
     Catches common Whisper hallucination patterns:
-    - Excessive repeated words/phrases
+    - Excessive repeated words/phrases (global)
+    - Consecutive duplicate words (local run-length — catches tail repetition
+      that a coherent prefix would otherwise dilute in the global ratio)
+    - Intra-token substring repetition (e.g. "P's's's's's's")
+    - Tail-window bigram repetition (clean prefix + garbled suffix)
     - Mostly non-alphanumeric characters
     - Known Whisper filler hallucinations
+
+    Args:
+        text: The STT transcription.
+        stt_secs: Optional STT inference elapsed time (seconds). Combined with
+            audio_secs, an abnormally high ratio is near-certain evidence that
+            Whisper's temperature-fallback loop fired — the output is
+            hallucinated even when repetition signals slip past text checks.
+            Guarded by audio_secs ≥ 5.0 to avoid false-positives on cold-load
+            transcriptions of short recordings.
+        audio_secs: Optional audio duration (seconds). See stt_secs.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -83,6 +105,45 @@ def is_garbled(text: str) -> bool:
         if len(unique_bigrams) / len(bigrams) < 0.3:
             return True
 
+    # DEF-083: Consecutive duplicate words (run-length).
+    # A coherent prefix can dilute the global unique-ratio check, so a local
+    # run of identical words (e.g. "can can can can can can can" at the tail
+    # of an otherwise sensible sentence) is a slam-dunk garbled signal.
+    if len(words) >= 4:
+        _norm = lambda w: w.lower().strip(".,!?'\"")  # noqa: E731
+        run_len = 1
+        for i in range(1, len(words)):
+            if _norm(words[i]) and _norm(words[i]) == _norm(words[i - 1]):
+                run_len += 1
+                if run_len >= 4:
+                    return True
+            else:
+                run_len = 1
+
+    # DEF-083: Intra-token substring repetition. MLX Whisper's temperature
+    # fallback occasionally emits a single token where a 2-3 char substring
+    # repeats 4+ times (e.g. "P's's's's's's's's's's's's"). Legit contractions
+    # ("surpass's") and onomatopoeia ("sooo") are unaffected because the
+    # regex requires ≥ 4 consecutive copies of the captured group.
+    for word in words:
+        if len(word) >= 8 and _INTRA_TOKEN_REPEAT.search(word):
+            return True
+
+    # DEF-083: Tail-window bigram repetition. For longer outputs, compute the
+    # unique-bigram ratio over the last 40% of words. Catches the "clean
+    # prefix + garbled suffix" pattern that the global bigram check misses
+    # because the coherent start dominates the denominator.
+    if len(words) >= 10:
+        tail_start = int(len(words) * 0.6)
+        tail_words = words[tail_start:]
+        if len(tail_words) >= 4:
+            tail_bigrams = [
+                f"{tail_words[i]} {tail_words[i + 1]}".lower()
+                for i in range(len(tail_words) - 1)
+            ]
+            if tail_bigrams and len(set(tail_bigrams)) / len(tail_bigrams) < 0.4:
+                return True
+
     # Mostly non-letter characters (Unicode garbage)
     alpha_chars = sum(1 for c in cleaned if c.isalpha())
     if len(cleaned) > 3 and alpha_chars / len(cleaned) < 0.4:
@@ -99,6 +160,18 @@ def is_garbled(text: str) -> bool:
     for pattern in hallucination_patterns:
         if re.match(pattern, cleaned):
             return True
+
+    # DEF-083: Abnormally slow STT on non-trivial audio. MLX whisper-small on
+    # Apple Silicon runs ~10-25x realtime when warm, so a ratio > 0.3 over a
+    # ≥ 5 s recording (excluding cold-load territory) means the temperature
+    # fallback looped through multiple decoding attempts — near-certain
+    # hallucination even when the text-level checks above didn't trip.
+    if (
+        stt_secs is not None and audio_secs is not None
+        and stt_secs >= 5.0 and audio_secs >= 5.0
+        and stt_secs / audio_secs > 0.3
+    ):
+        return True
 
     return False
 
