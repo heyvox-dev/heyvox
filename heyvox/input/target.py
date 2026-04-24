@@ -23,6 +23,7 @@ _detect_conductor_branch (salvaged AX walk) here.
 
 import concurrent.futures
 import os
+import re
 import subprocess  # Module-level per Fact 5 — test patches via
                    # monkeypatch.setattr("heyvox.input.target.subprocess.run", ...)
                    # only intercept when subprocess is imported at module scope.
@@ -781,6 +782,259 @@ def resolve_lock(lock, config=None) -> PasteOutcome:
     )
     return PasteOutcome(
         ok=False, tier_used=0, reason=reason, message=msg, elapsed_ms=elapsed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plan 15-06 — verify_paste (SPEC R7)
+# ---------------------------------------------------------------------------
+
+
+_WS_RUN = re.compile(r"\s+")
+
+
+def _normalize_text(s: str) -> str:
+    """Strip + collapse whitespace runs (incl newlines) to single space.
+    Case-preserved per D-05."""
+    if s is None:
+        return ""
+    return _WS_RUN.sub(" ", s).strip()
+
+
+def _read_ax_value(element) -> Optional[str]:
+    """Read AXValue of an AXUIElement; return string or None on any error."""
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+
+        err, value = AXUIElementCopyAttributeValue(element, "AXValue", None)
+        if err != 0 or value is None:
+            return None
+        return str(value)
+    except Exception:
+        return None
+
+
+def _focus_unchanged(lock) -> bool:
+    """Best-effort focus-unchanged check for non-AX-capable apps (D-07).
+
+    Returns True iff frontmost app's bundle_id matches lock.app_bundle_id.
+    PID match is advisory (Electron rotates helpers); bundle_id is the
+    real signal.
+    """
+    try:
+        import AppKit
+
+        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if front is None:
+            return False
+        front_bundle = front.bundleIdentifier() or ""
+        return front_bundle == lock.app_bundle_id
+    except Exception:
+        # AppKit unavailable (test env etc.): fail-open for non-AX path.
+        return True
+
+
+def _acquire_focused_element(lock):
+    """Acquire the LIVE focused AX element of the locked app (W3).
+
+    Used by verify_paste when the resolver returned tier_used=2 (element=None
+    because the profile shortcut focused an input we don't have a handle to).
+    Without this, Tier-2 pastes would fall back to focus-unchanged best-effort
+    even on AX-capable apps — losing strong AX content verification.
+
+    Returns the AXUIElement of the currently focused element in the locked
+    application's process, or None if AX is unavailable / focus has moved
+    to a different app.
+
+    Requirement: PASTE-15-R7 (Tier 2 verification parity)
+    """
+    try:
+        import AppKit
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateApplication,
+        )
+
+        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if front is None:
+            return None
+        front_bundle = front.bundleIdentifier() or ""
+        if front_bundle != lock.app_bundle_id:
+            _log(
+                f"_acquire_focused_element: frontmost is {front_bundle!r}, "
+                f"expected {lock.app_bundle_id!r}; focus moved"
+            )
+            return None
+        live_pid = front.processIdentifier()
+        ax_app = AXUIElementCreateApplication(live_pid)
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, "AXFocusedUIElement", None
+        )
+        if err != 0 or focused is None:
+            return None
+        return focused
+    except Exception as e:
+        _log(f"_acquire_focused_element: exception: {e}")
+        return None
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """Result of verify_paste(). Four meaningful combinations:
+
+    verified=True  retried=False drift=False  - first-try content match
+    verified=True  retried=True  drift=False  - second-try content match
+    verified=False retried=False drift=True   - non-AX focus moved
+    verified=False retried=True  drift=True   - persistent content drift
+    """
+
+    verified: bool
+    retried: bool
+    drift: bool
+    detail: str = ""
+
+
+def verify_paste(lock, element, transcript: str, profile) -> VerifyResult:
+    """Post-paste verification per SPEC R7.
+
+    AX-capable apps (profile.supports_ax_verify=True OR profile is None):
+      read AXValue, normalized-substring-match against transcript. On fail,
+      re-set clipboard (W11) + retry Cmd+V + re-read AXValue.
+
+    Non-AX-capable apps (profile.supports_ax_verify=False):
+      focus-unchanged best-effort check only (no content readback).
+
+    When element=None AND we would take the AX path (Tier 2), re-acquire
+    the focused element via AXFocusedUIElement for strong verification (W3).
+
+    Requirement: PASTE-15-R7
+    """
+    settle = profile.ax_settle_before_verify if profile else 0.1
+
+    # Non-AX path: focus-unchanged check
+    if profile is not None and not profile.supports_ax_verify:
+        _time.sleep(settle)
+        if _focus_unchanged(lock):
+            _log(
+                "[PASTE] verified=true retried=false drift=false "
+                f"(non-AX focus-unchanged, profile={profile.name}, "
+                "supports_ax_verify=False)"
+            )
+            return VerifyResult(
+                verified=True, retried=False, drift=False,
+                detail="focus-unchanged",
+            )
+        _log(
+            "[PASTE] verified=false retried=false drift=true "
+            f"(non-AX focus moved, profile={profile.name}, "
+            "supports_ax_verify=False)"
+        )
+        return VerifyResult(
+            verified=False, retried=False, drift=True, detail="focus-moved",
+        )
+
+    # W7 — explicit log when profile is None so debugging is unambiguous.
+    if profile is None:
+        _log(
+            f"[PASTE] verify: profile=None (treating as AX-capable, "
+            f"app={lock.app_name!r})"
+        )
+
+    # AX path — need an element handle. Tier 2 returns element=None;
+    # W3 fix: re-acquire focused element via AXFocusedUIElement.
+    if element is None:
+        element = _acquire_focused_element(lock)
+        if element is not None:
+            _log(
+                "[PASTE] verify: re-acquired focused element for "
+                f"Tier-2 AX verify (app={lock.app_name!r})"
+            )
+        else:
+            _time.sleep(settle)
+            if _focus_unchanged(lock):
+                _log(
+                    "[PASTE] verified=true retried=false drift=false "
+                    "(Tier-2 acquire-fail, focus-unchanged fallback)"
+                )
+                return VerifyResult(
+                    verified=True, retried=False, drift=False,
+                    detail="tier2-acquire-fail-focus-unchanged",
+                )
+            _log(
+                "[PASTE] verified=false retried=false drift=true "
+                "(Tier-2 acquire-fail, focus moved)"
+            )
+            return VerifyResult(
+                verified=False, retried=False, drift=True,
+                detail="tier2-acquire-fail-focus-moved",
+            )
+
+    norm_transcript = _normalize_text(transcript)
+
+    # First attempt
+    _time.sleep(settle)
+    val = _read_ax_value(element)
+    if val is not None and norm_transcript in _normalize_text(val):
+        _log(
+            f"[PASTE] verified=true retried=false drift=false "
+            f"(ax_value_len={len(val)})"
+        )
+        return VerifyResult(
+            verified=True, retried=False, drift=False,
+            detail=f"ax_value_len={len(val)}",
+        )
+
+    # Retry: W11 — re-set clipboard from transcript BEFORE Cmd+V so the
+    # retry pastes the transcript, not whatever the target app may have
+    # mutated the pasteboard to.
+    _log(
+        f"[PASTE] first-verify miss (ax_value_len={len(val) if val else 0}), "
+        f"re-setting clipboard + retrying paste"
+    )
+    try:
+        from heyvox.input.injection import _get_frontmost_app, _set_clipboard
+
+        clip_ok, _ignored = _set_clipboard(transcript)
+        if not clip_ok:
+            _log(
+                "[PASTE] retry: WARNING clipboard re-set failed — "
+                "proceeding with stale clipboard"
+            )
+        proc = (_get_frontmost_app() or lock.app_name or "").replace(
+            '"', '\\"'
+        )
+        script = (
+            f'tell application "System Events"\n'
+            f'    tell process "{proc}"\n'
+            f'        keystroke "v" using command down\n'
+            f'    end tell\n'
+            f'end tell'
+        )
+        subprocess.run(
+            ["osascript", "-e", script], capture_output=True, timeout=3
+        )
+    except Exception as e:
+        _log(f"verify_paste: retry osascript exception: {e}")
+
+    _time.sleep(settle)
+    val2 = _read_ax_value(element)
+    if val2 is not None and norm_transcript in _normalize_text(val2):
+        _log(
+            f"[PASTE] verified=true retried=true drift=false "
+            f"(ax_value_len={len(val2)})"
+        )
+        return VerifyResult(
+            verified=True, retried=True, drift=False,
+            detail=f"retry-ax_value_len={len(val2)}",
+        )
+
+    detail = (
+        f"drift first_len={len(val) if val else 0} "
+        f"second_len={len(val2) if val2 else 0}"
+    )
+    _log(f"[PASTE] verified=false retried=true drift=true ({detail})")
+    return VerifyResult(
+        verified=False, retried=True, drift=True, detail=detail,
     )
 
 
