@@ -2,7 +2,13 @@
 
 import pytest
 
-from heyvox.config import HeyvoxConfig, WakeWordConfig, TTSConfig, load_config
+from heyvox.config import (
+    AppProfileConfig,
+    HeyvoxConfig,
+    TTSConfig,
+    WakeWordConfig,
+    load_config,
+)
 
 
 class TestHeyvoxConfigDefaults:
@@ -180,3 +186,62 @@ class TestLoadConfig:
         f.write_text("future_feature: true\nthreshold: 0.7\n")
         cfg = load_config(f)
         assert cfg.threshold == 0.7
+
+
+class TestAppProfileNewFields:
+    """Phase 15 Plan 15-03: supports_ax_verify, has_session_detection,
+    ax_settle_before_verify — defaults + profile-specific overrides (D-22).
+    """
+
+    def test_app_profile_default_supports_ax_verify_true(self):
+        p = AppProfileConfig(name="Any")
+        assert p.supports_ax_verify is True
+
+    def test_app_profile_default_has_session_detection_false(self):
+        p = AppProfileConfig(name="Any")
+        assert p.has_session_detection is False
+
+    def test_app_profile_default_ax_settle_before_verify_is_0_1(self):
+        p = AppProfileConfig(name="Any")
+        assert abs(p.ax_settle_before_verify - 0.1) < 1e-6
+
+    def test_conductor_profile_has_session_detection_true(self):
+        cfg = HeyvoxConfig()
+        cond = cfg.get_app_profile("Conductor")
+        assert cond is not None
+        assert cond.has_session_detection is True
+
+    def test_conductor_profile_ax_settle_before_verify_0_15(self):
+        cfg = HeyvoxConfig()
+        cond = cfg.get_app_profile("Conductor")
+        assert cond is not None
+        assert abs(cond.ax_settle_before_verify - 0.15) < 1e-6
+
+    def test_conductor_profile_supports_ax_verify_true(self):
+        cfg = HeyvoxConfig()
+        cond = cfg.get_app_profile("Conductor")
+        assert cond is not None
+        assert cond.supports_ax_verify is True
+
+    def test_terminal_profile_supports_ax_verify_false(self):
+        cfg = HeyvoxConfig()
+        term = cfg.get_app_profile("Terminal")
+        assert term is not None
+        assert term.supports_ax_verify is False
+
+    def test_iterm2_profile_supports_ax_verify_false(self):
+        cfg = HeyvoxConfig()
+        it = cfg.get_app_profile("iTerm2")
+        assert it is not None
+        assert it.supports_ax_verify is False
+
+    def test_user_profile_can_override_has_session_detection(self):
+        p = AppProfileConfig(name="Custom", has_session_detection=True)
+        assert p.has_session_detection is True
+
+    def test_user_profile_omitting_new_fields_gets_defaults(self):
+        # Simulates config.yaml where the user wrote only name + focus_shortcut.
+        p = AppProfileConfig(name="Legacy", focus_shortcut="l")
+        assert p.supports_ax_verify is True
+        assert p.has_session_detection is False
+        assert abs(p.ax_settle_before_verify - 0.1) < 1e-6
