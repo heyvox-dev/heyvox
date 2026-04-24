@@ -23,12 +23,20 @@ _detect_conductor_branch (salvaged AX walk) here.
 
 import concurrent.futures
 import os
+import subprocess  # Module-level per Fact 5 — test patches via
+                   # monkeypatch.setattr("heyvox.input.target.subprocess.run", ...)
+                   # only intercept when subprocess is imported at module scope.
 import sys
 import time as _time
 from dataclasses import dataclass, field
-from typing import Optional
+from enum import Enum
+from typing import Any, Optional
 
 from heyvox.adapters.conductor import get_active_workspace_and_session
+
+# W10 (Fact 4): focus_app is NOT imported. NSRunningApplication bundle-ID
+# activation in _yank_back_app_and_workspace handles activation; focus_app
+# would add a redundant tell-application-activate osascript fork (~50ms).
 
 
 def _log(msg: str) -> None:
@@ -54,6 +62,49 @@ RoleHop = tuple[str, int]  # (role, child-index-among-siblings)
 
 # D-03: max hops captured from window down to leaf
 MAX_ROLE_PATH_HOPS = 12
+
+
+class FailReason(str, Enum):
+    """Taxonomy of fail-closed reasons (SPEC R5). Each reason maps to a
+    user-readable toast string in _REASON_MESSAGES, all of which format
+    uniformly with .format(app_name=...) (W13)."""
+
+    NO_TEXT_FIELD_AT_START = "no_text_field_at_start"
+    MULTI_FIELD_NO_SHORTCUT = "multi_field_no_shortcut"
+    TARGET_UNREACHABLE = "target_unreachable"
+
+
+# W13: every message carries {app_name} so .format(app_name=X) works
+# uniformly across reasons. Future additions must preserve this invariant.
+_REASON_MESSAGES = {
+    FailReason.NO_TEXT_FIELD_AT_START: (
+        "HeyVox ({app_name}): transcript on clipboard — no text field was "
+        "focused when you started speaking."
+    ),
+    FailReason.MULTI_FIELD_NO_SHORTCUT: (
+        "HeyVox ({app_name}): transcript on clipboard — this app has "
+        "multiple inputs and no configured chat shortcut."
+    ),
+    FailReason.TARGET_UNREACHABLE: (
+        "HeyVox: transcript on clipboard — original {app_name} target "
+        "is unreachable."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PasteOutcome:
+    """Result of resolve_lock(). Either Ok with the resolved AX element (or None
+    for tier-2 / shortcut-only paths) or FailClosed with a categorised reason
+    and user-readable message.
+    """
+
+    ok: bool
+    element: Any = None                           # AXUIElement on tier-1 Ok
+    tier_used: int = 0                            # 1, 2, or 0 (fail-closed)
+    reason: Optional[FailReason] = None
+    message: str = ""                             # toast/log text
+    elapsed_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -475,19 +526,188 @@ def capture_lock(config=None) -> Optional[TargetLock]:
     return lock
 
 
-def restore_target(snap, config=None) -> bool:
-    """Refocus the app and text field from a TargetLock (or legacy snapshot).
+def _walk_role_path(window_element, role_path):
+    """Walk the cached role-path starting at the given window element.
 
-    TODO(15-05): replaced by resolve_lock() in Plan 15-05.
-
-    Returns True if the app was activated (text field focus is best-effort),
-    False if activation failed entirely. Reads fields via getattr with sane
-    defaults so it tolerates both the new frozen TargetLock and the transitional
-    old consumer-site state.
+    Returns the final AX element if the walk completes, an intermediate
+    element if it lands on a text role early (D-03 tolerance for shallow
+    tree shrinkage), or None if any hop mismatches on role or sibling-index.
     """
-    if snap is None:
-        return False
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+    except ImportError:
+        return None
 
+    if window_element is None or not role_path:
+        return None
+
+    current = window_element
+    for hop_idx, (expected_role, sibling_idx) in enumerate(role_path):
+        try:
+            err, children = AXUIElementCopyAttributeValue(
+                current, "AXChildren", None
+            )
+            if err != 0 or not children:
+                return None
+            if sibling_idx >= len(children):
+                return None
+            candidate = children[sibling_idx]
+            err_r, role = AXUIElementCopyAttributeValue(
+                candidate, "AXRole", None
+            )
+            role_str = str(role) if err_r == 0 and role else ""
+            if role_str != expected_role:
+                return None
+            current = candidate
+            if role_str in _TEXT_ROLES and hop_idx < len(role_path) - 1:
+                return current
+        except Exception:
+            return None
+    return current
+
+
+def _find_window_by_number(ax_app, window_number: int):
+    """Return the AXWindow whose AXWindowNumber matches, or AXFocusedWindow
+    as fallback when `window_number` is 0 (was unavailable at capture).
+    """
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+    except ImportError:
+        return None
+
+    if window_number == 0:
+        try:
+            err, win = AXUIElementCopyAttributeValue(
+                ax_app, "AXFocusedWindow", None
+            )
+            return win if err == 0 else None
+        except Exception:
+            return None
+
+    try:
+        err, windows = AXUIElementCopyAttributeValue(ax_app, "AXWindows", None)
+        if err != 0 or not windows:
+            return None
+        for w in windows:
+            err_n, wn = AXUIElementCopyAttributeValue(
+                w, "AXWindowNumber", None
+            )
+            if err_n == 0 and wn is not None:
+                try:
+                    if int(wn) == window_number:
+                        return w
+                except (TypeError, ValueError):
+                    continue
+        return None
+    except Exception:
+        return None
+
+
+def _yank_back_app_and_workspace(lock, profile, config) -> None:
+    """Unconditional app + Conductor workspace + session yank-back (SPEC R6).
+
+    Activates the bundle via NSRunningApplication. When the lock carries a
+    conductor_workspace_id and the profile declares a workspace_switch_cmd,
+    invokes the extended `conductor-switch-workspace --id ... [--session ...]
+    --force` script (B4).
+
+    Session flag appended UNCONDITIONALLY when `conductor_session_id` is set —
+    the script's sqlite UPDATE is idempotent so there is no need for a
+    current-state comparison (which would require another adapter query,
+    inviting the LIMIT-1 landmine from iteration-2).
+
+    B3-resolved: conductor-switch-workspace does not check RECORDING_FLAG
+    (verified Task 0); resolve_lock also runs post-stop so the flag is
+    cleared by then. The DEF-070 orchestrator guard is for Herald-driven
+    switches DURING recording and is NOT touched here.
+
+    W10 (Fact 4): focus_app is intentionally NOT called. NSRunningApplication
+    activation already handles app focus; focus_app would add a redundant
+    `tell application ... activate` osascript fork (~50ms/paste).
+    """
+    try:
+        import AppKit
+    except ImportError:
+        return
+
+    bundle_activate_ok = False
+    if lock.app_bundle_id:
+        try:
+            apps = (
+                AppKit.NSRunningApplication
+                .runningApplicationsWithBundleIdentifier_(lock.app_bundle_id)
+            )
+            if apps and len(apps) > 0:
+                apps[0].activateWithOptions_(
+                    AppKit.NSApplicationActivateIgnoringOtherApps
+                )
+                bundle_activate_ok = True
+        except Exception as e:
+            _log(
+                f"yank: bundle-id activation failed for "
+                f"{lock.app_bundle_id!r}: {e}"
+            )
+
+    if not bundle_activate_ok and lock.app_pid:
+        _activate_app(lock.app_pid, lock.app_name or "")
+
+    if lock.conductor_workspace_id and profile is not None:
+        switch_cmd = getattr(profile, "workspace_switch_cmd", "")
+        if switch_cmd:
+            argv = [
+                os.path.expanduser(switch_cmd),
+                "--id", lock.conductor_workspace_id,
+            ]
+            if lock.conductor_session_id:
+                # Session flag appended unconditionally — script UPDATE is idempotent.
+                argv.extend(["--session", lock.conductor_session_id])
+            argv.append("--force")
+            try:
+                subprocess.run(argv, capture_output=True, timeout=3)
+                settle = getattr(profile, "settle_delay", 0.3)
+                _time.sleep(settle)
+            except Exception as e:
+                _log(f"yank: conductor-switch-workspace failed: {e}")
+        else:
+            _log(
+                f"yank: conductor_workspace_id set but profile lacks "
+                f"workspace_switch_cmd — skipping workspace switch"
+            )
+
+
+def resolve_lock(lock, config=None) -> PasteOutcome:
+    """Three-tier ladder: exact lock -> profile shortcut -> fail-closed (SPEC R4).
+
+    Also performs unconditional yank-back of app + workspace + session
+    (SPEC R6) before attempting tiers 1 and 2.
+
+    Requirement: PASTE-15-R4, R6
+    """
+    _t0 = _time.time()
+
+    # Pre-tier: nothing focused at capture -> fail closed (no yank needed)
+    if not lock.focused_was_text_field:
+        msg = _REASON_MESSAGES[FailReason.NO_TEXT_FIELD_AT_START].format(
+            app_name=lock.app_name or "app"
+        )
+        elapsed = int((_time.time() - _t0) * 1000)
+        _log(
+            f"[PASTE] tier_used=fail_closed "
+            f"reason={FailReason.NO_TEXT_FIELD_AT_START.value} "
+            f"elapsed_ms={elapsed}"
+        )
+        return PasteOutcome(
+            ok=False, tier_used=0,
+            reason=FailReason.NO_TEXT_FIELD_AT_START,
+            message=msg, elapsed_ms=elapsed,
+        )
+
+    profile = config.get_app_profile(lock.app_name) if config else None
+
+    # Yank back: app + workspace + session — UNCONDITIONAL (SPEC R6)
+    _yank_back_app_and_workspace(lock, profile, config)
+
+    # Tier 1: walk the cached role-path
     try:
         from ApplicationServices import (
             AXUIElementCreateApplication,
@@ -495,122 +715,73 @@ def restore_target(snap, config=None) -> bool:
         )
         from CoreFoundation import kCFBooleanTrue
     except ImportError:
-        return False
-
-    snap_app_name = getattr(snap, "app_name", "")
-    snap_app_pid = getattr(snap, "app_pid", 0)
-    snap_conductor_ws = getattr(snap, "conductor_workspace_id", None)
-    # Legacy snapshot had ax_element/element_role; TargetLock does not.
-    snap_ax_element = getattr(snap, "ax_element", None)
-    snap_element_role = getattr(snap, "element_role", "")
-
-    # Workspace detection moved to heyvox/adapters/conductor.py (Plan 15-01);
-    # workspace switch deferred to resolve_lock (Plan 15-05).
-
-    # Fast path: check if we're already on the right app
-    _already_frontmost = False
-    try:
-        import AppKit
-        ws = AppKit.NSWorkspace.sharedWorkspace()
-        actual = ws.frontmostApplication()
-        actual_name = actual.localizedName() if actual else ""
-        actual_pid = actual.processIdentifier() if actual else -1
-        _already_frontmost = (
-            actual_pid == snap_app_pid
-            or (actual_name and actual_name.lower() == (snap_app_name or "").lower())
+        elapsed = int((_time.time() - _t0) * 1000)
+        return PasteOutcome(
+            ok=False, tier_used=0,
+            reason=FailReason.TARGET_UNREACHABLE,
+            message=_REASON_MESSAGES[FailReason.TARGET_UNREACHABLE].format(
+                app_name=lock.app_name or "app"
+            ),
+            elapsed_ms=elapsed,
         )
-    except Exception:
-        pass
 
-    # Step 1: Activate the app (skip if already frontmost).
-    # Workspace-managed apps (detected via conductor_workspace_id) use the
-    # app-level osascript activate path because PID-level activation can burn
-    # ~7s rotating between sibling helper PIDs (DEF-067).
-    if _already_frontmost:
-        _log(f"restore: {snap_app_name} already frontmost, skipping activate")
-        activate_ok = True
-    elif snap_conductor_ws:
-        _log(
-            f"restore: workspace-managed app ({snap_app_name}) — "
-            f"using app-level activate + Cmd+L fallback (skipping PID-level)"
-        )
-        _t0 = _time.time()
-        from heyvox.input.injection import focus_app
-        focus_app(snap_app_name)
-        _time.sleep(0.15)
-        _log(
-            f"restore: [TIMING] app-level activate: "
-            f"{int((_time.time()-_t0)*1000)}ms"
-        )
+    ax_app = AXUIElementCreateApplication(lock.app_pid)
+    window = _find_window_by_number(ax_app, lock.window_number)
+    if window is not None and lock.ax_role_path:
+        leaf = _walk_role_path(window, lock.ax_role_path)
+        if leaf is not None:
+            try:
+                AXUIElementSetAttributeValue(leaf, "AXFocused", kCFBooleanTrue)
+            except Exception:
+                pass
+            elapsed = int((_time.time() - _t0) * 1000)
+            _log(f"[PASTE] tier_used=1 reason=n/a elapsed_ms={elapsed}")
+            return PasteOutcome(
+                ok=True, element=leaf, tier_used=1, elapsed_ms=elapsed,
+            )
+
+    # Tier 2: profile shortcut
+    if profile and profile.focus_shortcut:
         try:
-            snap._activate_failed = True  # Signal paste to include Cmd+L
-        except Exception:
-            pass  # frozen TargetLock can't accept attribute writes
-        return True
+            from heyvox.input.injection import _get_frontmost_app
+
+            _time.sleep(profile.settle_delay)
+            safe_proc = (_get_frontmost_app() or lock.app_name or "").replace(
+                '"', '\\"'
+            )
+            script = (
+                f'tell application "System Events"\n'
+                f'    tell process "{safe_proc}"\n'
+                f'        keystroke "{profile.focus_shortcut}" using command down\n'
+                f'    end tell\n'
+                f'end tell'
+            )
+            r = subprocess.run(
+                ["osascript", "-e", script], capture_output=True, timeout=3
+            )
+            if r.returncode == 0:
+                elapsed = int((_time.time() - _t0) * 1000)
+                _log(f"[PASTE] tier_used=2 reason=n/a elapsed_ms={elapsed}")
+                return PasteOutcome(
+                    ok=True, element=None, tier_used=2, elapsed_ms=elapsed,
+                )
+        except Exception as e:
+            _log(f"resolver: tier 2 exception: {e}")
+
+    # Tier 3: fail-closed
+    if profile and not profile.focus_shortcut:
+        reason = FailReason.MULTI_FIELD_NO_SHORTCUT
     else:
-        _log(f"restore: activating {snap_app_name} (pid={snap_app_pid})")
-        activate_ok = _activate_app(snap_app_pid, snap_app_name)
-        _time.sleep(0.3)
-
-    if not activate_ok:
-        _log(
-            f"restore: skipping AX refocus (activate failed — stale element "
-            f"would hang); relying on paste-path focus shortcut"
-        )
-        try:
-            snap._activate_failed = True
-        except Exception:
-            pass
-        return True
-
-    # Step 2: Try to refocus the captured element directly (legacy path —
-    # only triggers for transitional legacy-snapshot instances). TargetLock
-    # doesn't carry an AX element ref; Plan 15-05 re-finds the leaf via role-path.
-    is_web_area = snap_element_role == "AXWebArea"
-    if (
-        snap_ax_element is not None
-        and snap_element_role in _TEXT_ROLES
-        and not is_web_area
-    ):
-        err = AXUIElementSetAttributeValue(
-            snap_ax_element, "AXFocused", kCFBooleanTrue
-        )
-        if err == 0:
-            _log(
-                f"restore: refocused text field ({snap_element_role}) "
-                f"in {snap_app_name}"
-            )
-            return True
-        if err != -25202:
-            _log(f"restore: WARNING: AX refocus failed (err={err})")
-        else:
-            _log(
-                "restore: AX element stale (-25202), relying on "
-                "app's own focus restore"
-            )
-    elif is_web_area:
-        _log(
-            "restore: skipping AXWebArea refocus (not an input field), "
-            "searching for text input"
-        )
-
-    # Step 3: Fallback — find text fields in the focused window.
-    ax_app = AXUIElementCreateApplication(snap_app_pid)
-    text_fields = _find_window_text_fields(ax_app)
-    _log(f"restore: found {len(text_fields)} text fields in window")
-    input_fields = [(e, r) for e, r in text_fields if r != "AXWebArea"]
-    if not input_fields:
-        input_fields = text_fields
-
-    if len(input_fields) == 1:
-        elem, role = input_fields[0]
-        err = AXUIElementSetAttributeValue(elem, "AXFocused", kCFBooleanTrue)
-        if err == 0:
-            _log(f"restore: focused text field ({role}) in {snap_app_name}")
-            return True
-
-    _log("restore: done (app activated, text field focus = best-effort)")
-    return True
+        reason = FailReason.TARGET_UNREACHABLE
+    msg = _REASON_MESSAGES[reason].format(app_name=lock.app_name or "app")
+    elapsed = int((_time.time() - _t0) * 1000)
+    _log(
+        f"[PASTE] tier_used=fail_closed reason={reason.value} "
+        f"elapsed_ms={elapsed}"
+    )
+    return PasteOutcome(
+        ok=False, tier_used=0, reason=reason, message=msg, elapsed_ms=elapsed,
+    )
 
 
 def _activate_app(pid: int, app_name: str) -> bool:
@@ -684,47 +855,14 @@ def _activate_app(pid: int, app_name: str) -> bool:
             return False
     except Exception as e:
         _log(f"activate: NSRunningApplication path failed: {e}")
-    # Fallback — osascript-based focus, cannot verify PID
-    from heyvox.input.injection import focus_app
-    focus_app(app_name)
+    # No osascript fallback here (W10, Fact 4): an extra
+    # `tell application ... activate` fork costs ~50ms/paste and is
+    # redundant with the NSRunningApplication bundle-ID path already
+    # taken by _yank_back_app_and_workspace. Callers treat False as
+    # "activation best-effort failed" and continue.
     return False
 
 
-def _find_window_text_fields(ax_app) -> list[tuple]:
-    """Find text input fields in the app's focused window.
-
-    Walks the AX tree up to a limited depth. Returns list of
-    (AXUIElement, role_str) tuples. Depth is capped to avoid
-    hanging on complex Electron DOM trees.
-    """
-    from ApplicationServices import AXUIElementCopyAttributeValue
-
-    err, window = AXUIElementCopyAttributeValue(ax_app, "AXFocusedWindow", None)
-    if err != 0 or window is None:
-        return []
-
-    results: list[tuple] = []
-    _walk_ax_tree(window, results, depth=6)
-    return results
-
-
-def _walk_ax_tree(element, results: list, depth: int) -> None:
-    """Recursively collect text input elements from an AX subtree."""
-    if depth <= 0 or len(results) >= 10:
-        return
-
-    from ApplicationServices import AXUIElementCopyAttributeValue
-
-    err, role = AXUIElementCopyAttributeValue(element, "AXRole", None)
-    role_str = str(role) if err == 0 and role else ""
-
-    if role_str in _TEXT_ROLES:
-        results.append((element, role_str))
-        return  # Don't recurse into text fields
-
-    err, children = AXUIElementCopyAttributeValue(element, "AXChildren", None)
-    if err != 0 or children is None:
-        return
-
-    for child in children:
-        _walk_ax_tree(child, results, depth - 1)
+# Legacy _find_window_text_fields and _walk_ax_tree removed in Plan 15-05:
+# SPEC R4 rejects promiscuous tree-walk fallback. resolve_lock's three-tier
+# ladder (role-path walk -> profile shortcut -> fail-closed) replaces them.
