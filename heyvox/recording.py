@@ -228,30 +228,32 @@ class RecordingStateMachine:
         except ImportError:
             pass
 
-        # Snapshot target app/text field in background thread — AX tree walk
-        # can take 5-10s for Conductor workspace detection, and we must not
-        # block the "listening" feedback for that.
+        # Capture target lock in background thread — AX tree walk can take
+        # 5-10s for Conductor workspace detection, and we must not block
+        # the "listening" feedback for that.
         def _bg_snapshot():
             try:
-                from heyvox.input.target import snapshot_target
-                snap = snapshot_target(config=self.config)
+                from heyvox.input.target import capture_lock
+                snap = capture_lock(config=self.config)
                 with self.ctx.lock:
                     self.ctx.recording_target = snap
                 if snap:
                     ws_info = (
-                        f", workspace={snap.detected_workspace!r}"
-                        if snap.detected_workspace else ""
+                        f", conductor_ws={snap.conductor_workspace_id!r}, "
+                        f"conductor_sess={snap.conductor_session_id!r}"
+                        if snap.conductor_workspace_id else ""
                     )
                     self._log(
-                        f"[snapshot] app={snap.app_name}, "
+                        f"[lock] app={snap.app_name}, "
                         f"pid={snap.app_pid}, "
-                        f"window={snap.window_title!r}, "
-                        f"element={snap.element_role}{ws_info}"
+                        f"window_number={snap.window_number}, "
+                        f"leaf_role={snap.leaf_role}, "
+                        f"text_field={snap.focused_was_text_field}{ws_info}"
                     )
                 else:
-                    self._log("[snapshot] WARNING: no target snapshot (AppKit unavailable?)")
+                    self._log("[lock] WARNING: no target lock (AppKit unavailable?)")
             except Exception as e:
-                self._log(f"[snapshot] ERROR: {e}")
+                self._log(f"[lock] ERROR: {e}")
         threading.Thread(target=_bg_snapshot, daemon=True, name="vox-snapshot").start()
 
         # Pause browser/native media during recording (YouTube, Spotify, etc.)
@@ -759,16 +761,16 @@ class RecordingStateMachine:
             if stop_time:
                 self._log(f"[TIMING] stop→inject start: {_t_inject_start - stop_time:.2f}s")
             target_app = recording_target.app_name if recording_target else None
-            target_window = recording_target.window_title if recording_target else None
+            window_number = recording_target.window_number if recording_target else 0
             self._log(
-                f"[inject] target_app={target_app}, window={target_window!r}, "
+                f"[inject] target_app={target_app}, window_number={window_number}, "
                 f"mode={'PTT' if ptt else 'wake word'}, "
                 f"text={len(paste_text)} chars: {paste_text[:60]!r}"
             )
             try:
                 print(
                     f"[recording] Injecting -> {target_app or 'frontmost'} "
-                    f"(window={target_window!r})",
+                    f"(window_number={window_number})",
                     file=sys.stderr,
                 )
             except (BrokenPipeError, OSError):
@@ -799,10 +801,10 @@ class RecordingStateMachine:
             enter_delay = profile.enter_delay if profile else 0.05
 
             if recording_target:
-                if recording_target.detected_workspace:
+                if recording_target.conductor_workspace_id:
                     self._log(
-                        f"[inject] Restoring workspace "
-                        f"'{recording_target.detected_workspace}'"
+                        f"[inject] Restoring conductor workspace "
+                        f"'{recording_target.conductor_workspace_id}'"
                         f" for {recording_target.app_name}"
                     )
                 restore_target(recording_target, config=self.config)

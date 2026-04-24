@@ -52,7 +52,7 @@ class AppContext:
     audio_buffer: list = dataclasses.field(default_factory=list)
     triggered_by_ptt: bool = False
     recording_target: object = None
-    """TargetSnapshot: app + text field captured at recording start."""
+    """TargetLock: immutable record-start target (SPEC R1)."""
 
     tts_seen_during_recording: bool = False
     """DEF-078: True if TTS_PLAYING_FLAG was observed at any point during the

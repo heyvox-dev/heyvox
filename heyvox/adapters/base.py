@@ -3,7 +3,7 @@ AgentAdapter protocol definition.
 
 Adapters control auto-send behavior: whether Enter is pressed after pasting
 and how many times. Text injection itself is handled by main._send_local
-using snapshot_target + type_text (not the adapter).
+using capture_lock + type_text (not the adapter).
 """
 
 from typing import Protocol
