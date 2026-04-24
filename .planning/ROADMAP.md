@@ -41,18 +41,18 @@
   - [x] 13-03-PLAN.md — Integration: wire profiles into main loop, echo suppression gate, auto-calibration
   - [x] 13-04-PLAN.md — CLI: add heyvox calibrate command
 - [ ] Phase 14: Distribution & UX Polish — PyPI, Homebrew, HUD mic display
-- [ ] Phase 15: Paste Target Lock — record-start TargetLock + three-tier resolve ladder + fail-closed policy
+- [x] Phase 15: Paste Target Lock (2026-04-24) — record-start TargetLock + three-tier resolve ladder + fail-closed policy
   **Goal:** Transcribed speech lands in the exact text field that held the cursor at recording start, even after app/workspace/session change; unreachable target → fail-closed (clipboard + history + toast)
   **Requirements:** [R1, R2, R3, R4, R5, R6, R7, R8]
   **Plans:** 7 plans
   Plans:
-  - [ ] 15-01-PLAN.md — Conductor adapter + DB schema coupling
-  - [ ] 15-02-PLAN.md — TargetLock dataclass + capture_lock() (replaces TargetSnapshot)
-  - [ ] 15-03-PLAN.md — AppProfileConfig extension + app_fast_paste generalization
-  - [ ] 15-04-PLAN.md — Toast helper (heyvox/input/toast.py)
-  - [ ] 15-05-PLAN.md — Resolve ladder + fail-closed pipeline (resolve_lock + integration)
-  - [ ] 15-06-PLAN.md — Post-paste verification (verify_paste + drift detection + retry)
-  - [ ] 15-07-PLAN.md — heyvox log-health Paste section
+  - [x] 15-01-PLAN.md — Conductor adapter + DB schema coupling
+  - [x] 15-02-PLAN.md — TargetLock dataclass + capture_lock() (replaces TargetSnapshot)
+  - [x] 15-03-PLAN.md — AppProfileConfig extension + app_fast_paste generalization
+  - [x] 15-04-PLAN.md — Toast helper (heyvox/input/toast.py)
+  - [x] 15-05-PLAN.md — Resolve ladder + fail-closed pipeline (resolve_lock + integration)
+  - [x] 15-06-PLAN.md — Post-paste verification (verify_paste + drift detection + retry)
+  - [x] 15-07-PLAN.md — heyvox log-health Paste section
 
 ### 📋 v2.0 Cross-Platform & Polish (Planned)
 
@@ -74,4 +74,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | 12. Paste Injection Reliability | v1.2 | 1/3 | Complete    | 2026-04-13 |
 | 13. Audio Reliability | v1.2 | 3/4 | Complete    | 2026-04-13 |
 | 14. Distribution & UX Polish | v1.2 | 0/? | Planned | — |
-| 15. Paste Target Lock | v1.2 | 0/7 | Planned | — |
+| 15. Paste Target Lock | v1.2 | 7/7 | Complete | 2026-04-24 |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Paste Injection Reliability
 status: executing
-stopped_at: Completed 13-audio-reliability-04-PLAN.md
-last_updated: "2026-04-13T10:54:36.563Z"
-last_activity: 2026-04-13
+stopped_at: Completed 15-paste-target-lock (all 7 plans)
+last_updated: "2026-04-24T00:00:00.000Z"
+last_activity: 2026-04-24
 progress:
-  total_phases: 13
-  completed_phases: 12
-  total_plans: 34
-  completed_plans: 36
+  total_phases: 14
+  completed_phases: 13
+  total_plans: 41
+  completed_plans: 43
   percent: 100
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 13 — audio-reliability
+**Current focus:** Phase 15 complete — Paste Target Lock shipped
 
 ## Current Position
 
-Phase: 13
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-04-14 - Completed quick task 260414-cki: Phase 4 dual-write IPC fix
+Phase: 15
+Plan: All 7 plans complete
+Status: Verified — VERIFICATION.md passed
+Last activity: 2026-04-24 - Completed Phase 15 (74 new tests, net-zero regressions)
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
 
@@ -72,10 +72,11 @@ Full decision log in PROJECT.md Key Decisions table.
 - Phase 15 SPEC.md written (8 requirements, ambiguity 0.12) — 2026-04-22
 - Phase 15 CONTEXT.md written (27 decisions across 4 gray areas + Conductor adapter shape + profile schema + log tags) — 2026-04-22
 - Phase 15 planning: 7 plans in 4 waves written (2026-04-22); plan-checker iterations 1+2 completed; iteration 3 rate-limited mid-flight. 4 BLOCKERs + minor WARNINGs captured in 15-REVISION-ADDENDUM.md for executor to apply inline.
+- Phase 15 executed + verified: 2026-04-24. All 7 plans shipped; B1/B2/B3/B4/B5/B6/W3/W5-W13/Fact 1-6 corrections applied. 74 new tests, net-zero regressions vs pre-phase baseline. `conductor-switch-workspace` extended with `--id` + `--session`. TargetSnapshot/restore_target/_detect_app_workspace/_switch_app_workspace/_walk_ax_tree/_find_window_text_fields fully retired. app_fast_paste landed as generalized Phase 12 fast-path.
 
 ### Pending Todos
 
-- Phase 15 execution: read 15-REVISION-ADDENDUM.md first; apply the B1/B2/B3/B4 corrections before touching source.
+None — Phase 15 shipped.
 
 ### Blockers/Concerns
 
