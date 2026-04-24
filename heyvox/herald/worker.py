@@ -100,6 +100,39 @@ def _engine_for_lang(lang: str) -> str:
     """Return 'qwen' or 'kokoro' for the given language code."""
     return "qwen" if lang in QWEN_LANGS else "kokoro"
 
+
+def _allowed_languages() -> frozenset[str] | None:
+    """Return the set of TTS languages the user has allowed, or None for 'auto'.
+
+    Priority: HEYVOX_TTS_LANGS env var > config.tts.languages > "auto".
+    Value shapes accepted: "auto", "en-us,de", ["en-us", "de"].
+    Returning None means "no restriction" (detect + route freely).
+    """
+    raw: object | None = None
+    env = os.environ.get("HEYVOX_TTS_LANGS", "").strip()
+    if env:
+        raw = env
+    else:
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+            raw = getattr(getattr(cfg, "tts", None), "languages", None)
+        except Exception as exc:
+            log.debug("Could not load tts.languages from config: %s", exc)
+            raw = None
+
+    if raw is None or raw == "" or raw == "auto":
+        return None
+    if isinstance(raw, str):
+        items = [s.strip() for s in raw.split(",") if s.strip()]
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        items = [str(s).strip() for s in raw if str(s).strip()]
+    else:
+        return None
+    if not items or "auto" in items:
+        return None
+    return frozenset(items)
+
 # ---------------------------------------------------------------------------
 # Standalone utility functions
 # ---------------------------------------------------------------------------
@@ -352,6 +385,17 @@ class HeraldWorker:
         # Voice/language/mood selection
         mood = self._detect_mood(speech)
         lang, lang_voice = self._detect_language(speech)
+
+        # Apply TTS language allowlist (config.tts.languages or
+        # HEYVOX_TTS_LANGS env). If the detected language isn't allowed,
+        # demote to the fallback (first allowlist entry or en-us) so we
+        # never silently pull an unwanted engine (e.g. Qwen3 for German).
+        allowed = _allowed_languages()
+        if allowed is not None and lang not in allowed:
+            demoted = next(iter(allowed), "en-us")
+            log.info("TTS lang demoted: %s → %s (allowlist=%s)", lang, demoted, sorted(allowed))
+            lang, lang_voice = demoted, None
+
         voice = self._select_voice(mood, lang, lang_voice)
 
         # DEF-078: Register the finalized speech text with the cross-process
