@@ -167,40 +167,63 @@ def _verify_target_focused(expected_bundle_id: str | None) -> bool:
 _AX_NATIVE_ROLES = frozenset({"AXTextField", "AXTextArea"})
 
 
+# 15-02: migrated from legacy snapshot fields (ax_element, element_role,
+# detected_workspace) to the new record-start lock fields (leaf_role,
+# conductor_workspace_id, app_pid). AX element handle is now acquired live
+# from the frontmost app's AXFocusedUIElement at call time (the lock does
+# not carry an AX ref — D-04: refs are ephemeral, role-path is the durable
+# identity).
 def _ax_inject_text(snap, text: str) -> bool:
     """Inject text directly via AX value set — only for native AppKit text fields.
 
     Bypasses clipboard entirely by setting AXValue directly on the element.
     Only applicable for AXTextField and AXTextArea (native AppKit widgets).
-    Explicitly skips AXWebArea (Electron/WebKit apps) where AXValue write has no effect.
+    Explicitly skips AXWebArea (Electron/WebKit apps) where AXValue write has
+    no effect.
 
     Args:
-        snap: TargetSnapshot (or None). Must have ax_element and element_role.
+        snap: TargetLock (or None). Reads leaf_role + conductor_workspace_id
+            from the lock; element handle is acquired live from the focused
+            element of the current frontmost app.
         text: Text to inject.
 
     Returns:
         True if text was injected via AX, False if not applicable or failed.
 
-    Requirement: PASTE-04
+    Requirement: PASTE-04 (Phase 12)
     """
     if snap is None:
         return False
-    if not hasattr(snap, "element_role") or snap.element_role not in _AX_NATIVE_ROLES:
+    leaf_role = getattr(snap, "leaf_role", None)
+    if not leaf_role or leaf_role not in _AX_NATIVE_ROLES:
         return False
-    if snap.ax_element is None:
-        return False
-    # Skip for Electron/Tauri apps — AXValue set returns success but doesn't
-    # update the web framework's internal state, so Enter submits empty text.
-    app_name = getattr(snap, "app_name", None)
-    detected_ws = getattr(snap, "detected_workspace", None)
-    if isinstance(detected_ws, str) and detected_ws:
+    # Skip for workspace-managed Electron/Tauri apps — AXValue set returns
+    # success but doesn't update the web framework's internal state, so Enter
+    # submits empty text. Presence of conductor_workspace_id (set by adapter
+    # at capture time) marks a workspace-managed app.
+    conductor_ws = getattr(snap, "conductor_workspace_id", None)
+    if conductor_ws:
+        app_name = getattr(snap, "app_name", "?")
         _log(f"AX fast-path: skipping for workspace-managed app ({app_name})")
         return False
+    pid = getattr(snap, "app_pid", 0)
+    if not pid:
+        return False
     try:
-        from ApplicationServices import AXUIElementSetAttributeValue
-        err = AXUIElementSetAttributeValue(snap.ax_element, "AXValue", text)
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+            AXUIElementSetAttributeValue,
+        )
+        ax_app = AXUIElementCreateApplication(pid)
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, "AXFocusedUIElement", None
+        )
+        if err != 0 or focused is None:
+            return False
+        err = AXUIElementSetAttributeValue(focused, "AXValue", text)
         if err == 0:
-            _log(f"AX fast-path: injected {len(text)} chars into {snap.element_role}")
+            _log(f"AX fast-path: injected {len(text)} chars into {leaf_role}")
             return True
         _log(f"AX fast-path: failed (err={err})")
         return False
@@ -539,7 +562,7 @@ def type_text(
     Args:
         text: Text to inject.
         app_name: Target app process name (for osascript targeting).
-        snap: TargetSnapshot (or None). Used for AX fast-path and focus verification.
+        snap: TargetLock (or None). Used for AX fast-path and focus verification.
         settle_secs: Focus settle delay before Cmd-V (per-app tuned via InjectionConfig).
         max_retries: Number of retries on clipboard theft.
         enter_count: Number of Enter keystrokes after paste (0 = no auto-send).
