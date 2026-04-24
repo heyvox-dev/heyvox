@@ -171,6 +171,10 @@ HERALD_PLAY_NEXT = f"{_TMP}/herald-play-next"
 KOKORO_DAEMON_SOCK = f"{_TMP}/kokoro-daemon.sock"
 KOKORO_DAEMON_PID = f"{_TMP}/kokoro-daemon.pid"
 
+# Qwen3-TTS daemon IPC — German + other non-Kokoro languages. Lazy-started.
+QWEN_DAEMON_SOCK = f"{_TMP}/qwen-daemon.sock"
+QWEN_DAEMON_PID = f"{_TMP}/qwen-daemon.pid"
+
 # ---------------------------------------------------------------------------
 # Core process files (IPC-01)
 # ---------------------------------------------------------------------------
