@@ -134,6 +134,14 @@ class TTSConfig(BaseModel):
     # Uses macOS MediaRemote to send explicit pause/play commands.
     pause_media: bool = False
 
+    # Allowed output languages.
+    #   "auto"           — detect + route freely (default; includes Qwen3 for DE etc.)
+    #   ["en-us"]        — English only; foreign text gets demoted to en-us voice
+    #   ["en-us", "de"]  — bilingual; German routes to Qwen3, others demoted
+    # Any lang not in the list is demoted to the first entry (or en-us fallback).
+    # Env override: HEYVOX_TTS_LANGS="en-us,de"
+    languages: list[str] | str = "auto"
+
     # DEPRECATED: Path to external TTS control script (Phase 1 bridge).
     # No longer used by the native TTS engine. Kept for backward compatibility.
     script_path: str | None = None
@@ -729,6 +737,14 @@ tts:
   volume_boost: 10         # Added to system volume during TTS (capped at 100)
   ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
   pause_media: false       # Pause YouTube/Spotify/etc. during TTS, resume after
+
+  # Allowed output languages. "auto" = detect + route freely.
+  # List form forces a fallback: text in any language not listed is spoken
+  # with the first entry's voice. Set to ["en-us"] for strict English-only
+  # (skips the Qwen3 German daemon entirely — saves 1.2 GB download + 650 MB RAM).
+  # Env override: HEYVOX_TTS_LANGS="en-us,de"
+  languages: auto          # auto | [en-us] | [en-us, de] | [de]
+
   # script_path: null      # DEPRECATED: external TTS script path (Phase 1 bridge, no longer needed)
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,14 @@
 - **keywords**: heyvox, vox, voice, wake word, STT, TTS, speech, microphone, MCP, HUD, recording indicator, push-to-talk, herald, hush, media control
 - **workflow_mode**: gsd-quick
 
+## Output Language — testing override (starts 2026-04-24)
+
+**During this testing window, respond in GERMAN** in both visible text output AND `<tts>...</tts>` blocks. This overrides the global English-only rule in `~/.claude/CLAUDE.md` while we exercise the Qwen3-TTS German path end-to-end.
+
+- Applies to this workspace only (other workspaces stay English).
+- Remove this section (or flip back to English) when testing is done.
+- Code identifiers, file paths, commit messages, and inline code comments stay in their source language (English/code).
+
 ## Architecture
 
 ### Hybrid Voice Model
