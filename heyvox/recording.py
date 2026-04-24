@@ -499,9 +499,11 @@ class RecordingStateMachine:
         from heyvox.audio.stt import transcribe_audio
         from heyvox.audio.cues import audio_cue, get_cues_dir
         from heyvox.input.injection import (
-            type_text, save_frontmost_pid, _settle_delay_for,
+            type_text, save_frontmost_pid, _settle_delay_for, app_fast_paste,
+            _set_clipboard,
         )
-        from heyvox.input.target import restore_target
+        from heyvox.input.target import resolve_lock, PasteOutcome, FailReason
+        from heyvox.input.toast import show_failure_toast
         from heyvox.audio.tts import check_voice_command, execute_voice_command
 
         try:
@@ -785,7 +787,17 @@ class RecordingStateMachine:
                 f"target pid={target_pid}"
             )
 
-            paste_ok = True  # Default to True; set to False if type_text fails
+            # --- 15-05: resolve_lock + tier-aware paste + fail-closed branch ---
+            # DEF-070 PRESERVED: this paste-time workspace+session switch fires
+            # AFTER recording stopped. The orchestrator's RECORDING_FLAG check
+            # that prevents Herald-driven switches DURING recording is in
+            # heyvox/herald/orchestrator.py and is NOT touched by this path.
+            # The conductor-switch-workspace script itself does NOT consult
+            # RECORDING_FLAG (verified Plan 15-05 Task 0).
+            paste_ok = False
+            outcome = None  # W6: explicit init so later consumers can test
+                            # `outcome is not None` safely (e.g. Plan 15-06
+                            # verify_paste gating).
             combined_enter = 0
 
             adapter = self.ctx.adapter
@@ -800,52 +812,65 @@ class RecordingStateMachine:
                 combined_enter = 0
             enter_delay = profile.enter_delay if profile else 0.05
 
-            if recording_target:
-                if recording_target.conductor_workspace_id:
-                    self._log(
-                        f"[inject] Restoring conductor workspace "
-                        f"'{recording_target.conductor_workspace_id}'"
-                        f" for {recording_target.app_name}"
-                    )
-                restore_target(recording_target, config=self.config)
-                self._log(f"[inject] Restored target: {recording_target.app_name}")
-
-                injection_cfg = getattr(self.config, "injection", None)
-                if injection_cfg:
-                    settle = _settle_delay_for(
-                        target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
-                    )
-                    max_retries = injection_cfg.max_retries
-                else:
-                    settle = 0.1
-                    max_retries = 2
+            if recording_target is None:
+                self._log("[inject] WARNING: no recording_target — skipping paste")
+            else:
+                outcome = resolve_lock(recording_target, config=self.config)
                 self._log(
-                    f"[inject] generic path: auto_send={auto_send}, "
-                    f"combined_enter={combined_enter}, enter_delay={enter_delay}"
+                    f"[PASTE] outcome ok={outcome.ok} tier_used={outcome.tier_used} "
+                    f"reason={outcome.reason.value if outcome.reason else 'n/a'} "
+                    f"elapsed_ms={outcome.elapsed_ms}"
                 )
-                # Only send focus shortcut if a workspace switch actually happened
-                # (sidebar click steals focus from text input, Cmd+L restores it).
-                # When no switch was needed, focus is already on the text input.
-                # EXCEPT: if activate failed (multi-PID Electron rotation), we
-                # skipped AX refocus in restore_target — force focus shortcut so
-                # paste lands in the current frontmost helper's text input.
-                ws_switched = getattr(recording_target, '_workspace_switched', False)
-                activate_failed = getattr(recording_target, '_activate_failed', False)
-                _focus = (
-                    profile.focus_shortcut
-                    if (profile and (ws_switched or activate_failed))
-                    else ""
-                )
-                paste_ok = type_text(
-                    paste_text,
-                    app_name=target_app,
-                    snap=recording_target,
-                    settle_secs=settle,
-                    max_retries=max_retries,
-                    enter_count=combined_enter,
-                    enter_delay=enter_delay,
-                    focus_shortcut=_focus,
-                )
+
+                if outcome.ok:
+                    # Tier 1: refocus succeeded; tier 2: profile shortcut
+                    # focused the input. Either way, paste via app_fast_paste
+                    # if profile has a focus_shortcut (R8 — Phase 12 fast-path);
+                    # else fall back to type_text.
+                    if profile and profile.focus_shortcut:
+                        # R8: first caller of app_fast_paste (landed orphaned
+                        # in Plan 15-03).
+                        paste_ok = app_fast_paste(profile, paste_text)
+                    else:
+                        injection_cfg = getattr(self.config, "injection", None)
+                        if injection_cfg:
+                            settle = _settle_delay_for(
+                                target_app, injection_cfg.app_delays,
+                                injection_cfg.focus_settle_secs,
+                            )
+                            max_retries = injection_cfg.max_retries
+                        else:
+                            settle = 0.1
+                            max_retries = 2
+                        paste_ok = type_text(
+                            paste_text,
+                            app_name=target_app,
+                            snap=recording_target,
+                            settle_secs=settle,
+                            max_retries=max_retries,
+                            enter_count=combined_enter,
+                            enter_delay=enter_delay,
+                            focus_shortcut="",  # tier-1 success -> input focused
+                        )
+                else:
+                    # Fail-closed: write clipboard, NO Cmd+V, error cue, toast (R5).
+                    # W5: History write happens UNCONDITIONALLY upstream at the
+                    # _save_transcript call (Fact 2) — fail-closed does not lose
+                    # the transcript from history. Clipboard write is explicit
+                    # here so the user has the transcript even if their original
+                    # target is gone.
+                    ok_clip, _ = _set_clipboard(paste_text)
+                    if not ok_clip:
+                        self._log(
+                            "[PASTE] WARNING: clipboard write failed "
+                            "during fail-closed"
+                        )
+                    audio_cue("error", cues_dir)
+                    show_failure_toast(outcome.message, title="HeyVox paste")
+                    self._log(
+                        f"[PASTE] FAIL_CLOSED reason={outcome.reason.value} "
+                        f"message={outcome.message}"
+                    )
 
             if paste_ok:
                 if combined_enter > 0:
@@ -870,9 +895,22 @@ class RecordingStateMachine:
 
             # Show confirmation in HUD — use paste_ok to decide cue and message
             if not paste_ok:
-                self._hud_send({"type": "state", "state": "idle", "text": "Paste failed"})
-                # Error cue already played by type_text — just log
-                self._log("Paste FAILED — error cue played by injection")
+                if outcome is not None and outcome.reason is not None:
+                    # Fail-closed: transcript saved to clipboard + history;
+                    # toast already fired by the fail-closed branch above.
+                    self._hud_send({
+                        "type": "state", "state": "idle",
+                        "text": "Paste failed (clipboard saved)",
+                    })
+                    self._log(
+                        f"Paste FAIL_CLOSED — reason={outcome.reason.value}; "
+                        f"clipboard + history retained"
+                    )
+                else:
+                    self._hud_send({
+                        "type": "state", "state": "idle", "text": "Paste failed",
+                    })
+                    self._log("Paste FAILED — error cue played by injection")
             elif ptt:
                 # PTT mode: no auto-Enter, just pasted -- don't say "Sending"
                 self._hud_send({"type": "state", "state": "idle", "text": "Pasted"})
