@@ -256,6 +256,21 @@ class AppProfileConfig(BaseModel):
     # SQL query to list all workspace directory_name values.
     workspace_list_query: str = ""
 
+    # Whether this app supports post-paste AXValue verification (Plan 15-05).
+    # Off for Terminal/iTerm2 (TTY content readback isn't via AX). Default True.
+    # Requirement: PASTE-15-R7
+    supports_ax_verify: bool = True
+
+    # Whether the Conductor adapter (or future analog) can enrich the lock with
+    # a workspace+session ID at capture time. Currently only Conductor sets this.
+    # Requirement: PASTE-15-R3
+    has_session_detection: bool = False
+
+    # Delay (seconds) between paste keystroke and AXValue readback for verification.
+    # Conductor (Tauri web view) needs slightly more for AXValue commit to land.
+    # Requirement: PASTE-15-R7
+    ax_settle_before_verify: float = 0.1
+
 
 # Built-in profiles for common apps. Users can override or add more via config.
 _DEFAULT_APP_PROFILES: list[dict] = [
@@ -276,6 +291,8 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "workspace_list_query": (
             "SELECT directory_name, branch FROM workspaces WHERE state = 'ready'"
         ),
+        "has_session_detection": True,
+        "ax_settle_before_verify": 0.15,
     },
     {
         "name": "Cursor",
@@ -296,12 +313,14 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "focus_shortcut": "",
         "enter_count": 1,
         "is_electron": False,
+        "supports_ax_verify": False,
     },
     {
         "name": "iTerm2",
         "focus_shortcut": "",
         "enter_count": 1,
         "is_electron": False,
+        "supports_ax_verify": False,
     },
 ]
 
