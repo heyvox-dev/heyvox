@@ -859,13 +859,19 @@ class RecordingStateMachine:
                     # the transcript from history. Clipboard write is explicit
                     # here so the user has the transcript even if their original
                     # target is gone.
+                    # DEF-088: each step is logged so a future hang in this
+                    # branch is pin-pointed instead of stalling silently for
+                    # 60 s until the busy-flag watchdog force-resets.
+                    self._log("[PASTE] fail-closed: writing clipboard")
                     ok_clip, _ = _set_clipboard(paste_text)
                     if not ok_clip:
                         self._log(
                             "[PASTE] WARNING: clipboard write failed "
                             "during fail-closed"
                         )
+                    self._log("[PASTE] fail-closed: playing error cue")
                     audio_cue("error", cues_dir)
+                    self._log("[PASTE] fail-closed: showing failure toast")
                     show_failure_toast(outcome.message, title="HeyVox paste")
                     self._log(
                         f"[PASTE] FAIL_CLOSED reason={outcome.reason.value} "

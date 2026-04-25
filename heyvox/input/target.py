@@ -686,24 +686,41 @@ def resolve_lock(lock, config=None) -> PasteOutcome:
     """
     _t0 = _time.time()
 
-    # Pre-tier: nothing focused at capture -> fail closed (no yank needed)
-    if not lock.focused_was_text_field:
-        msg = _REASON_MESSAGES[FailReason.NO_TEXT_FIELD_AT_START].format(
-            app_name=lock.app_name or "app"
-        )
-        elapsed = int((_time.time() - _t0) * 1000)
-        _log(
-            f"[PASTE] tier_used=fail_closed "
-            f"reason={FailReason.NO_TEXT_FIELD_AT_START.value} "
-            f"elapsed_ms={elapsed}"
-        )
-        return PasteOutcome(
-            ok=False, tier_used=0,
-            reason=FailReason.NO_TEXT_FIELD_AT_START,
-            message=msg, elapsed_ms=elapsed,
-        )
-
     profile = config.get_app_profile(lock.app_name) if config else None
+
+    # Pre-tier: nothing focused at capture.
+    # DEF-088: the original Phase 15 design fail-closed unconditionally here.
+    # That regressed the common "user dictates while looking at the chat
+    # window without first clicking the text field" flow — Conductor and
+    # similar agents have a deterministic focus-the-input shortcut (Cmd+L),
+    # so we can recover via Tier 2 instead of throwing the transcript away.
+    # Only fail-close immediately when the app has no profile / no focus
+    # shortcut available; otherwise fall through and let Tier 2 try the
+    # shortcut. Tier 1 is skipped because the cached role-path is empty by
+    # construction in this branch.
+    if not lock.focused_was_text_field:
+        if not (profile and profile.focus_shortcut):
+            msg = _REASON_MESSAGES[FailReason.NO_TEXT_FIELD_AT_START].format(
+                app_name=lock.app_name or "app"
+            )
+            elapsed = int((_time.time() - _t0) * 1000)
+            _log(
+                f"[PASTE] tier_used=fail_closed "
+                f"reason={FailReason.NO_TEXT_FIELD_AT_START.value} "
+                f"elapsed_ms={elapsed}"
+            )
+            return PasteOutcome(
+                ok=False, tier_used=0,
+                reason=FailReason.NO_TEXT_FIELD_AT_START,
+                message=msg, elapsed_ms=elapsed,
+            )
+        # Profile has a focus_shortcut — log the recovery attempt and let
+        # the function flow naturally into Tier 1 (a no-op here because
+        # `lock.ax_role_path` is empty) and then Tier 2 (the shortcut).
+        _log(
+            f"[PASTE] no_text_field_at_start but profile has focus_shortcut "
+            f"({profile.focus_shortcut!r}) — attempting Tier 2 recovery"
+        )
 
     # Yank back: app + workspace + session — UNCONDITIONAL (SPEC R6)
     _yank_back_app_and_workspace(lock, profile, config)
