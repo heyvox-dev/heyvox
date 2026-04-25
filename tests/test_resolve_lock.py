@@ -169,6 +169,11 @@ def test_tier1_succeeds_when_role_path_walks_cleanly(monkeypatch, capsys):
 
 
 def test_tier2_fires_with_focus_shortcut(monkeypatch, capsys):
+    """DEF-089: Tier 2 with focus_shortcut returns ok=True without firing
+    any osascript itself. The actual focus+paste+Enter osascript is fired
+    by `app_fast_paste` — the caller — once. Firing it here too caused
+    duplicate Cmd+L races and ~1.5–2.5 s of extra latency per paste.
+    """
     from heyvox.input.target import resolve_lock
 
     monkeypatch.setattr(
@@ -206,13 +211,17 @@ def test_tier2_fires_with_focus_shortcut(monkeypatch, capsys):
 
     assert outcome.ok is True
     assert outcome.tier_used == 2
-    # Assert osascript call with Cmd+L
+    # DEF-089: resolve_lock no longer fires osascript in Tier 2.
+    # _get_frontmost_app may still be called by other paths, but
+    # there must be no osascript invocation owned by this function.
     osa = [a for a in captured_argv if a and a[0] == "osascript"]
-    assert len(osa) >= 1
-    script = osa[0][2]
-    assert 'keystroke "l" using command down' in script
+    assert osa == [], (
+        f"Tier 2 should defer keystrokes to app_fast_paste; "
+        f"got osascript calls: {osa}"
+    )
     captured = capsys.readouterr()
     assert "[PASTE] tier_used=2" in captured.err
+    assert "deferred to app_fast_paste" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +229,12 @@ def test_tier2_fires_with_focus_shortcut(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_tier1_plus_tier2_fail_returns_target_unreachable(monkeypatch, capsys):
+def test_tier1_fail_with_no_profile_returns_target_unreachable(monkeypatch, capsys):
+    """DEF-089: with the keystroke removed from Tier 2, the only path to
+    TARGET_UNREACHABLE through Tier 3 is "Tier 1 walk failed AND no profile
+    provided" (no Tier 2 to defer to). Replaces the obsolete test that
+    forced the Tier 2 osascript to return rc=1 — that path no longer exists.
+    """
     from heyvox.input.target import FailReason, resolve_lock
 
     monkeypatch.setattr(
@@ -231,13 +245,6 @@ def test_tier1_plus_tier2_fail_returns_target_unreachable(monkeypatch, capsys):
         "heyvox.input.target._find_window_by_number",
         lambda ax_app, wn: None,
     )
-    monkeypatch.setattr(
-        "heyvox.input.target.subprocess.run",
-        lambda argv, *a, **kw: MagicMock(returncode=1, stderr=b"err"),
-    )
-    monkeypatch.setattr(
-        "heyvox.input.injection._get_frontmost_app", lambda: "TestApp"
-    )
 
     mock_ax = MagicMock()
     mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
@@ -245,11 +252,12 @@ def test_tier1_plus_tier2_fail_returns_target_unreachable(monkeypatch, capsys):
     mock_cf.kCFBooleanTrue = True
 
     lock = _make_lock(app_name="TargetApp")
-    config = _make_config(focus_shortcut="l")
+    # No config -> profile lookup returns None -> Tier 2 skipped, Tier 3
+    # fail-closed routes through TARGET_UNREACHABLE.
     with patch.dict("sys.modules", {
         "ApplicationServices": mock_ax, "CoreFoundation": mock_cf,
     }):
-        outcome = resolve_lock(lock, config=config)
+        outcome = resolve_lock(lock, config=None)
 
     assert outcome.ok is False
     assert outcome.tier_used == 0
