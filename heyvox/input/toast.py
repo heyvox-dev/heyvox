@@ -36,14 +36,23 @@ def _hammerspoon_running() -> bool:
     DEF-074: When Hammerspoon is not running, `hs -c` triggers the macOS
     "Hammerspoon is not running -- Launch?" dialog, interrupting the user.
     Gate every `hs` invocation with this check.
+
+    DEF-090 follow-up: pgrep is normally fast, but on a heavily loaded
+    machine (or during a fork-storm in highly multithreaded Python with
+    Cocoa frameworks held) it has been observed to stall for tens of
+    seconds. The toast is best-effort user feedback — never worth a
+    multi-second block of the calling thread, which is the recording
+    pipeline's send phase. Hard 1 s ceiling; if pgrep hasn't finished
+    by then, fall back to "not running" and use the osascript path.
     """
     try:
         return subprocess.call(
             ["pgrep", "-q", "Hammerspoon"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=1.0,
         ) == 0
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
         return False
 
 
