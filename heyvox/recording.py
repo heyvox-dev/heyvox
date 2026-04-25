@@ -883,7 +883,24 @@ class RecordingStateMachine:
             # was None (15-05 explicitly initializes outcome = None per W6).
             # Gate on BOTH `outcome is not None` AND `outcome.ok` to avoid
             # AttributeError on `outcome.element` when no resolution happened.
-            if paste_ok and recording_target is not None and outcome is not None and outcome.ok:
+            # DEF-090: skip verify when auto-Enter is active. The send-key
+            # clears Conductor's chat input on a successful submit, so the
+            # post-Enter AX value is "1-char placeholder" or empty — which
+            # verify_paste correctly fails to match against the transcript.
+            # The original retry then fires Cmd+V into the just-cleared
+            # field, the drift branch fires `show_failure_toast`, and the
+            # whole branch hangs ~60 s in the toast subprocess until the
+            # busy-flag watchdog force-resets state. verify_paste was
+            # designed for "did paste land in the right field?" without an
+            # Enter step — it cannot tell auto-Enter success from drift.
+            run_verify = (
+                paste_ok
+                and recording_target is not None
+                and outcome is not None
+                and outcome.ok
+                and combined_enter == 0
+            )
+            if run_verify:
                 from heyvox.input.target import verify_paste
                 verify = verify_paste(
                     recording_target,
@@ -906,6 +923,10 @@ class RecordingStateMachine:
                         "content may have landed in the wrong field."
                     )
                     show_failure_toast(drift_message, title="HeyVox paste drift")
+            elif paste_ok and combined_enter > 0:
+                # Brief log so the operator can correlate "no verify ran"
+                # with the auto-Enter path during triage.
+                self._log("[PASTE] verify skipped (auto-Enter clears field)")
 
             if paste_ok:
                 if combined_enter > 0:

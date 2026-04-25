@@ -378,11 +378,23 @@ def test_drift_log_format(monkeypatch, capsys):
 
 def test_recording_send_local_has_defensive_outcome_guard():
     """W12: recording._send_local must gate verify_paste on
-    `outcome is not None and outcome.ok` to avoid AttributeError when
-    recording_target was None upstream."""
+    `outcome is not None` AND `outcome.ok` to avoid AttributeError when
+    recording_target was None upstream. DEF-090 split the guard across
+    multiple lines (and added the auto-Enter skip), so we check the
+    two clauses appear in the same conditional block instead of one
+    contiguous substring."""
     from pathlib import Path
+    import re
 
     src = Path("heyvox/recording.py").read_text()
-    assert "outcome is not None and outcome.ok" in src, (
-        "W12: expected defensive gate in _send_local"
+    # Find any conditional/expression block that mentions both clauses
+    # within ~12 lines of each other — robust against line-formatting
+    # changes while still proving the defensive gate is present.
+    block_pattern = re.compile(
+        r"outcome is not None[^\n]*(?:\n[^\n]*){0,12}outcome\.ok",
+        re.MULTILINE,
+    )
+    assert block_pattern.search(src), (
+        "W12: expected defensive gate (`outcome is not None` AND "
+        "`outcome.ok`) somewhere in _send_local"
     )
