@@ -236,8 +236,13 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     # re-enable if the tap stays silent for too long. Heartbeat cadence
     # (HEARTBEAT_SECS) keeps the log readable while still catching tap
     # death quickly enough to explain user reports like "fn doesn't work".
-    SILENT_WARN_SECS = 120.0   # no events for this long → WARN + re-enable
-    HEARTBEAT_SECS = 600.0     # log an alive-heartbeat every N seconds
+    # DEF-087 follow-up (DEF-088): 120s was too aggressive — a normal user
+    # reading code or in a meeting easily generates zero events for 2 min,
+    # spamming the log with false-positive WARNs every cycle. 600s (10 min)
+    # is rare under genuine activity and still catches the dead-tap case
+    # the original DEF-087 was after.
+    SILENT_WARN_SECS = 600.0   # no events for this long → WARN + re-enable
+    HEARTBEAT_SECS = 1800.0    # log an alive-heartbeat every N seconds
 
     def _tap_watchdog():
         _consecutive_reenable = 0
