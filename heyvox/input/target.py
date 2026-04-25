@@ -758,33 +758,35 @@ def resolve_lock(lock, config=None) -> PasteOutcome:
                 ok=True, element=leaf, tier_used=1, elapsed_ms=elapsed,
             )
 
-    # Tier 2: profile shortcut
+    # Tier 2: profile shortcut.
+    # DEF-089: do NOT fire the focus keystroke here. The caller
+    # (recording.py:_send_local) routes any tier_used=2 outcome to
+    # `app_fast_paste`, which fires `set frontmost + focus_shortcut +
+    # Cmd+V + Enter*N` as a single consolidated osascript. Firing the
+    # focus_shortcut twice (once here, once inside app_fast_paste's
+    # script) was causing two distinct races:
+    #   1. ~1.5–2.5 s extra latency per paste (this osascript +
+    #      frontmost-lookup duplicated the work app_fast_paste already
+    #      does).
+    #   2. The second osascript's `set frontmost to true` re-stole
+    #      focus from the chat input that the first Cmd+L had just
+    #      focused, then Cmd+L+V+Enter re-fired against a re-arming
+    #      window and Enter was occasionally absorbed before the
+    #      send-handler bound — message landed in the input field
+    #      but never sent.
+    # Returning tier_used=2 ok=True without keystrokes is correct: the
+    # contract this function exposes is "did we decide on a focus
+    # strategy?", not "is the field already focused?". `app_fast_paste`
+    # is the single owner of the focus+paste+Enter sequence.
     if profile and profile.focus_shortcut:
-        try:
-            from heyvox.input.injection import _get_frontmost_app
-
-            _time.sleep(profile.settle_delay)
-            safe_proc = (_get_frontmost_app() or lock.app_name or "").replace(
-                '"', '\\"'
-            )
-            script = (
-                f'tell application "System Events"\n'
-                f'    tell process "{safe_proc}"\n'
-                f'        keystroke "{profile.focus_shortcut}" using command down\n'
-                f'    end tell\n'
-                f'end tell'
-            )
-            r = subprocess.run(
-                ["osascript", "-e", script], capture_output=True, timeout=3
-            )
-            if r.returncode == 0:
-                elapsed = int((_time.time() - _t0) * 1000)
-                _log(f"[PASTE] tier_used=2 reason=n/a elapsed_ms={elapsed}")
-                return PasteOutcome(
-                    ok=True, element=None, tier_used=2, elapsed_ms=elapsed,
-                )
-        except Exception as e:
-            _log(f"resolver: tier 2 exception: {e}")
+        elapsed = int((_time.time() - _t0) * 1000)
+        _log(
+            f"[PASTE] tier_used=2 (deferred to app_fast_paste) "
+            f"reason=n/a elapsed_ms={elapsed}"
+        )
+        return PasteOutcome(
+            ok=True, element=None, tier_used=2, elapsed_ms=elapsed,
+        )
 
     # Tier 3: fail-closed
     if profile and not profile.focus_shortcut:
