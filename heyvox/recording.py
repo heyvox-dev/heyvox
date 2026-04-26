@@ -604,6 +604,43 @@ class RecordingStateMachine:
             except Exception:
                 pass
 
+            # DEF-091: Strip wake-word repetitions from the trailing/leading
+            # edges of the transcription BEFORE running is_garbled. MLX
+            # frequently transcribes the user's stop wake word three or more
+            # times in a row at the end of the audio (each "Hey Vox" attempt
+            # becomes "Hey Wax. Hey Wax. Hey Wax. ..." in MLX output, plus
+            # temperature-fallback often duplicates). The repeated bigrams
+            # then trip is_garbled's tail-window or consecutive-duplicate
+            # check and the *entire transcription* is discarded — including
+            # the user's clean dictation prefix. Stripping first keeps the
+            # garbled-detector focused on real hallucination rather than
+            # legitimate stop-wake-word echoes the strip would have removed
+            # anyway. Save_fn_stop/save_tp_stop training tracking moves with
+            # the strip; the original strip block at the end of this method
+            # has been replaced with a no-op since `text` is already cleaned.
+            pre_strip_text = text
+            text = strip_wake_words(
+                text,
+                self.config.wake_words.start,
+                self.config.wake_words.stop,
+            )
+            _wake_word_stripped = text != pre_strip_text
+            if _wake_word_stripped:
+                self._log(
+                    f"Wake word strip: '{pre_strip_text[:80]}' -> '{text[:80]}'"
+                )
+                if self.training_collector and _training_chunks:
+                    self.training_collector.save_fn_stop(
+                        _training_chunks, _training_sr
+                    )
+            elif (
+                self.training_collector and _training_chunks
+                and text and text.strip()
+            ):
+                self.training_collector.save_tp_stop(
+                    _training_chunks, _training_sr
+                )
+
             # Quality filter: discard garbled/nonsensical STT output.
             # DEF-076 + DEF-081: surface the discard to the user with a HUD
             # event and point at the raw WAV so the transcription is
@@ -714,18 +751,12 @@ class RecordingStateMachine:
                 audio_cue("paused", cues_dir)
                 return
 
-            # Strip wake word phrases from transcription (start and end)
-            pre_strip = text
-            text = strip_wake_words(text, self.config.wake_words.start, self.config.wake_words.stop)
-            _wake_word_stripped = text != pre_strip
-            if _wake_word_stripped:
-                self._log(f"Wake word strip: '{pre_strip[:80]}' -> '{text[:80]}'")
-                # Training: STT found wake word in recording tail → model missed it (FN-stop)
-                if self.training_collector and _training_chunks:
-                    self.training_collector.save_fn_stop(_training_chunks, _training_sr)
-            elif self.training_collector and _training_chunks and text and text.strip():
-                # Clean transcription with no wake word remnants → confirmed TP-stop
-                self.training_collector.save_tp_stop(_training_chunks, _training_sr)
+            # DEF-091: wake-word strip moved upstream (right after the echo
+            # filter, before is_garbled). `pre_strip_text` and
+            # `_wake_word_stripped` are already populated. Keep the variable
+            # alias `pre_strip` for the debug-audio payload below so external
+            # log readers (heyvox log-health) keep parsing.
+            pre_strip = pre_strip_text
 
             # Final debug log entry with full pipeline result
             _save_debug_audio("_final", [], self.config.audio.sample_rate, {
