@@ -544,9 +544,21 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     chunk_size = config.audio.chunk_size
     silence_timeout = config.silence_timeout_secs
     silence_threshold = config.silence_threshold
-    # Override silence_threshold from device profile if available
-    if devices.active_profile and devices.active_profile.silence_threshold is not None:
+    # Override silence_threshold from device profile if available.
+    # DEF-097: also reject 0 as if it were None — a hardware-gated mic
+    # that calibrated at noise_floor=0 leaves a stale 0 in the profile,
+    # which would disable the VAD silent gate (and DEF-096 with it).
+    # Real speech is always > 1000, so any positive threshold is safer
+    # than 0; the global config default kicks in if the profile is bad.
+    if (
+        devices.active_profile
+        and devices.active_profile.silence_threshold is not None
+        and devices.active_profile.silence_threshold > 0
+    ):
         silence_threshold = devices.active_profile.silence_threshold
+    log(f"[mic-init] silence_threshold={silence_threshold} "
+        f"(profile={devices.active_profile.silence_threshold if devices.active_profile else None}, "
+        f"config={config.silence_threshold})")
     max_recording_secs = getattr(config, 'max_recording_secs', 30.0)
     start_word = config.wake_words.start
     stop_word = config.wake_words.stop
@@ -844,11 +856,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
                 if not devices.reinit(require_audio=True):
                     continue
-                # Update silence_threshold from new device profile after reinit
-                if devices.active_profile and devices.active_profile.silence_threshold is not None:
+                # Update silence_threshold from new device profile after reinit.
+                # DEF-097: reject 0 from profile (stale hardware-gated calibration).
+                if (
+                    devices.active_profile
+                    and devices.active_profile.silence_threshold is not None
+                    and devices.active_profile.silence_threshold > 0
+                ):
                     silence_threshold = devices.active_profile.silence_threshold
                 else:
                     silence_threshold = config.silence_threshold
+                log(f"[mic-reinit] silence_threshold={silence_threshold}")
                 # Trigger calibration if new device has no noise_floor data
                 if (devices.dev_name != _last_calibrated_device
                         and profile_manager
@@ -949,8 +967,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # Device hotplug -- delegated to DeviceManager
             devices.scan()
 
-            # After scan, update silence_threshold if device changed
-            if devices.active_profile and devices.active_profile.silence_threshold is not None:
+            # After scan, update silence_threshold if device changed.
+            # DEF-097: reject 0 from profile (stale hardware-gated calibration).
+            if (
+                devices.active_profile
+                and devices.active_profile.silence_threshold is not None
+                and devices.active_profile.silence_threshold > 0
+            ):
                 silence_threshold = devices.active_profile.silence_threshold
             else:
                 silence_threshold = config.silence_threshold
