@@ -398,3 +398,47 @@ def test_recording_send_local_has_defensive_outcome_guard():
         "W12: expected defensive gate (`outcome is not None` AND "
         "`outcome.ok`) somewhere in _send_local"
     )
+
+
+def test_recording_send_local_skips_verify_paste_on_auto_enter():
+    """DEF-090 regression: verify_paste must NOT run when the paste path
+    also fired Enter (auto-send).
+
+    The send key clears Conductor's chat input on a successful submit,
+    so the post-Enter AX value is empty / 1-char placeholder. verify_paste
+    correctly fails to match against the transcript and triggers a retry
+    Cmd+V into the just-cleared field — landing a duplicate, unsent copy
+    in the chat box. (Same hang signature as DEF-088 via show_failure_toast.)
+
+    Pin the auto-Enter skip at source level: the `run_verify` gate must
+    contain `combined_enter == 0` (or `not combined_enter`), and the gate
+    must guard a `verify_paste` call within ~25 lines after it. Robust
+    against re-formatting; fails if DEF-090 gets reverted.
+    """
+    from pathlib import Path
+    import re
+
+    src = Path("heyvox/recording.py").read_text()
+
+    skip_clause = re.compile(
+        r"(combined_enter\s*==\s*0|not\s+combined_enter\b)"
+    )
+    match = skip_clause.search(src)
+    assert match, (
+        "DEF-090 regression: expected `combined_enter == 0` (or "
+        "`not combined_enter`) somewhere in recording.py to gate "
+        "verify_paste away from the auto-Enter path. Removing this "
+        "gate re-introduces the duplicate Cmd+V into the just-cleared "
+        "chat input."
+    )
+
+    # The auto-Enter skip clause must guard a verify_paste call — pin
+    # the association so the clause cannot drift to an unrelated branch
+    # without the test catching it. Search ~2000 chars after the match
+    # (~50 lines) for the verify_paste call.
+    tail = src[match.end():match.end() + 2000]
+    assert "verify_paste" in tail, (
+        "DEF-090 regression: the `combined_enter == 0` clause should "
+        "guard a verify_paste call shortly below it. If verify_paste "
+        "moved elsewhere, re-anchor this test."
+    )
