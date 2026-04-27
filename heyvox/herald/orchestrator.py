@@ -699,8 +699,18 @@ def _play_wav(
     current_workspace: str,
     original_vol: float | None,
     cfg: OrchestratorConfig,
+    *,
+    skip_workspace_switch: bool = False,
 ) -> tuple[str, str, float | None, bool]:
     """Play a single WAV file, handling ducking, pausing, and workspace switching.
+
+    Args:
+        skip_workspace_switch: When True, play audio without firing
+            conductor-switch-workspace. Used by the hold-queue auto-drain
+            path so a delayed TTS does not yank the user's Conductor view
+            out of the workspace they're currently working in (DEF-094).
+            The .workspace sidecar is still consumed so the file is
+            cleaned up correctly.
 
     Returns:
         (new_last_msg_prefix, new_current_workspace, original_vol, was_interrupted)
@@ -732,6 +742,16 @@ def _play_wav(
                     _herald_log(
                         f"ORCH: skipping workspace switch to {ws!r} "
                         f"(HeyVox recording/injecting)",
+                        debug_log,
+                    )
+                elif skip_workspace_switch:
+                    # DEF-094: hold-queue auto-drain — user has moved on to
+                    # a different workspace; play the audio in their current
+                    # context without yanking Conductor away from where they
+                    # are now.
+                    _herald_log(
+                        f"ORCH: skipping workspace switch to {ws!r} "
+                        f"(hold-queue auto-drain, audio-only mode)",
                         debug_log,
                     )
                 elif _workspace_app_is_frontmost(cfg):
@@ -1086,17 +1106,23 @@ class HeraldOrchestrator:
                     held_wavs = sorted(cfg.hold_dir.glob("*.wav"))
                     if held_wavs and not _user_is_active(cfg):
                         _herald_log(
-                            f"ORCH: auto-draining held queue ({len(held_wavs)} pending)",
+                            f"ORCH: auto-draining held queue ({len(held_wavs)} pending, audio-only)",
                             debug_log,
                         )
-                        # Play all consecutive parts of the same message back-to-back
+                        # DEF-094: audio-only auto-drain. The user has moved
+                        # to a different workspace since these messages were
+                        # held; play their audio in the current context
+                        # without yanking Conductor's view away from the
+                        # workspace they are working in now. The .workspace
+                        # sidecar is still consumed for cleanup.
                         while held_wavs:
                             next_held = held_wavs[0]
                             if not next_held.exists():
                                 held_wavs = held_wavs[1:]
                                 continue
                             last_msg_prefix, current_workspace, original_vol, interrupted = _play_wav(
-                                next_held, last_msg_prefix, current_workspace, original_vol, cfg
+                                next_held, last_msg_prefix, current_workspace, original_vol, cfg,
+                                skip_workspace_switch=True,
                             )
                             if interrupted and last_msg_prefix:
                                 # Purge remaining parts of this message from hold too
