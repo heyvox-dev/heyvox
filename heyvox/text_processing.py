@@ -76,11 +76,16 @@ def is_garbled(
     Args:
         text: The STT transcription.
         stt_secs: Optional STT inference elapsed time (seconds). Combined with
-            audio_secs, an abnormally high ratio is near-certain evidence that
-            Whisper's temperature-fallback loop fired — the output is
-            hallucinated even when repetition signals slip past text checks.
-            Guarded by audio_secs ≥ 5.0 to avoid false-positives on cold-load
-            transcriptions of short recordings.
+            audio_secs, a *catastrophic* ratio (> 0.6) on ≥ 5 s audio still
+            forces discard as a belt-and-suspenders guard for hallucination
+            shapes the text checks don't recognise (cf. DEF-075 with ratio
+            0.66). Moderate ratios (0.3–0.6) are NOT a discard signal on their
+            own — DEF-081's tighter compression/logprob thresholds intentionally
+            invoke temperature fallback on borderline audio, which costs time
+            but produces clean output. Discarding clean output because
+            inference was slow throws away exactly the cases DEF-081 was
+            designed to rescue (cf. DEF-093). Text-level checks above remain
+            authoritative for most hallucination shapes.
         audio_secs: Optional audio duration (seconds). See stt_secs.
     """
     cleaned = text.strip()
@@ -161,15 +166,30 @@ def is_garbled(
         if re.match(pattern, cleaned):
             return True
 
-    # DEF-083: Abnormally slow STT on non-trivial audio. MLX whisper-small on
-    # Apple Silicon runs ~10-25x realtime when warm, so a ratio > 0.3 over a
-    # ≥ 5 s recording (excluding cold-load territory) means the temperature
-    # fallback looped through multiple decoding attempts — near-certain
-    # hallucination even when the text-level checks above didn't trip.
+    # DEF-083 / DEF-093: Catastrophic STT ratio guard. MLX whisper-small on
+    # Apple Silicon runs ~10-25x realtime when warm. A ratio > 0.6 on ≥ 5 s
+    # audio means temperature fallback exhausted multiple passes without
+    # converging — near-certain hallucination even when text-level checks
+    # didn't trip (cf. DEF-075: 13 s audio → 8.6 s inference → "doc doc doc").
+    #
+    # Threshold deliberately raised from 0.3 (DEF-083 original) to 0.6
+    # (DEF-093). The 0.3 floor was discarding clean transcriptions whenever
+    # DEF-081's tighter compression/logprob thresholds invoked temperature
+    # fallback on borderline audio (low SNR, complex compounds, GPU pressure
+    # from parallel Kokoro inference). The fallback there is success — the
+    # final pass converged on clean output — but the wall-clock cost falsely
+    # tripped DEF-083's hallucination heuristic. Examples observed:
+    #   - 2026-04-27 07:28: 15.2 s audio → 5.3 s STT (ratio 0.35) → clean
+    #     German sentence DISCARDED.
+    #   - Multiple other 3-5 s spikes throughout the morning that escaped only
+    #     because audio_secs was < 5 s or ratio was just under threshold.
+    # Text-level checks above remain authoritative for the dominant hallucination
+    # shapes (repetition, intra-token, low alpha, known patterns); the catastrophic
+    # ratio is kept as a belt-and-suspenders guard for novel shapes.
     if (
         stt_secs is not None and audio_secs is not None
         and stt_secs >= 5.0 and audio_secs >= 5.0
-        and stt_secs / audio_secs > 0.3
+        and stt_secs / audio_secs > 0.6
     ):
         return True
 
