@@ -658,6 +658,25 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _VAD_SILENT_GRACE = 0.5
     _last_nonsilent_time: float = 0.0
 
+    # DEF-096: pre-silence-aware stop-wake adjustments. The wake-word model's
+    # feature window fills with prior speech during recording, suppressing
+    # stop-word detection when "Hey Vox" comes mid-flow (user reported
+    # scores 0.5–0.6 vs 0.99 for clean isolated wake words). Three levers:
+    #   A) Reset the model on the speech→silence transition so the
+    #      post-pause wake word hits a near-blank feature window.
+    #   B) During recording, if VAD reported silence within
+    #      _PRE_SILENCE_DISCOUNT_WINDOW seconds, apply
+    #      _PRE_SILENCE_THRESHOLD_FACTOR to the threshold — pause-then-
+    #      Hey-Vox is the natural stop pattern; mid-sentence phoneme
+    #      bursts (DEF-043) have no preceding silence so they keep the
+    #      strict threshold and DEF-067's protection still applies.
+    #   C) Periodic reset interval lowered as fallback for continuous
+    #      speech with no natural pauses.
+    _was_vad_silent: bool = False
+    _last_silent_frame_time: float = 0.0
+    _PRE_SILENCE_DISCOUNT_WINDOW = 0.5  # seconds since last silent frame
+    _PRE_SILENCE_THRESHOLD_FACTOR = 0.85  # 15 % discount post-pause
+
     # User-effort metric: timestamps of every above-threshold wake attempt while
     # not recording. When recording finally starts, if the list has > 1 entry
     # within the last _USER_EFFORT_WINDOW seconds, the user had to repeat the
@@ -1111,8 +1130,27 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     _raw_vad_silent
                     and (time.time() - _last_nonsilent_time) > _VAD_SILENT_GRACE
                 )
+                # DEF-096-A: reset model on the speech→silence transition.
+                # When the user pauses (commonly right before saying "Hey
+                # Vox" to stop), wipe accumulated speech features so the
+                # upcoming wake word lands on a near-blank window. The
+                # transition fires at most once per silence period so the
+                # model has time to refill features before the wake word
+                # arrives.
+                if _vad_silent and not _was_vad_silent:
+                    model.reset()
+                    _last_model_reset = time.time()
+                _was_vad_silent = _vad_silent
+                # DEF-096-B: track most recent silent-frame timestamp so the
+                # threshold-discount block below can recognise the
+                # pause-then-Hey-Vox pattern.
+                if _vad_silent:
+                    _last_silent_frame_time = time.time()
             else:
                 _vad_silent = _raw_vad_silent
+                # Reset transition tracking when we leave recording so the
+                # next recording's first silent frame fires the reset.
+                _was_vad_silent = False
             if not _is_rec and _vad_silent:
                 # Clear consecutive-hits so a single pre-silence high score doesn't
                 # combine with a post-silence high score to cross the threshold.
@@ -1125,7 +1163,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # features so the stop wake word can be detected even after long
             # continuous speech (without this, rapid "Hey Vox" after talking
             # scores below threshold because the feature window is polluted).
-            _MODEL_RESET_INTERVAL = 2.5  # seconds
+            # DEF-096-C: 2.5 s → 1.0 s. The DEF-096-A silence-transition
+            # reset handles the natural pause-then-stop pattern; the
+            # periodic reset is now strictly the fallback for continuous
+            # speech, where a faster cadence keeps the feature window
+            # cleaner without leaning on a user pause.
+            _MODEL_RESET_INTERVAL = 1.0  # seconds
             if _is_rec and time.time() - _last_model_reset > _MODEL_RESET_INTERVAL:
                 model.reset()
                 _last_model_reset = time.time()
@@ -1150,6 +1193,24 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             _model_thresholds = config.wake_words.model_thresholds
 
+            # DEF-096-B: pre-silence-aware stop-wake threshold discount.
+            # When the user paused recently (the natural "...sentence end.
+            # [pause] Hey Vox" pattern), apply a 15 % discount so the
+            # wake word triggers reliably even when the model's feature
+            # window hasn't fully refilled. Mid-sentence phoneme bursts
+            # (DEF-043) have NO preceding silence, so they keep the
+            # strict threshold and DEF-067's protection still applies.
+            _now_for_pre_silence = time.time()
+            _recent_silence = (
+                _is_rec
+                and _last_silent_frame_time > 0.0
+                and (_now_for_pre_silence - _last_silent_frame_time)
+                    < _PRE_SILENCE_DISCOUNT_WINDOW
+            )
+            _pre_silence_factor = (
+                _PRE_SILENCE_THRESHOLD_FACTOR if _recent_silence else 1.0
+            )
+
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
                 base_thr = _model_thresholds.get(ww_name, threshold)
@@ -1159,7 +1220,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # Stop-wake threshold matches start threshold (no 0.85 discount):
                 # the old discount made stop-word easier to detect but caused
                 # mid-sentence phonemes to falsely stop recording (DEF-043).
-                active_threshold = min(0.95, base_thr * _speaker_mult)
+                # DEF-096-B: re-introduce a 0.85 stop-discount but ONLY when
+                # `_pre_silence_factor` is active (recent VAD silence). This
+                # preserves DEF-043's mid-flow protection while making
+                # post-pause stop-wake reliable.
+                active_threshold = min(
+                    0.95, base_thr * _speaker_mult * _pre_silence_factor
+                )
                 active_cooldown = stop_cooldown if _is_rec else cooldown
                 # DEF-067: stop-wake requires more frames than start-wake to
                 # resist mid-sentence false stops on phoneme runs. User-facing
