@@ -142,14 +142,50 @@ class TestIsGarbled:
         )
         assert is_garbled(text) is True
 
-    def test_garbled_slow_stt_on_non_trivial_audio(self):
-        """stt_secs/audio_secs > 0.3 over ≥ 5s both-ways signals temperature-
-        fallback ran multiple decoding passes — hallucination."""
-        # A plausible-looking sentence that doesn't trip text checks alone,
-        # but with abnormally slow STT timing is flagged as garbled.
+    def test_garbled_catastrophic_stt_ratio(self):
+        """DEF-093: catastrophic ratio (> 0.6) on ≥ 5 s audio remains a
+        discard signal even when text passes all checks — defends against
+        the DEF-075 shape (13 s audio → 8.6 s inference → 'doc doc doc')."""
         text = "please fix the authentication bug in the login form today"
         assert is_garbled(text) is False  # text alone is clean
-        assert is_garbled(text, stt_secs=10.0, audio_secs=26.0) is True
+        assert is_garbled(text, stt_secs=20.0, audio_secs=30.0) is True
+
+    def test_not_garbled_moderate_slow_stt_clean_text_def093(self):
+        """DEF-093: moderate ratio (0.3–0.6) on clean text is NOT discarded.
+        DEF-081's tightened compression/logprob thresholds intentionally
+        invoke temperature fallback on borderline audio; the fallback's
+        wall-clock cost is the price of clean output, not a hallucination
+        signal. Discarding clean text here was the regression DEF-093 fixes."""
+        text = "please fix the authentication bug in the login form today"
+        # Old DEF-083 threshold (0.3) would have flagged this; DEF-093 raises
+        # the bar to 0.6 because text-level signals are authoritative.
+        assert is_garbled(text, stt_secs=10.0, audio_secs=26.0) is False
+        # Even at a ratio of 0.5 — squarely in the temperature-fallback
+        # zone — clean text passes.
+        assert is_garbled(text, stt_secs=10.0, audio_secs=20.0) is False
+
+    def test_def093_exact_clean_german_dictation_case(self):
+        """DEF-093: regression for the verbatim 2026-04-27 07:28:03 incident.
+        15.2 s leise (-38.9 dBFS) German dictation → MLX temperature fallback
+        fired (5.33 s inference, ratio 0.385) → output was a perfectly
+        coherent German sentence → DEF-083's old 0.3 threshold discarded it,
+        losing the user's input. Must not be flagged as garbled."""
+        text = (
+            "Gerade im Personal-Titul-Tracker hat das Senden wieder nicht "
+            "funktioniert und muss sich den Vox bis neue Kontakte starten "
+            "oder gibt es noch ein Problem, kannst du im Blog von Jetzt "
+            "geht es aber mit de"
+        )
+        assert is_garbled(text) is False  # text alone is clean
+        assert is_garbled(text, stt_secs=5.33, audio_secs=13.84) is False
+
+    def test_garbled_slow_stt_with_text_signal_still_caught(self):
+        """DEF-093 sanity: slow STT *with* a tripping text signal is still
+        garbled — the text-level branches return True before we reach the
+        timing check, so behaviour for the genuine-hallucination case is
+        unchanged."""
+        text = "doc doc doc doc doc doc doc"  # run-length ≥ 4
+        assert is_garbled(text, stt_secs=8.6, audio_secs=13.0) is True
 
     def test_not_garbled_cold_load_short_audio(self):
         """Model cold-load can make stt_secs large for a short recording,
@@ -159,7 +195,7 @@ class TestIsGarbled:
         assert is_garbled(text, stt_secs=8.0, audio_secs=2.0) is False
 
     def test_not_garbled_warm_fast_stt(self):
-        """Normal warm MLX transcription: ratio well below 0.3 — must pass."""
+        """Normal warm MLX transcription: ratio well below 0.6 — must pass."""
         text = "please check the deployment status"
         assert is_garbled(text, stt_secs=0.5, audio_secs=5.0) is False
 
