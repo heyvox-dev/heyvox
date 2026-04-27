@@ -655,20 +655,60 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
     if lock.conductor_workspace_id and profile is not None:
         switch_cmd = getattr(profile, "workspace_switch_cmd", "")
         if switch_cmd:
-            argv = [
-                os.path.expanduser(switch_cmd),
-                "--id", lock.conductor_workspace_id,
-            ]
-            if lock.conductor_session_id:
-                # Session flag appended unconditionally — script UPDATE is idempotent.
-                argv.extend(["--session", lock.conductor_session_id])
-            argv.append("--force")
+            # DEF-095: Skip the conductor-switch-workspace call entirely when
+            # Conductor is already showing the target workspace. The bash
+            # script's `--force` flag bypasses its idle-gate, so it always
+            # dispatches a Hammerspoon left-click on the workspace sidebar
+            # entry — even when that entry is already selected. The click
+            # races against the chat input's focus state and absorbs the
+            # auto-Enter that app_fast_paste fires immediately after, leaving
+            # the dictation in the input field unsent. Detecting "already on
+            # target" via the AX walk + DB lookup costs ~50–150 ms and
+            # replaces a ~500–1000 ms script invocation, so the skip path
+            # is also faster.
+            already_on_target = False
             try:
-                subprocess.run(argv, capture_output=True, timeout=3)
-                settle = getattr(profile, "settle_delay", 0.3)
-                _time.sleep(settle)
+                current_branch = _detect_conductor_branch(lock.app_pid)
+                if current_branch:
+                    workspace_db = getattr(profile, "workspace_db", "")
+                    db_path = (
+                        os.path.expanduser(workspace_db) if workspace_db
+                        else None
+                    )
+                    current_identity = get_active_workspace_and_session(
+                        branch=current_branch,
+                        db_path=db_path,
+                    )
+                    if (
+                        current_identity is not None
+                        and current_identity.workspace_id
+                        == lock.conductor_workspace_id
+                    ):
+                        already_on_target = True
+                        _log(
+                            f"yank: Conductor already on target workspace "
+                            f"(branch={current_branch!r}, "
+                            f"ws={lock.conductor_workspace_id!r}) — "
+                            f"skipping switch to avoid focus race"
+                        )
             except Exception as e:
-                _log(f"yank: conductor-switch-workspace failed: {e}")
+                _log(f"yank: current-workspace probe failed: {e}")
+
+            if not already_on_target:
+                argv = [
+                    os.path.expanduser(switch_cmd),
+                    "--id", lock.conductor_workspace_id,
+                ]
+                if lock.conductor_session_id:
+                    # Session flag appended unconditionally — script UPDATE is idempotent.
+                    argv.extend(["--session", lock.conductor_session_id])
+                argv.append("--force")
+                try:
+                    subprocess.run(argv, capture_output=True, timeout=3)
+                    settle = getattr(profile, "settle_delay", 0.3)
+                    _time.sleep(settle)
+                except Exception as e:
+                    _log(f"yank: conductor-switch-workspace failed: {e}")
         else:
             _log(
                 f"yank: conductor_workspace_id set but profile lacks "
