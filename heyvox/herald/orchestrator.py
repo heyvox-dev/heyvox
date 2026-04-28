@@ -96,6 +96,11 @@ class OrchestratorConfig:
     max_queued: int = 10   # drop oldest messages when queue exceeds this
     max_held: int = 5
 
+    # Cross-workspace hold queue (DEF-100). When False (default), every TTS
+    # plays immediately regardless of which workspace it came from. When True,
+    # TTS from non-current workspace is parked in hold/ until user goes idle.
+    hold_queue_enabled: bool = False
+
     # Media pause
     media_pause: bool = True
     resume_delay: float = 1.0
@@ -1055,7 +1060,8 @@ class HeraldOrchestrator:
                             pass
 
                     if (
-                        next_workspace
+                        cfg.hold_queue_enabled
+                        and next_workspace
                         and current_workspace
                         and next_workspace != current_workspace
                         and _user_is_active(cfg)

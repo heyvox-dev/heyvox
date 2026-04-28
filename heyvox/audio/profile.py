@@ -63,6 +63,7 @@ class MicProfileEntry:
     gain: float | None = None
     voice_isolation_mode: bool | None = None
     echo_safe: bool | None = None
+    min_audio_dbfs: float | None = None  # DEF-101: per-mic energy-gate floor
 
 
 class MicProfileManager:
@@ -195,6 +196,8 @@ class MicProfileManager:
                 entry.voice_isolation_mode = config_entry.voice_isolation_mode
             if config_entry.echo_safe is not None:
                 entry.echo_safe = config_entry.echo_safe
+            if config_entry.min_audio_dbfs is not None:
+                entry.min_audio_dbfs = config_entry.min_audio_dbfs
 
         return entry
 

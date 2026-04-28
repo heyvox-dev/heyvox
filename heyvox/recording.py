@@ -24,7 +24,37 @@ if TYPE_CHECKING:
 # threshold are treated as silence — skips Whisper to avoid hallucinations.
 # Normal speech is -30 to -42 dBFS. False triggers on background noise are
 # typically -48 to -55 dBFS. Set to -48 to catch those while allowing quiet speech.
+#
+# DEF-101: per-mic override resolved by `_resolve_min_audio_dbfs()` below.
+# This is the global fallback when no per-mic profile applies.
 _MIN_AUDIO_DBFS = -48.0
+
+
+def _resolve_min_audio_dbfs(config) -> float:
+    """Return the energy-gate dBFS floor for the currently active mic.
+
+    Resolution order (DEF-101):
+      1. config.mic_profiles[<partial match for active mic>].min_audio_dbfs
+      2. Global _MIN_AUDIO_DBFS fallback
+
+    Active mic is read from ACTIVE_MIC_FILE (written by main.py on device
+    init/switch). Match against config keys is partial + case-insensitive,
+    same algorithm as MicProfileManager.get_profile().
+    """
+    try:
+        from heyvox.constants import ACTIVE_MIC_FILE
+        with open(ACTIVE_MIC_FILE) as _f:
+            mic_name = _f.read().strip().split("\n")[0].lower()
+    except (OSError, AttributeError):
+        return _MIN_AUDIO_DBFS
+    profiles = getattr(config, "mic_profiles", None) or {}
+    for key, profile in profiles.items():
+        if key.lower() in mic_name:
+            override = getattr(profile, "min_audio_dbfs", None)
+            if override is not None:
+                return float(override)
+            break
+    return _MIN_AUDIO_DBFS
 
 
 def _audio_rms(chunks: list, sample_rate: int) -> float:
@@ -526,10 +556,31 @@ class RecordingStateMachine:
         try:
             # Energy gate: skip STT on silent recordings to avoid Whisper hallucinations.
             # Uses raw_rms_db computed BEFORE wake word trim (wake word is the loudest part).
-            if raw_rms_db < _MIN_AUDIO_DBFS:
+            # DEF-101: per-mic threshold from config.mic_profiles[<mic>].min_audio_dbfs.
+            min_dbfs = _resolve_min_audio_dbfs(self.config)
+            if raw_rms_db < min_dbfs:
                 self._log(
-                    f"Recording too quiet ({raw_rms_db:.1f} dBFS < {_MIN_AUDIO_DBFS} dBFS), skipping STT"
+                    f"Recording too quiet ({raw_rms_db:.1f} dBFS < {min_dbfs} dBFS), skipping STT"
                 )
+                # DEF-101: surface silent-skip to user via mic-warn file.
+                # HUD overlay reads this on every menu bar refresh and prepends a
+                # ⚠ banner to the bar title until auto-expiry (MIC_WARN_TTL_SECS).
+                try:
+                    from heyvox.constants import MIC_WARN_FILE
+                    _mic_name = ""
+                    try:
+                        from heyvox.constants import ACTIVE_MIC_FILE
+                        _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
+                    except OSError:
+                        pass
+                    _warn = (
+                        f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
+                        + (f" — {_mic_name}" if _mic_name else "")
+                    )
+                    with open(MIC_WARN_FILE, "w") as _f:
+                        _f.write(_warn)
+                except OSError:
+                    pass
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
                     if self.training_collector.reclassify_tp_start_as_fp(
@@ -545,6 +596,8 @@ class RecordingStateMachine:
                     )
                 cues_dir = get_cues_dir(self.config.cues_dir)
                 audio_cue("paused", cues_dir)
+                # Reset HUD to idle so the menu bar refresh picks up the warn file
+                self._hud_send({"type": "state", "state": "idle"})
                 return
 
             _t_stt_start = time.time()

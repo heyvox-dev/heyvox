@@ -132,6 +132,13 @@ HUD_SOCKET_PATH = f"{_TMP}/heyvox-hud.sock"
 # Written/removed by HUD menu toggle or CLI.
 MIC_MUTE_FLAG = f"{_TMP}/heyvox-mic-mute"
 
+# Mic warning file (DEF-101) — written by recording.py when energy gate
+# rejects audio as too quiet. HUD overlay reads this on every menu bar
+# refresh and surfaces the warning until auto-expiry.
+# Format: single line plain text. mtime drives expiry.
+MIC_WARN_FILE = f"{_TMP}/heyvox-mic-warn"
+MIC_WARN_TTL_SECS = 60
+
 # Active mic name file — written by main.py on startup and device switch.
 # Read by HUD overlay to display the current mic in the menu bar.
 ACTIVE_MIC_FILE = f"{_TMP}/heyvox-active-mic"

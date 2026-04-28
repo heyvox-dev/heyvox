@@ -330,9 +330,46 @@ def _apply_state(
             if crashed:
                 icon = "\u26a0\ufe0f"
                 label = f" {'+'.join(crashed)} crashed"
+        # DEF-100: held TTS count badge \u2014 surfaces hold-queue state.
+        # Stays at 0 with default config (hold_queue.enabled=false), but if
+        # the user opts back into hold-queue behaviour, this makes it visible.
+        _held_count = 0
+        try:
+            from pathlib import Path as _Path
+            from heyvox.constants import HERALD_HOLD_DIR
+            _held_count = sum(1 for _ in _Path(HERALD_HOLD_DIR).glob("*.wav"))
+        except Exception:
+            pass
+        # DEF-101: mic-warn banner \u2014 read warning text from MIC_WARN_FILE if
+        # mtime within TTL. Auto-expires (file kept for forensics, but display
+        # only while fresh). Cleared on state-change refresh once stale.
+        _mic_warn = ""
+        try:
+            from heyvox.constants import MIC_WARN_FILE, MIC_WARN_TTL_SECS
+            import time as _time
+            if os.path.exists(MIC_WARN_FILE):
+                _age = _time.time() - os.path.getmtime(MIC_WARN_FILE)
+                if _age < MIC_WARN_TTL_SECS:
+                    with open(MIC_WARN_FILE) as _wf:
+                        _mic_warn = _wf.read().strip()[:60]
+                else:
+                    # Stale: drop it so other overlay redraws don't keep checking.
+                    try:
+                        os.remove(MIC_WARN_FILE)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
         # Build menu bar title with SF Symbol-style mute indicators
         _bar_title = f"{icon}{label}"
-        if state_str == "idle" and not crashed:
+        if _held_count > 0:
+            _bar_title += f"  \U0001f4e5{_held_count}"
+        if _mic_warn:
+            # Override icon with a warning marker so it's loud
+            _bar_title = f"\u26a0\ufe0f {_mic_warn}"
+        # When a mic warning is fresh, force text-mode title (skip SF symbol)
+        # so the user sees the warning, not just an icon.
+        if state_str == "idle" and not crashed and not _mic_warn:
             from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE
             _mic_muted = os.path.exists(_MIC_MUTE)
             _spk_muted = False
@@ -355,7 +392,12 @@ def _apply_state(
                 ])
                 _mic_img = _mic_img.imageWithSymbolConfiguration_(_cfg)
             btn.setImage_(_mic_img)
-            btn.setTitle_(" \U0001f507" if _spk_muted else "")
+            _idle_suffix = ""
+            if _held_count > 0:
+                _idle_suffix += f"  \U0001f4e5{_held_count}"
+            if _spk_muted:
+                _idle_suffix += " \U0001f507"
+            btn.setTitle_(_idle_suffix)
         else:
             # Non-idle states or crashed: use emoji text, clear image
             status_item.button().setImage_(None)
@@ -838,6 +880,20 @@ def _make_menu_action_class():
                 subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
+
+        def drainHeldQueue_(self, sender):
+            """DEF-100: drain one held TTS message from the cross-workspace hold queue.
+
+            Touches the orchestrator's play-next flag so the next held WAV plays
+            regardless of workspace mismatch. Useful when running parallel
+            Conductor sessions where TTS from background workspaces gets parked.
+            """
+            from pathlib import Path
+            from heyvox.constants import HERALD_PLAY_NEXT
+            try:
+                Path(HERALD_PLAY_NEXT).touch()
+            except OSError:
+                pass
 
     return _MenuActionHandler
 
@@ -1429,6 +1485,16 @@ def _build_transcript_menu(handler):
     log_item.setEnabled_(True)
     _styled(log_item)
     settings_sub.addItem_(log_item)
+
+    # DEF-100: drain held TTS messages from cross-workspace hold queue.
+    # One tap drains one held WAV regardless of which workspace it belongs to.
+    drain_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Drain held messages", "drainHeldQueue:", "",
+    )
+    drain_item.setTarget_(handler)
+    drain_item.setEnabled_(True)
+    _styled(drain_item)
+    settings_sub.addItem_(drain_item)
 
     settings_parent.setSubmenu_(settings_sub)
     menu.addItem_(settings_parent)
