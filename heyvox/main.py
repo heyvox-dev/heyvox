@@ -645,8 +645,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Miss-frames now DECAY the counter by _STOP_HIT_DECAY instead of zeroing
     # it (see line ~1228), so 3 strong hits with one brief sag still fire.
     # Start-wake keeps the hard reset (idle mic noise should not accumulate).
+    # DEF-099 (2026-04-28): STOP back to 2 frames (160 ms). Evidence: user
+    # underhit case at 15:37:22 fired ONE frame at score 0.826 then user
+    # gave up before 3-frame accumulation completed. With frames=2, single
+    # hit at 0.826 + one decay-tolerant follow-up triggers stop reliably.
+    # Regression risk: DEF-067's mid-sentence phantom-phoneme false stops
+    # (scores 0.997+) can re-emerge in continuous speech without prior
+    # pause (DEF-096-B's threshold discount only applies post-pause).
+    # ROLLBACK: if "I was cut off mid-sentence" reports return, revert to 3
+    # and pursue DEF-099 follow-on (Whisper-fallback) instead.
     _CONSECUTIVE_FRAMES_REQUIRED_START = 2
-    _CONSECUTIVE_FRAMES_REQUIRED_STOP = 3
+    _CONSECUTIVE_FRAMES_REQUIRED_STOP = 2
     # DEF-086: on a miss frame during recording, subtract this many from the
     # stop-hit accumulator instead of fully resetting. 1 tolerates exactly
     # one transient dip in a 3-hit burst — enough for real "Hey Vox" stops
