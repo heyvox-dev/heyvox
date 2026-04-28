@@ -192,6 +192,23 @@ class TTSConfig(BaseModel):
         return v
 
 
+class HoldQueueConfig(BaseModel):
+    """Cross-workspace TTS hold-queue behaviour (DEF-100).
+
+    The Herald orchestrator originally moved TTS WAVs from inactive workspaces
+    to a hold dir until the user went idle, on the theory that a user focused
+    on workspace A doesn't want to hear a TTS response from workspace B.
+
+    In practice — especially with parallel Conductor sessions — this silently
+    swallows most TTS messages with no visible feedback. Default is now
+    disabled; users who want the original behaviour can opt in.
+    """
+    # When False (default), every TTS plays immediately regardless of which
+    # workspace it came from. When True, retain the original hold-queue
+    # behaviour (TTS from non-current workspace held until user is idle).
+    enabled: bool = False
+
+
 class AppProfileConfig(BaseModel):
     """Per-application behavior profile for text injection.
 
@@ -406,6 +423,11 @@ class MicProfileEntryConfig(BaseModel):
     chunk_size: int | None = None
     gain: float | None = None
     voice_isolation_mode: bool | None = None
+    # DEF-101: per-mic minimum dBFS for the energy gate that rejects "too
+    # quiet" recordings. Hardcoded global default is -48 in recording.py;
+    # BT headsets / USB-C dongles / internal mics differ widely. Override
+    # here to make the gate fit the device's actual noise floor.
+    min_audio_dbfs: float | None = None
     echo_safe: bool | None = None
 
     model_config = ConfigDict(extra="ignore")
@@ -445,6 +467,7 @@ class HeyvoxConfig(BaseModel):
 
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
+    hold_queue: HoldQueueConfig = HoldQueueConfig()
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()

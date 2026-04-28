@@ -46,6 +46,7 @@ def start_orchestrator() -> None:
 
     ws_switch_cmd = ""
     ws_app_name = ""
+    hold_queue_enabled = False
     try:
         from heyvox.config import load_config
         cfg = load_config()
@@ -54,11 +55,13 @@ def start_orchestrator() -> None:
                 ws_switch_cmd = profile.workspace_switch_cmd
                 ws_app_name = profile.name
                 break
+        hold_queue_enabled = bool(cfg.hold_queue.enabled)
     except Exception:
         pass
     orch_cfg = OrchestratorConfig(
         workspace_switch_cmd=ws_switch_cmd,
         workspace_app_name=ws_app_name,
+        hold_queue_enabled=hold_queue_enabled,
     )
     orch = HeraldOrchestrator(config=orch_cfg)
     orch.run()
