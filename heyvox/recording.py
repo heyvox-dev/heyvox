@@ -110,21 +110,38 @@ def _save_debug_audio(
         return None
 
 
-def _release_recording_guard() -> None:
+def _release_recording_guard(flag_delay: float = 0.0) -> None:
     """Release the recording guard — both in-process event and cross-process file flag.
 
     Called after STT->paste completes (or on early exit) so the TTS hook
     knows it's safe to speak again.
+
+    flag_delay: if > 0, defer the cross-process RECORDING_FLAG removal by this
+    many seconds in a daemon thread. The in-process TTS-echo flag and the HUD
+    state are still cleared synchronously. Used after auto-Enter paste so a
+    Herald-driven workspace switch can't race Conductor's async submit handler
+    and steal focus mid-submit (DEF-070-style intra-Conductor focus steal).
     """
     try:
         from heyvox.audio.tts import set_recording as _tts_set_rec
         _tts_set_rec(False)
     except ImportError:
         pass
-    try:
-        os.remove(RECORDING_FLAG)
-    except FileNotFoundError:
-        pass
+
+    def _remove_flag() -> None:
+        try:
+            os.remove(RECORDING_FLAG)
+        except FileNotFoundError:
+            pass
+
+    if flag_delay > 0:
+        def _delayed() -> None:
+            time.sleep(flag_delay)
+            _remove_flag()
+        threading.Thread(target=_delayed, daemon=True).start()
+    else:
+        _remove_flag()
+
     try:
         from heyvox.ipc import update_state
         update_state({"recording": False})
@@ -1013,7 +1030,17 @@ class RecordingStateMachine:
         except Exception as e:
             self._log(f"ERROR in send phase: {e}")
         finally:
-            _release_recording_guard()
+            # Hold RECORDING_FLAG ~2s past Sent! when auto-Enter was used so
+            # Herald's workspace-switch can't race Conductor's async submit
+            # handler. paste_ok and combined_enter are initialised at the top
+            # of the try-block, so they're safe to read here even on early
+            # exception paths. (Hybrid option C; partner change is --force
+            # removal + 2s idle gate in heyvox/herald/orchestrator.py.)
+            try:
+                _post_send_grace = 2.0 if (paste_ok and combined_enter > 0) else 0.0
+            except NameError:
+                _post_send_grace = 0.0
+            _release_recording_guard(flag_delay=_post_send_grace)
             with self.ctx.lock:
                 self.ctx.busy = False
             # DEF-084: Clear cancel_transcription unconditionally at STT-path

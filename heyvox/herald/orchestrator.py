@@ -366,11 +366,14 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
         else:
             return
     try:
-        # --force bypasses the switch script's idle gate (skips when user is
-        # actively typing). When TTS plays, we assume the user is listening
-        # rather than typing, so the idle guard produced false-skips.
+        # No --force: bash idle gate (now lowered to 2s via
+        # /tmp/herald-switch-idle-threshold) must be honoured. If the user
+        # is actively typing/clicking, we skip the switch — same intent as
+        # the original gate, paired with the post-paste RECORDING_FLAG
+        # grace window in recording.py to cover the auto-Enter race
+        # (DEF-070-style intra-Conductor focus steal after Sent!).
         r = subprocess.run(
-            [switch_cmd, workspace, "--force"],
+            [switch_cmd, workspace],
             capture_output=True, text=True, timeout=5.0,
         )
         _herald_log(
@@ -1226,6 +1229,14 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+
+    # Lower the bash switch script's idle threshold to 2s so brief pauses
+    # don't block legitimate TTS-time switches, while real typing/clicking
+    # still gates the switch. Pairs with --force removal in _switch_workspace.
+    try:
+        Path("/tmp/herald-switch-idle-threshold").write_text("2\n")
+    except OSError:
+        pass
 
     # Load app profile config for workspace switching
     ws_switch_cmd = ""
