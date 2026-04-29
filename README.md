@@ -197,6 +197,23 @@ HeyVox works with any app that supports MCP (Model Context Protocol):
 **Voice OUT via MCP** — the agent calls `voice_speak()` to talk back.
 **Voice OUT via Herald** — Claude Code hooks automatically speak `<tts>` blocks in responses.
 
+## Pairs Well With Visual MCPs
+
+HeyVox is at its best when combined with **external MCP servers that emit visual artifacts**. Voice keeps the discussion flowing; visuals anchor it — together they make architecture conversations dramatically easier to follow.
+
+**Example: external Mermaid MCP**
+
+Pair HeyVox with a Mermaid MCP server (any MCP that renders Mermaid diagrams to images or SVG) and your agent gains a synchronized visual side-channel:
+
+1. You discuss a design change out loud — wake word → STT → agent receives the question
+2. Your agent narrates the answer via Herald TTS, so your eyes stay on the diagram
+3. In parallel, the agent calls the Mermaid MCP to regenerate the diagram with the proposed change
+4. You see the delta at a glance — boxes added/removed, edges rerouted — instead of holding every structural change in your head while listening
+
+This pattern generalizes to any external MCP that returns images, SVGs, or diagrams (PlantUML, Excalidraw, mind-map tools, even slide generators). HeyVox owns the conversation channel; the visual MCP owns the artifact. They don't need to know about each other — your AI agent orchestrates both.
+
+> **Why it feels good**: voice-only design reasoning forces you to remember every change as you hear it. Visual-only design reasoning makes you keep typing to drive updates. With both, you can talk *and* look — and a 10-minute design discussion finishes with an up-to-date diagram already in front of you.
+
 ## Architecture
 
 ```
