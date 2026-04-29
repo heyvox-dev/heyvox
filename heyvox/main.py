@@ -10,6 +10,7 @@ Entry point: heyvox.cli calls run() which calls main().
 Requirement: CONF-01, DECP-01 through DECP-06
 """
 
+import collections
 import os
 import sys
 import time
@@ -662,6 +663,25 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # while still rejecting isolated phoneme flares (which fire once and
     # decay back to 0 before the next flare).
     _STOP_HIT_DECAY = 1
+    # DEF-103: stop-wake at G435 / BT-HFP audio quality often peaks on
+    # exactly ONE frame at 0.99+ with neighbors falling under threshold.
+    # The strict consecutive+decay gate above lost ~59% of such stops in
+    # production telemetry. Two additional trigger paths repair this:
+    #   A) Fast-stop on a single high-confidence frame (>= 0.92). Real "Hey
+    #      Vox" peaks reliably exceed this; DEF-043's mid-sentence phoneme
+    #      false-stops topped out around 0.85 — well below this gate.
+    #   B) Sliding-window 2-of-4 stop hits. Tolerates peak→dip→peak that
+    #      the strict consecutive gate kills. Frame indices are tracked
+    #      per wake-word in `_stop_hit_window` and pruned per frame.
+    # Warmup window (`_STOP_WARMUP_SECS`) and cooldown still apply to
+    # both paths, preserving mid-sentence protection. Start-wake is
+    # unchanged (the consecutive+hard-reset path remains authoritative
+    # for idle-mic noise rejection).
+    _HIGH_CONFIDENCE_FAST_STOP = 0.92
+    _STOP_WINDOW_FRAMES = 4
+    _STOP_WINDOW_HITS_REQUIRED = 2
+    _stop_hit_window: dict[str, "collections.deque[int]"] = {}
+    _frame_idx: int = 0
     # Backward-compat alias used by log lines — resolved dynamically below.
     _CONSECUTIVE_FRAMES_REQUIRED = _CONSECUTIVE_FRAMES_REQUIRED_START
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
@@ -1274,12 +1294,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # during recording so we can tell whether a stop-trigger
                     # that didn't stop recording was killed by the VAD gate
                     # (silent frame → hits reset to 0) or by the cooldown.
+                    # DEF-103: also surface sliding-window count so failed
+                    # stop attempts are diagnosable from the same line.
                     _hit_info = ""
                     if _is_rec:
                         _hits_now = _consecutive_hits.get(ww_name, 0)
+                        _win_now = len(_stop_hit_window.get(ww_name, ()))
                         _hit_info = (
                             f" vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)}"
                             f" silent={_vad_silent} hits={_hits_now}/{active_frames_required}"
+                            f" win={_win_now}/{_STOP_WINDOW_HITS_REQUIRED}"
                         )
                     msg = (
                         f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) "
@@ -1328,6 +1352,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # without this gate, a mic that stops delivering audio mid-recording
                 # will self-stop within ~4s. Feature-continuity is preserved because
                 # we still call model.predict above.
+                # DEF-103: track frame index per loop to drive sliding-window
+                # stop detection. _frame_idx is monotonic for the lifetime of
+                # the process; only relative deltas matter inside the window.
+                _frame_idx += 1
                 if s > active_threshold and not _vad_silent:
                     prev = _consecutive_hits.get(ww_name, 0)
                     _consecutive_hits[ww_name] = prev + 1
@@ -1335,6 +1363,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # started, so wake→start latency can be measured below.
                     if prev == 0 and not _is_rec:
                         _first_hit_time = time.time()
+                    # DEF-103-B: append this frame to the per-ww sliding window
+                    # used for the 2-of-4 stop-trigger path. Only relevant
+                    # while recording; idle hits are ignored to avoid
+                    # accidental cross-state accumulation.
+                    if _is_rec:
+                        _sw = _stop_hit_window.setdefault(
+                            ww_name, collections.deque()
+                        )
+                        _sw.append(_frame_idx)
+                        while _sw and (
+                            _frame_idx - _sw[0] >= _STOP_WINDOW_FRAMES
+                        ):
+                            _sw.popleft()
                 elif _is_rec:
                     # DEF-086: while recording, decay instead of hard-reset so
                     # one transient miss doesn't kill a real 3-hit "Hey Vox"
@@ -1344,10 +1385,44 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         0,
                         _consecutive_hits.get(ww_name, 0) - _STOP_HIT_DECAY,
                     )
+                    # DEF-103-B: age the sliding window on miss frames so old
+                    # hits expire even when no new hits arrive.
+                    _sw = _stop_hit_window.get(ww_name)
+                    if _sw:
+                        while _sw and (
+                            _frame_idx - _sw[0] >= _STOP_WINDOW_FRAMES
+                        ):
+                            _sw.popleft()
                 else:
                     _consecutive_hits[ww_name] = 0
+                    # DEF-103-B: clear the stop window on the idle path; it
+                    # is a recording-only tool and stale entries should not
+                    # leak into the next recording's first frames.
+                    _stop_hit_window.pop(ww_name, None)
 
-                if _consecutive_hits.get(ww_name, 0) >= active_frames_required:
+                # DEF-103: stop-wake fires via THREE paths during recording.
+                # All three respect the warmup + cooldown gates downstream.
+                #   1) Consecutive: existing _consecutive_hits >= frames_required
+                #   2) Fast-path: single frame at score >= 0.92 (high-confidence
+                #      peaks of real "Hey Vox" — DEF-043 phoneme flares stay <0.85)
+                #   3) Sliding window: 2 hits in last 4 frames (~320 ms) —
+                #      tolerates peak→dip→peak that path 1 loses.
+                _consec_trigger = (
+                    _consecutive_hits.get(ww_name, 0) >= active_frames_required
+                )
+                _fast_stop = (
+                    _is_rec
+                    and triggered
+                    and s > _HIGH_CONFIDENCE_FAST_STOP
+                    and not _vad_silent
+                )
+                _window_stop = (
+                    _is_rec
+                    and len(_stop_hit_window.get(ww_name, ()))
+                    >= _STOP_WINDOW_HITS_REQUIRED
+                )
+
+                if _consec_trigger or _fast_stop or _window_stop:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         # DEF-063: wake→trigger latency (first hit → accumulation complete).
@@ -1358,6 +1433,24 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             log(f"[TIMING] wake→trigger: {(now - _first_hit_time) * 1000:.0f}ms "
                                 f"({active_frames_required} frames)")
                             _first_hit_time = 0.0
+                        # DEF-103: surface which trigger path fired so a
+                        # follow-up regression in stop reliability can be
+                        # attributed (consec / fast / window). Recording
+                        # path only — start-wake always uses consec.
+                        if _is_rec:
+                            _path = (
+                                "fast" if _fast_stop
+                                else "window" if _window_stop
+                                else "consec"
+                            )
+                            log(
+                                f"[STOP_PATH] [{ww_name}] path={_path} "
+                                f"score={s:.3f} "
+                                f"win={len(_stop_hit_window.get(ww_name, ()))}"
+                                f"/{_STOP_WINDOW_HITS_REQUIRED} "
+                                f"hits={_consecutive_hits.get(ww_name, 0)}"
+                                f"/{active_frames_required}"
+                            )
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
                             _training_collector.save_tp_start(s)
