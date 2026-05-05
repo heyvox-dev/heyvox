@@ -47,7 +47,8 @@ from typing import Any
 # User-scoped temp dir (cannot import heyvox.constants — launched by Chrome NMH).
 _TMP: str = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
-SOCKET_PATH: str = f"{_TMP}/hush.sock"
+SOCKET_PATH: str = f"{_TMP}/hush-{os.getpid()}.sock"
+LEGACY_SOCKET_SYMLINK: str = f"{_TMP}/hush.sock"
 TCP_HOST: str = "127.0.0.1"
 TCP_PORT: int = 9847
 LOG_PATH: str = f"{_TMP}/hush.log"
@@ -293,6 +294,8 @@ async def _run_servers() -> None:
     servers: list[asyncio.AbstractServer] = []
 
     # --- Unix domain socket ---------------------------------------------------
+    # DEF-105: bind to PID-suffixed path so multiple Chrome profiles can each
+    # run their own host concurrently. media.py glob-matches and broadcasts.
     try:
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
@@ -302,6 +305,15 @@ async def _run_servers() -> None:
         os.chmod(SOCKET_PATH, 0o600)
         servers.append(unix_server)
         log.info("Listening on Unix socket: %s", SOCKET_PATH)
+
+        # Legacy symlink for single-path consumers (injection.py, hush-cli.sh).
+        # Last-binder wins, matching pre-DEF-105 behavior.
+        try:
+            if os.path.lexists(LEGACY_SOCKET_SYMLINK):
+                os.unlink(LEGACY_SOCKET_SYMLINK)
+            os.symlink(SOCKET_PATH, LEGACY_SOCKET_SYMLINK)
+        except OSError as exc:
+            log.warning("Legacy symlink not created: %s", exc)
     except Exception as exc:
         log.error("Could not start Unix socket server: %s", exc)
 
@@ -342,13 +354,18 @@ def _asyncio_thread_entry() -> None:
 
 
 def _cleanup() -> None:
-    """Remove the Unix socket file when the process exits."""
+    """Remove the Unix socket file (and legacy symlink if it points to us)."""
     try:
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
             log.info("Cleaned up socket: %s", SOCKET_PATH)
     except OSError as exc:
         log.warning("Could not remove socket file %s: %s", SOCKET_PATH, exc)
+    try:
+        if os.path.islink(LEGACY_SOCKET_SYMLINK) and os.readlink(LEGACY_SOCKET_SYMLINK) == SOCKET_PATH:
+            os.unlink(LEGACY_SOCKET_SYMLINK)
+    except OSError:
+        pass
 
 
 atexit.register(_cleanup)
