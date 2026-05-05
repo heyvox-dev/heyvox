@@ -66,43 +66,92 @@ _hush_missing_banner_shown = False
 # ---------------------------------------------------------------------------
 
 from heyvox.constants import HUSH_SOCK as _HUSH_SOCK
+from heyvox.constants import HUSH_SOCK_GLOB as _HUSH_SOCK_GLOB
 
 
-def _hush_command(action: str, **kwargs) -> dict | None:
-    """Send a command to the Hush Chrome extension via Unix socket.
+def _hush_pid_alive(sock_path: str) -> bool:
+    """True if the PID embedded in hush-<pid>.sock is still running.
 
-    Extra kwargs (e.g. rewindSecs, fadeInMs) are forwarded in the JSON payload.
-    Returns the parsed response dict, or None if Hush is unavailable or errored.
+    DEF-105: PID-suffixed sockets let us detect zombies (host crashed without
+    atexit cleanup) and unlink them, which we couldn't safely do for the
+    legacy single-path socket because we couldn't tell zombie from alive.
     """
-    if not os.path.exists(_HUSH_SOCK):
-        return None
+    name = os.path.basename(sock_path)
+    if not (name.startswith("hush-") and name.endswith(".sock")):
+        return True  # legacy symlink or unrecognised — leave alone
     try:
-        payload = {"action": action, **kwargs}
+        pid = int(name[len("hush-"):-len(".sock")])
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _hush_send_one(sock_path: str, payload_bytes: bytes) -> dict | None:
+    """Send a single command to one hush_host socket and parse its response."""
+    try:
         with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
             sock.settimeout(3.0)
-            sock.connect(_HUSH_SOCK)
-            sock.sendall(json.dumps(payload).encode() + b"\n")
+            sock.connect(sock_path)
+            sock.sendall(payload_bytes)
             data = b""
-            while True:
+            while b"\n" not in data:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
                 data += chunk
-                if b"\n" in data:
-                    break
         resp = json.loads(data)
         return resp if "error" not in resp else None
-    except ConnectionRefusedError:
-        # ECONNREFUSED can be transient (accept backlog full, host briefly
-        # hung). Do NOT unlink — the Hush host owns the socket lifecycle
-        # (DEF-039, DEF-041). Unlinking strands the live host holding an
-        # orphaned inode, and Chrome NativeMessaging won't respawn it because
-        # the host is still alive. If the host truly died, its atexit handler
-        # clears the file; Chrome relaunches on next extension action.
-        _log("Hush socket connection refused (leaving file, host owns lifecycle)")
-        return None
     except (OSError, json.JSONDecodeError, ValueError):
         return None
+
+
+def _hush_command(action: str, **kwargs) -> dict | None:
+    """Broadcast a command to every live Hush host and merge responses.
+
+    DEF-105: each Chrome profile spawns its own hush_host; we glob-match the
+    PID-suffixed sockets and aggregate ``tabs`` / ``pausedCount`` so a pause
+    reaches whichever profile owns the audible YouTube tab. Stale sockets
+    (PID dead) are unlinked on the way.
+    """
+    socks = sorted(glob.glob(_HUSH_SOCK_GLOB))
+    if not socks:
+        return None
+
+    live_socks = []
+    for path in socks:
+        if _hush_pid_alive(path):
+            live_socks.append(path)
+        else:
+            try:
+                os.unlink(path)
+                _log(f"Hush stale socket unlinked: {path}")
+            except OSError:
+                pass
+
+    if not live_socks:
+        return None
+
+    payload_bytes = json.dumps({"action": action, **kwargs}).encode() + b"\n"
+    merged = {"state": "idle", "tabs": [], "pausedCount": 0}
+    any_ok = False
+
+    for sock_path in live_socks:
+        resp = _hush_send_one(sock_path, payload_bytes)
+        if resp is None:
+            continue
+        any_ok = True
+        tabs = resp.get("tabs")
+        if isinstance(tabs, list):
+            merged["tabs"].extend(tabs)
+        merged["pausedCount"] += int(resp.get("pausedCount", 0) or 0)
+        state = resp.get("state")
+        if state == "paused":
+            merged["state"] = "paused"
+        elif state == "playing" and merged["state"] != "paused":
+            merged["state"] = "playing"
+
+    return merged if any_ok else None
 
 
 def _get_mr():
@@ -187,7 +236,7 @@ def pause_media() -> bool:
             _log(f"pause_media: paused {paused_count} browser tab(s) via Hush ({time.time()-t0:.2f}s)")
             return True
         _log("pause_media: Hush available but no browser media playing")
-    elif not os.path.exists(_HUSH_SOCK) and not _hush_missing_banner_shown:
+    elif not glob.glob(_HUSH_SOCK_GLOB) and not _hush_missing_banner_shown:
         _hush_missing_banner_shown = True
         _log(
             "pause_media: Hush not installed/running — browser media will not be "

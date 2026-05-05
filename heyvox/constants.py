@@ -233,7 +233,8 @@ HEYVOX_MEDIA_PAUSED_PREFIX = f"{_TMP}/heyvox-media-paused-"
 # Hush (browser media control) (IPC-01)
 # ---------------------------------------------------------------------------
 
-HUSH_SOCK = f"{_TMP}/hush.sock"
+HUSH_SOCK = f"{_TMP}/hush.sock"  # legacy symlink, last-binder wins
+HUSH_SOCK_GLOB = f"{_TMP}/hush-*.sock"  # DEF-105: per-host PID-suffixed sockets
 HUSH_LOG = f"{_TMP}/hush.log"
 
 # ---------------------------------------------------------------------------
