@@ -322,8 +322,10 @@ class HeraldWorker:
 
     def __init__(self) -> None:
         # Workspace name from environment (D-04: only env var, no DB query).
-        # HEYVOX_WORKSPACE is the generic env var; CONDUCTOR_WORKSPACE_NAME
-        # is kept for backward compatibility with Conductor hook environments.
+        # HEYVOX_WORKSPACE is the generic env var. CONDUCTOR_WORKSPACE_NAME
+        # is a deprecated fallback kept while Conductor hook environments
+        # migrate; remove once heyvox setup ships HEYVOX_WORKSPACE in all
+        # generated launchd/hook configs.
         self._workspace: str = (
             os.environ.get("HEYVOX_WORKSPACE", "")
             or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
@@ -462,6 +464,8 @@ class HeraldWorker:
         # Qwen3's 9-voice roster isn't large enough for agent hashing,
         # and cross-lingual voice identity already gives agents stable
         # character across languages.
+        # CONDUCTOR_AGENT is a deprecated fallback; remove once setup
+        # wizard ships HEYVOX_AGENT in all generated hook configs.
         if engine == "kokoro":
             agent_name = (
                 os.environ.get("HEYVOX_AGENT", "")
