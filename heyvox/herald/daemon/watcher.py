@@ -288,7 +288,7 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
 
 
 def detect_mood_voice(text):
-    """Match the mood detection in worker.sh."""
+    """Match the mood detection in worker.py."""
     t = text.lower()
     if any(w in t for w in ["error", "fail", "broke", "crash", "warning",
                              "careful", "danger", "critical", "urgent",

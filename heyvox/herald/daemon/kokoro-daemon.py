@@ -62,7 +62,7 @@ def log(msg):
 
 
 # --- Language code mapping ---
-# worker.sh sends full codes (en-us, ja, cmn, fr-fr, it, de)
+# worker.py sends full codes (en-us, ja, cmn, fr-fr, it, de)
 # mlx-audio uses single-letter codes (a, b, j, z, f, e, i, p, h)
 LANG_MAP = {
     "en-us": "a",

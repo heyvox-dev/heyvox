@@ -125,7 +125,7 @@ def start_worker(config=None) -> None:
         set_verbosity(config.tts.verbosity)
         set_tts_style(config.tts.style)
 
-        # Pass engine selection to Herald via env var (read by worker.sh)
+        # Pass engine selection to Herald via env var (read by worker.py)
         os.environ["HEYVOX_TTS_ENGINE"] = config.tts.engine
 
 

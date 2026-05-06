@@ -1,7 +1,5 @@
 """Herald Worker — TTS extraction and WAV generation.
 
-Port of heyvox/herald/lib/worker.sh to Python.
-
 Handles the full pipeline from raw Claude response text to WAV files
 enqueued in the herald queue directory:
   1. Extract <tts>...</tts> blocks from response text
@@ -59,7 +57,7 @@ _herald_logger.addHandler(_file_handler)
 _herald_logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
-# Voice constants (from worker.sh)
+# Voice constants
 # ---------------------------------------------------------------------------
 
 MOOD_VOICES: dict[str, str] = {
@@ -168,7 +166,6 @@ def normalize_wav_in_place(path: str) -> None:
 def detect_mood(text: str) -> str:
     """Detect the emotional mood of a TTS text fragment.
 
-    Ports detect_mood() from worker.sh lines 73-95.
     Returns one of: 'alert', 'cheerful', 'thoughtful', 'neutral'.
     """
     t = text.lower()
@@ -316,7 +313,6 @@ def _ensure_orchestrator() -> None:
 class HeraldWorker:
     """TTS extraction and WAV generation for Herald.
 
-    Ports heyvox/herald/lib/worker.sh to Python.
     Stateless per call — multiple instances can run concurrently.
     """
 
@@ -425,7 +421,6 @@ class HeraldWorker:
     def _extract_tts_blocks(self, text: str) -> list[str]:
         """Extract all <tts>...</tts> blocks (DOTALL, multiline).
 
-        Ports from worker.sh lines 38-42 (multiline match with inline fallback).
         """
         # Try anchored form first (at start of line, as Claude often emits)
         matches = re.findall(r"^<tts>(.*?)</tts>", text, re.DOTALL | re.MULTILINE)
@@ -443,7 +438,6 @@ class HeraldWorker:
     def _select_voice(self, mood: str, lang: str, lang_voice: str | None) -> str:
         """Select TTS voice name from mood + language + agent context.
 
-        Ports voice selection logic from worker.sh lines 86-131.
         Priority: agent env var > language override > mood.
         Different voice roster per engine: Kokoro (af_*/am_*) vs Qwen3
         (Serena/Ethan/etc.) — picked based on lang.
@@ -588,7 +582,6 @@ class HeraldWorker:
     ) -> bool:
         """Generate WAV via Kokoro daemon (AF_UNIX socket).
 
-        Ports the daemon communication block from worker.sh lines 171-243.
         """
         if not self._ensure_kokoro_daemon():
             return False
@@ -763,7 +756,6 @@ class HeraldWorker:
     ) -> bool:
         """Generate WAV via Piper TTS (fallback path).
 
-        Ports the CLI fallback from worker.sh lines 247-260.
         Normalizes output via normalize_wav_in_place() per HERALD-02.
         """
         # Find piper model path matching the requested language
@@ -814,7 +806,6 @@ class HeraldWorker:
     def _ensure_kokoro_daemon(self) -> bool:
         """Ensure Kokoro daemon is running. Start it if not.
 
-        Ports ensure_daemon() from worker.sh lines 155-167.
         Returns True if daemon is ready, False if startup failed.
         """
         if self._kokoro_daemon_alive():
@@ -1127,7 +1118,6 @@ class HeraldWorker:
     def _kokoro_request(self, request: dict, timeout: float = 30.0) -> dict:
         """Send a request to the Kokoro daemon via AF_UNIX socket.
 
-        Ports the daemon call from worker.sh lines 198-222.
         """
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)

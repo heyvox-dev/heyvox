@@ -67,7 +67,7 @@ def start_orchestrator() -> None:
     orch.run()
 
 
-# Python orchestrator (pure Python replacement for orchestrator.sh)
+# Python orchestrator
 from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig  # noqa: E402
 
 __all__ = [

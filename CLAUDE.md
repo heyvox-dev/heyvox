@@ -53,28 +53,28 @@ heyvox/
 │   ├── permissions.py   # macOS permission checks
 │   └── hooks.py         # Herald hooks installer for ~/.claude/settings.json
 ├── herald/              # Voice OUTPUT — TTS orchestration (merged from herald repo)
-│   ├── __init__.py      # Python API: get_herald_home(), run_herald()
-│   ├── cli.py           # Python CLI wrapper → bash
-│   ├── bin/herald       # Bash CLI (speak/pause/resume/skip/mute/status/queue)
-│   ├── lib/             # config.sh, speak.sh, worker.sh, orchestrator.sh, media.sh
-│   ├── daemon/          # kokoro-daemon.py (persistent TTS), watcher.py
-│   ├── hooks/           # Claude Code hook shims (on-response, on-notify, etc.)
-│   └── modes/           # ambient, greeting, notify, recap, cleanup
+│   ├── __init__.py      # Python API: get_herald_home(), start_orchestrator()
+│   ├── cli.py           # Python CLI: heyvox.herald.cli speak/pause/resume/...
+│   ├── worker.py        # TTS extraction + WAV generation (mood/language/voice)
+│   ├── orchestrator.py  # Playback daemon (workspace switching, hold queue)
+│   ├── coreaudio.py     # CoreAudio ducking helper
+│   ├── daemon/          # kokoro-daemon.py + qwen-daemon.py (persistent TTS)
+│   └── hooks/           # Claude Code hook shims (on-response, on-notify, etc.)
 └── hush/                # Media control (merged from hush repo)
     ├── __init__.py      # Python API: HUSH_HOME, HUSH_EXTENSION
     ├── extension/       # Chrome Manifest V3 extension
     ├── host/            # Native messaging host (hush_host.py)
-    ├── scripts/         # install.sh, uninstall.sh, hush-cli.sh
-    └── integration/     # Reference integration files
+    └── scripts/         # install.sh, uninstall.sh, hush-cli.sh
 ```
 
 ### Herald — TTS Pipeline
 ```
 Claude response with <tts> block
-  → hooks/on-response.sh → lib/speak.sh (extract, dedup)
-    → lib/worker.sh (mood/language detection, Kokoro generation)
-      → /tmp/herald-queue/ (WAV + .workspace sidecar)
-        → lib/orchestrator.sh (playback daemon, workspace switching, hold queue)
+  → hooks/on-response.sh (hook shim) → python3 -m heyvox.herald.worker
+    → worker.py (extract, mood/language detection, dispatch to engine)
+      → kokoro-daemon (Unix socket, Metal GPU) | qwen-daemon | Piper fallback
+        → /tmp/herald-queue/ (WAV + .workspace sidecar)
+          → orchestrator.py (playback daemon, workspace switching, hold queue)
 ```
 
 Key features:
