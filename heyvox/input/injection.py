@@ -249,7 +249,7 @@ def _settle_delay_for(app_name: str | None, app_delays: dict[str, float], defaul
     return default
 
 
-def _save_frontmost_pid() -> int:
+def save_frontmost_pid() -> int:
     """Return the PID of the currently frontmost app (for restoring later)."""
     try:
         import AppKit
@@ -257,19 +257,6 @@ def _save_frontmost_pid() -> int:
         return app.processIdentifier() if app else 0
     except Exception:
         return 0
-
-
-def _restore_frontmost(pid: int) -> None:
-    """Re-activate the app that was frontmost before we stole focus."""
-    if not pid:
-        return
-    try:
-        import AppKit
-        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        if app:
-            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-    except Exception:
-        pass
 
 
 def _osascript_type_text(
@@ -332,7 +319,7 @@ def _osascript_type_text(
         _log(f"paste: clipboard verified OK ({len(text)} chars)")
 
         frontmost_before = _get_frontmost_app()
-        original_pid = _save_frontmost_pid()
+        original_pid = save_frontmost_pid()
         _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
 
         # DEF-054: PID-aware guard. For Electron bundles (Conductor, VS Code,
@@ -457,7 +444,7 @@ def _osascript_type_text(
     # paste lands in a different window within the same bundle. Compare PIDs
     # to catch that case.
     if expected_pid:
-        frontmost_after_pid = _save_frontmost_pid()
+        frontmost_after_pid = save_frontmost_pid()
         if frontmost_after_pid and frontmost_after_pid != expected_pid:
             _log(
                 f"paste: WARNING: target pid={expected_pid} but frontmost "
@@ -525,16 +512,6 @@ def _osascript_press_enter(count: int, app_name: str | None = None, enter_delay:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-def save_frontmost_pid() -> int:
-    """Return the PID of the currently frontmost app (for restoring later)."""
-    return _save_frontmost_pid()
-
-
-def restore_frontmost(pid: int) -> None:
-    """Re-activate the app that was frontmost before injection stole focus."""
-    _restore_frontmost(pid)
-
 
 def type_text(
     text: str,
