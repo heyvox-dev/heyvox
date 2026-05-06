@@ -232,33 +232,6 @@ def _parts_pending(queue_dir: Path, max_age: float = 10.0) -> bool:
     return False
 
 
-# WAV normalization (legacy fallback — primary normalization is in kokoro-daemon.py)
-
-
-def normalize_wav(path: Path, target_rms: int = 3000, scale_cap: float = 3.0,
-                  peak_limit: int = 24000) -> None:
-    """Normalize WAV loudness in-place via RMS matching.
-
-    Thin wrapper around heyvox.audio.normalize.normalize_wav_int16.
-    Legacy fallback for externally-generated WAVs. Primary normalization
-    happens in kokoro-daemon.py at generation time (HERALD-02).
-    """
-    from heyvox.audio.normalize import normalize_wav_int16
-
-    try:
-        with wave.open(str(path), "rb") as wf:
-            params = wf.getparams()
-            raw_frames = wf.readframes(params.nframes)
-
-        normalized = normalize_wav_int16(raw_frames, target_rms, scale_cap, peak_limit)
-        if normalized is not raw_frames:
-            with wave.open(str(path), "wb") as wf:
-                wf.setparams(params)
-                wf.writeframes(normalized)
-    except Exception as e:
-        log.debug("normalize_wav(%s) failed: %s", path, e)
-
-
 # ---------------------------------------------------------------------------
 # State helpers
 # ---------------------------------------------------------------------------
