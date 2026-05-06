@@ -10,6 +10,7 @@ Entry point: heyvox.cli calls run() which calls main().
 Requirement: CONF-01, DECP-01 through DECP-06
 """
 
+import collections
 import os
 import sys
 import time
@@ -360,9 +361,21 @@ def _setup(config: HeyvoxConfig):
         """
         ctx.cancel_requested.set()
 
+    def handle_relaunch(signum, frame):
+        """SIGUSR2 = exit non-zero so launchd respawns us (DEF-071).
+
+        The plist uses KeepAlive: { SuccessfulExit: false }, so clean exit 0
+        is treated as a user-initiated quit (no respawn). Exit code 42
+        tells launchd this was NOT a successful exit, triggering the
+        respawn path. os._exit skips atexit handlers so the non-zero code
+        is reported verbatim.
+        """
+        os._exit(42)
+
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGUSR1, handle_cancel)
+    signal.signal(signal.SIGUSR2, handle_relaunch)
 
     # Wake word settings
     start_word = config.wake_words.start
@@ -532,9 +545,21 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     chunk_size = config.audio.chunk_size
     silence_timeout = config.silence_timeout_secs
     silence_threshold = config.silence_threshold
-    # Override silence_threshold from device profile if available
-    if devices.active_profile and devices.active_profile.silence_threshold is not None:
+    # Override silence_threshold from device profile if available.
+    # DEF-097: also reject 0 as if it were None — a hardware-gated mic
+    # that calibrated at noise_floor=0 leaves a stale 0 in the profile,
+    # which would disable the VAD silent gate (and DEF-096 with it).
+    # Real speech is always > 1000, so any positive threshold is safer
+    # than 0; the global config default kicks in if the profile is bad.
+    if (
+        devices.active_profile
+        and devices.active_profile.silence_threshold is not None
+        and devices.active_profile.silence_threshold > 0
+    ):
         silence_threshold = devices.active_profile.silence_threshold
+    log(f"[mic-init] silence_threshold={silence_threshold} "
+        f"(profile={devices.active_profile.silence_threshold if devices.active_profile else None}, "
+        f"config={config.silence_threshold})")
     max_recording_secs = getattr(config, 'max_recording_secs', 30.0)
     start_word = config.wake_words.start
     stop_word = config.wake_words.stop
@@ -611,7 +636,54 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # from incrementing this counter, so the 3-frame rationale was redundant.
     # 2 × 80 ms = 160 ms post-detection floor instead of 240 ms — saves one
     # audio chunk of latency on every wake word without weakening the filter.
-    _CONSECUTIVE_FRAMES_REQUIRED = 2
+    # DEF-067 (2026-04-21): bifurcated — START stays at 2 (fast wake), STOP
+    # requires 3. User reported mid-sentence false stops at score 0.997 during
+    # natural speech; 2 frames = 160 ms is too easy for phoneme runs to hit,
+    # while start-word latency matters much more than stop-word latency.
+    # DEF-086 (2026-04-24): strict "consecutive" resets were too fragile — a
+    # single noisy below-threshold dip mid-"Hey Vox" zeroed the counter and
+    # the user's real stop intent had to wait for the 4 s silence_timeout.
+    # Miss-frames now DECAY the counter by _STOP_HIT_DECAY instead of zeroing
+    # it (see line ~1228), so 3 strong hits with one brief sag still fire.
+    # Start-wake keeps the hard reset (idle mic noise should not accumulate).
+    # DEF-099 (2026-04-28): STOP back to 2 frames (160 ms). Evidence: user
+    # underhit case at 15:37:22 fired ONE frame at score 0.826 then user
+    # gave up before 3-frame accumulation completed. With frames=2, single
+    # hit at 0.826 + one decay-tolerant follow-up triggers stop reliably.
+    # Regression risk: DEF-067's mid-sentence phantom-phoneme false stops
+    # (scores 0.997+) can re-emerge in continuous speech without prior
+    # pause (DEF-096-B's threshold discount only applies post-pause).
+    # ROLLBACK: if "I was cut off mid-sentence" reports return, revert to 3
+    # and pursue DEF-099 follow-on (Whisper-fallback) instead.
+    _CONSECUTIVE_FRAMES_REQUIRED_START = 2
+    _CONSECUTIVE_FRAMES_REQUIRED_STOP = 2
+    # DEF-086: on a miss frame during recording, subtract this many from the
+    # stop-hit accumulator instead of fully resetting. 1 tolerates exactly
+    # one transient dip in a 3-hit burst — enough for real "Hey Vox" stops
+    # while still rejecting isolated phoneme flares (which fire once and
+    # decay back to 0 before the next flare).
+    _STOP_HIT_DECAY = 1
+    # DEF-103: stop-wake at G435 / BT-HFP audio quality often peaks on
+    # exactly ONE frame at 0.99+ with neighbors falling under threshold.
+    # The strict consecutive+decay gate above lost ~59% of such stops in
+    # production telemetry. Two additional trigger paths repair this:
+    #   A) Fast-stop on a single high-confidence frame (>= 0.92). Real "Hey
+    #      Vox" peaks reliably exceed this; DEF-043's mid-sentence phoneme
+    #      false-stops topped out around 0.85 — well below this gate.
+    #   B) Sliding-window 2-of-4 stop hits. Tolerates peak→dip→peak that
+    #      the strict consecutive gate kills. Frame indices are tracked
+    #      per wake-word in `_stop_hit_window` and pruned per frame.
+    # Warmup window (`_STOP_WARMUP_SECS`) and cooldown still apply to
+    # both paths, preserving mid-sentence protection. Start-wake is
+    # unchanged (the consecutive+hard-reset path remains authoritative
+    # for idle-mic noise rejection).
+    _HIGH_CONFIDENCE_FAST_STOP = 0.92
+    _STOP_WINDOW_FRAMES = 4
+    _STOP_WINDOW_HITS_REQUIRED = 2
+    _stop_hit_window: dict[str, "collections.deque[int]"] = {}
+    _frame_idx: int = 0
+    # Backward-compat alias used by log lines — resolved dynamically below.
+    _CONSECUTIVE_FRAMES_REQUIRED = _CONSECUTIVE_FRAMES_REQUIRED_START
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
     # DEF-063: timestamp of the first confirmed hit in the current accumulation run.
     # Used to report wake→recording.start latency so future slowdowns are measurable.
@@ -626,6 +698,43 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # bursts still fall inside the silent gate within a couple of chunks.
     _VAD_SILENT_GRACE = 0.5
     _last_nonsilent_time: float = 0.0
+
+    # DEF-096: pre-silence-aware stop-wake adjustments. The wake-word model's
+    # feature window fills with prior speech during recording, suppressing
+    # stop-word detection when "Hey Vox" comes mid-flow (user reported
+    # scores 0.5–0.6 vs 0.99 for clean isolated wake words). Three levers:
+    #   A) Reset the model on the speech→silence transition so the
+    #      post-pause wake word hits a near-blank feature window.
+    #   B) During recording, if VAD reported silence within
+    #      _PRE_SILENCE_DISCOUNT_WINDOW seconds, apply
+    #      _PRE_SILENCE_THRESHOLD_FACTOR to the threshold — pause-then-
+    #      Hey-Vox is the natural stop pattern; mid-sentence phoneme
+    #      bursts (DEF-043) have no preceding silence so they keep the
+    #      strict threshold and DEF-067's protection still applies.
+    #   C) Periodic reset interval lowered as fallback for continuous
+    #      speech with no natural pauses.
+    _was_vad_silent: bool = False
+    _last_silent_frame_time: float = 0.0
+    _PRE_SILENCE_DISCOUNT_WINDOW = 0.5  # seconds since last silent frame
+    _PRE_SILENCE_THRESHOLD_FACTOR = 0.85  # 15 % discount post-pause
+
+    # User-effort metric: timestamps of every above-threshold wake attempt while
+    # not recording. When recording finally starts, if the list has > 1 entry
+    # within the last _USER_EFFORT_WINDOW seconds, the user had to repeat the
+    # wake word — emit [USER_EFFORT] so the log-health digest can count those
+    # days. Cleared on every recording.start.
+    _recent_wake_attempts: list[float] = []
+    _USER_EFFORT_WINDOW = 10.0
+
+    def _flush_user_effort() -> None:
+        """Emit [USER_EFFORT] if multiple wake attempts piled up before start."""
+        if len(_recent_wake_attempts) > 1:
+            span = _recent_wake_attempts[-1] - _recent_wake_attempts[0]
+            log(
+                f"[USER_EFFORT] attempts={len(_recent_wake_attempts)} "
+                f"window={span:.1f}s"
+            )
+        _recent_wake_attempts.clear()
 
     def _hud_ensure_connected() -> None:
         """Attempt periodic reconnect if the HUD connection was lost."""
@@ -776,11 +885,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
                 if not devices.reinit(require_audio=True):
                     continue
-                # Update silence_threshold from new device profile after reinit
-                if devices.active_profile and devices.active_profile.silence_threshold is not None:
+                # Update silence_threshold from new device profile after reinit.
+                # DEF-097: reject 0 from profile (stale hardware-gated calibration).
+                if (
+                    devices.active_profile
+                    and devices.active_profile.silence_threshold is not None
+                    and devices.active_profile.silence_threshold > 0
+                ):
                     silence_threshold = devices.active_profile.silence_threshold
                 else:
                     silence_threshold = config.silence_threshold
+                log(f"[mic-reinit] silence_threshold={silence_threshold}")
                 # Trigger calibration if new device has no noise_floor data
                 if (devices.dev_name != _last_calibrated_device
                         and profile_manager
@@ -809,6 +924,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 _first_speech_time = 0.0
                 _last_model_reset = time.time()
                 _rec_started_at = time.time()  # for stop-word warmup suppression
+
+            # DEF-078: While recording, observe whether TTS is playing. The
+            # recording path also checks at start(), but Herald can fire a
+            # notify-hook or a held message can release mid-recording; any of
+            # those puts speaker bleed into the audio buffer. Sticky flag:
+            # once set during a recording, stays set until the recording ends
+            # (cleared at the end of _send_local).
+            if _is_rec and not ctx.tts_seen_during_recording:
+                if os.path.exists(TTS_PLAYING_FLAG):
+                    ctx.tts_seen_during_recording = True
 
             # Send live audio level to HUD at ~20fps during recording (HUD-08)
             if _is_rec:
@@ -871,8 +996,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # Device hotplug -- delegated to DeviceManager
             devices.scan()
 
-            # After scan, update silence_threshold if device changed
-            if devices.active_profile and devices.active_profile.silence_threshold is not None:
+            # After scan, update silence_threshold if device changed.
+            # DEF-097: reject 0 from profile (stale hardware-gated calibration).
+            if (
+                devices.active_profile
+                and devices.active_profile.silence_threshold is not None
+                and devices.active_profile.silence_threshold > 0
+            ):
                 silence_threshold = devices.active_profile.silence_threshold
             else:
                 silence_threshold = config.silence_threshold
@@ -1052,8 +1182,27 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     _raw_vad_silent
                     and (time.time() - _last_nonsilent_time) > _VAD_SILENT_GRACE
                 )
+                # DEF-096-A: reset model on the speech→silence transition.
+                # When the user pauses (commonly right before saying "Hey
+                # Vox" to stop), wipe accumulated speech features so the
+                # upcoming wake word lands on a near-blank window. The
+                # transition fires at most once per silence period so the
+                # model has time to refill features before the wake word
+                # arrives.
+                if _vad_silent and not _was_vad_silent:
+                    model.reset()
+                    _last_model_reset = time.time()
+                _was_vad_silent = _vad_silent
+                # DEF-096-B: track most recent silent-frame timestamp so the
+                # threshold-discount block below can recognise the
+                # pause-then-Hey-Vox pattern.
+                if _vad_silent:
+                    _last_silent_frame_time = time.time()
             else:
                 _vad_silent = _raw_vad_silent
+                # Reset transition tracking when we leave recording so the
+                # next recording's first silent frame fires the reset.
+                _was_vad_silent = False
             if not _is_rec and _vad_silent:
                 # Clear consecutive-hits so a single pre-silence high score doesn't
                 # combine with a post-silence high score to cross the threshold.
@@ -1066,7 +1215,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # features so the stop wake word can be detected even after long
             # continuous speech (without this, rapid "Hey Vox" after talking
             # scores below threshold because the feature window is polluted).
-            _MODEL_RESET_INTERVAL = 2.5  # seconds
+            # DEF-096-C: 2.5 s → 1.0 s. The DEF-096-A silence-transition
+            # reset handles the natural pause-then-stop pattern; the
+            # periodic reset is now strictly the fallback for continuous
+            # speech, where a faster cadence keeps the feature window
+            # cleaner without leaning on a user pause.
+            _MODEL_RESET_INTERVAL = 1.0  # seconds
             if _is_rec and time.time() - _last_model_reset > _MODEL_RESET_INTERVAL:
                 model.reset()
                 _last_model_reset = time.time()
@@ -1091,6 +1245,24 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             _model_thresholds = config.wake_words.model_thresholds
 
+            # DEF-096-B: pre-silence-aware stop-wake threshold discount.
+            # When the user paused recently (the natural "...sentence end.
+            # [pause] Hey Vox" pattern), apply a 15 % discount so the
+            # wake word triggers reliably even when the model's feature
+            # window hasn't fully refilled. Mid-sentence phoneme bursts
+            # (DEF-043) have NO preceding silence, so they keep the
+            # strict threshold and DEF-067's protection still applies.
+            _now_for_pre_silence = time.time()
+            _recent_silence = (
+                _is_rec
+                and _last_silent_frame_time > 0.0
+                and (_now_for_pre_silence - _last_silent_frame_time)
+                    < _PRE_SILENCE_DISCOUNT_WINDOW
+            )
+            _pre_silence_factor = (
+                _PRE_SILENCE_THRESHOLD_FACTOR if _recent_silence else 1.0
+            )
+
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
                 base_thr = _model_thresholds.get(ww_name, threshold)
@@ -1100,21 +1272,43 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # Stop-wake threshold matches start threshold (no 0.85 discount):
                 # the old discount made stop-word easier to detect but caused
                 # mid-sentence phonemes to falsely stop recording (DEF-043).
-                active_threshold = min(0.95, base_thr * _speaker_mult)
+                # DEF-096-B: re-introduce a 0.85 stop-discount but ONLY when
+                # `_pre_silence_factor` is active (recent VAD silence). This
+                # preserves DEF-043's mid-flow protection while making
+                # post-pause stop-wake reliable.
+                active_threshold = min(
+                    0.95, base_thr * _speaker_mult * _pre_silence_factor
+                )
                 active_cooldown = stop_cooldown if _is_rec else cooldown
+                # DEF-067: stop-wake requires more frames than start-wake to
+                # resist mid-sentence false stops on phoneme runs. User-facing
+                # wake latency matters far more than stop latency.
+                active_frames_required = (
+                    _CONSECUTIVE_FRAMES_REQUIRED_STOP if _is_rec
+                    else _CONSECUTIVE_FRAMES_REQUIRED_START
+                )
                 log_threshold = active_threshold * 0.5
+                # Always compute `triggered` — used by the stop-wake _fast_stop
+                # path further below (`_is_rec and triggered`). Hoisted out of
+                # the `if s > log_threshold` logging block so a quiet stretch
+                # (no wake-word activity) followed by PTT-recording can't
+                # access an unbound local. Comparison is a single float op.
+                triggered = s > active_threshold
                 if s > log_threshold:
-                    triggered = s > active_threshold
                     # DEF-053 diagnostic: include VAD state + consecutive_hits
                     # during recording so we can tell whether a stop-trigger
                     # that didn't stop recording was killed by the VAD gate
                     # (silent frame → hits reset to 0) or by the cooldown.
+                    # DEF-103: also surface sliding-window count so failed
+                    # stop attempts are diagnosable from the same line.
                     _hit_info = ""
                     if _is_rec:
                         _hits_now = _consecutive_hits.get(ww_name, 0)
+                        _win_now = len(_stop_hit_window.get(ww_name, ()))
                         _hit_info = (
                             f" vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)}"
-                            f" silent={_vad_silent} hits={_hits_now}/{_CONSECUTIVE_FRAMES_REQUIRED}"
+                            f" silent={_vad_silent} hits={_hits_now}/{active_frames_required}"
+                            f" win={_win_now}/{_STOP_WINDOW_HITS_REQUIRED}"
                         )
                     msg = (
                         f"  [{ww_name}] score={s:.3f} (thr={active_threshold:.2f}) "
@@ -1123,11 +1317,50 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     log(msg)
                     if triggered:
                         _safe_stderr(f"[wakeword] {msg.strip()}")
+
+                    # Track every "model heard the wake word" attempt while not
+                    # recording — feeds USER_EFFORT when recording finally starts.
+                    # Includes triggers that get killed by VAD / accumulator /
+                    # cooldown, since each represents a real wake utterance.
+                    if triggered and not _is_rec:
+                        _now_attempt = time.time()
+                        _recent_wake_attempts[:] = [
+                            t for t in _recent_wake_attempts
+                            if _now_attempt - t < _USER_EFFORT_WINDOW
+                        ]
+                        _recent_wake_attempts.append(_now_attempt)
+
+                    # Dedicated tags for log-health digest grep:
+                    # WAKE_VAD_DROP — model triggered but VAD post-filter killed
+                    # it as silent. A confident wake word lost to over-rejection.
+                    if triggered and _vad_silent:
+                        log(
+                            f"[WAKE_VAD_DROP] [{ww_name}] score={s:.3f} "
+                            f"thr={active_threshold:.2f} "
+                            f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
+                            f"is_rec={_is_rec}"
+                        )
+                    # NEAR_MISS — strong score that didn't quite reach threshold
+                    # while idle. Aggregated counts surface model drift, mic
+                    # placement issues, or speaker_mult set too aggressively.
+                    elif (
+                        not triggered
+                        and not _is_rec
+                        and s > active_threshold * 0.7
+                    ):
+                        log(
+                            f"[NEAR_MISS] [{ww_name}] score={s:.3f} "
+                            f"thr={active_threshold:.2f}"
+                        )
                 # DEF-047: During recording, silent frames must not count toward a
                 # stop-trigger. The model emits silence-bursts on dead HFP streams;
                 # without this gate, a mic that stops delivering audio mid-recording
                 # will self-stop within ~4s. Feature-continuity is preserved because
                 # we still call model.predict above.
+                # DEF-103: track frame index per loop to drive sliding-window
+                # stop detection. _frame_idx is monotonic for the lifetime of
+                # the process; only relative deltas matter inside the window.
+                _frame_idx += 1
                 if s > active_threshold and not _vad_silent:
                     prev = _consecutive_hits.get(ww_name, 0)
                     _consecutive_hits[ww_name] = prev + 1
@@ -1135,10 +1368,66 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # started, so wake→start latency can be measured below.
                     if prev == 0 and not _is_rec:
                         _first_hit_time = time.time()
+                    # DEF-103-B: append this frame to the per-ww sliding window
+                    # used for the 2-of-4 stop-trigger path. Only relevant
+                    # while recording; idle hits are ignored to avoid
+                    # accidental cross-state accumulation.
+                    if _is_rec:
+                        _sw = _stop_hit_window.setdefault(
+                            ww_name, collections.deque()
+                        )
+                        _sw.append(_frame_idx)
+                        while _sw and (
+                            _frame_idx - _sw[0] >= _STOP_WINDOW_FRAMES
+                        ):
+                            _sw.popleft()
+                elif _is_rec:
+                    # DEF-086: while recording, decay instead of hard-reset so
+                    # one transient miss doesn't kill a real 3-hit "Hey Vox"
+                    # stop. Outside recording, keep the hard reset below —
+                    # idle-mic noise must not accumulate toward a false start.
+                    _consecutive_hits[ww_name] = max(
+                        0,
+                        _consecutive_hits.get(ww_name, 0) - _STOP_HIT_DECAY,
+                    )
+                    # DEF-103-B: age the sliding window on miss frames so old
+                    # hits expire even when no new hits arrive.
+                    _sw = _stop_hit_window.get(ww_name)
+                    if _sw:
+                        while _sw and (
+                            _frame_idx - _sw[0] >= _STOP_WINDOW_FRAMES
+                        ):
+                            _sw.popleft()
                 else:
                     _consecutive_hits[ww_name] = 0
+                    # DEF-103-B: clear the stop window on the idle path; it
+                    # is a recording-only tool and stale entries should not
+                    # leak into the next recording's first frames.
+                    _stop_hit_window.pop(ww_name, None)
 
-                if _consecutive_hits.get(ww_name, 0) >= _CONSECUTIVE_FRAMES_REQUIRED:
+                # DEF-103: stop-wake fires via THREE paths during recording.
+                # All three respect the warmup + cooldown gates downstream.
+                #   1) Consecutive: existing _consecutive_hits >= frames_required
+                #   2) Fast-path: single frame at score >= 0.92 (high-confidence
+                #      peaks of real "Hey Vox" — DEF-043 phoneme flares stay <0.85)
+                #   3) Sliding window: 2 hits in last 4 frames (~320 ms) —
+                #      tolerates peak→dip→peak that path 1 loses.
+                _consec_trigger = (
+                    _consecutive_hits.get(ww_name, 0) >= active_frames_required
+                )
+                _fast_stop = (
+                    _is_rec
+                    and triggered
+                    and s > _HIGH_CONFIDENCE_FAST_STOP
+                    and not _vad_silent
+                )
+                _window_stop = (
+                    _is_rec
+                    and len(_stop_hit_window.get(ww_name, ()))
+                    >= _STOP_WINDOW_HITS_REQUIRED
+                )
+
+                if _consec_trigger or _fast_stop or _window_stop:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         # DEF-063: wake→trigger latency (first hit → accumulation complete).
@@ -1147,8 +1436,26 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         # regressions inside the consecutive-frame gate.
                         if not _is_rec and _first_hit_time > 0:
                             log(f"[TIMING] wake→trigger: {(now - _first_hit_time) * 1000:.0f}ms "
-                                f"({_CONSECUTIVE_FRAMES_REQUIRED} frames)")
+                                f"({active_frames_required} frames)")
                             _first_hit_time = 0.0
+                        # DEF-103: surface which trigger path fired so a
+                        # follow-up regression in stop reliability can be
+                        # attributed (consec / fast / window). Recording
+                        # path only — start-wake always uses consec.
+                        if _is_rec:
+                            _path = (
+                                "fast" if _fast_stop
+                                else "window" if _window_stop
+                                else "consec"
+                            )
+                            log(
+                                f"[STOP_PATH] [{ww_name}] path={_path} "
+                                f"score={s:.3f} "
+                                f"win={len(_stop_hit_window.get(ww_name, ()))}"
+                                f"/{_STOP_WINDOW_HITS_REQUIRED} "
+                                f"hits={_consecutive_hits.get(ww_name, 0)}"
+                                f"/{active_frames_required}"
+                            )
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
                             _training_collector.save_tp_start(s)
@@ -1171,6 +1478,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             pass
                         elif use_separate_words:
                             if start_word in ww_name and not _is_rec:
+                                _flush_user_effort()
                                 recording.start(preroll=_preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
                                 # Warmup: ignore stop-word in first _STOP_WARMUP_SECS
@@ -1181,6 +1489,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                     recording.stop()
                         else:
                             if not _is_rec:
+                                _flush_user_effort()
                                 recording.start(preroll=_preroll_buffer)
                             elif time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                 # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS

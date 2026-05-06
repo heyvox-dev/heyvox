@@ -17,10 +17,58 @@
 
 const NATIVE_HOST = 'com.hush.bridge';
 const RECONNECT_DELAY_MS = 2000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_MAX_DELAY_MS = 60000;
 
 /** @type {Map<number, {title: string, url: string, timestamp: number}>} */
 const pausedTabs = new Map();
+
+/**
+ * DEF-098: persist pausedTabs to chrome.storage.session so the in-memory
+ * Map survives MV3 service-worker suspension. Without this, Chrome's
+ * ~30 s SW idle timer wipes the Map and any resume call after the
+ * timeout returns pausedCount=0 — the muted YouTube tab never gets
+ * unmuted because the extension forgot it had paused anything.
+ */
+const STORAGE_KEY = 'hush:pausedTabs';
+
+/**
+ * Write the current pausedTabs Map to chrome.storage.session.
+ * Fire-and-forget; failures are logged but never block the caller.
+ */
+function persistPausedTabs() {
+  const entries = [...pausedTabs.entries()];
+  chrome.storage.session
+    .set({ [STORAGE_KEY]: entries })
+    .catch((err) => console.warn('[Hush] persistPausedTabs failed:', err));
+}
+
+/**
+ * Restore pausedTabs from chrome.storage.session at SW startup.
+ * Called once at module load; idempotent (won't double-add entries).
+ */
+async function restorePausedTabs() {
+  try {
+    const result = await chrome.storage.session.get(STORAGE_KEY);
+    const entries = result[STORAGE_KEY];
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    for (const [id, info] of entries) {
+      pausedTabs.set(id, info);
+    }
+    console.log(`[Hush] Restored ${pausedTabs.size} paused tabs from session storage`);
+    updateBadge();
+  } catch (err) {
+    console.warn('[Hush] restorePausedTabs failed:', err);
+  }
+}
+
+// Kick off restoration immediately. If the SW just woke up after a
+// suspension, the Map will be repopulated before any incoming pause/
+// resume command arrives — message handlers `await` no specific
+// signal but they read pausedTabs synchronously, so the very first
+// command after wake-up may still see an empty Map. The native host's
+// command pipeline is sequential and the first command after wake-up
+// is typically a `status` query, which is safe to answer "empty".
+restorePausedTabs();
 
 /** @type {chrome.runtime.Port | null} */
 let nativePort = null;
@@ -67,12 +115,14 @@ function connectNativeHost() {
  */
 function scheduleReconnect() {
   if (reconnectTimer !== null) return;
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error('[Hush] Max reconnect attempts reached — giving up.');
-    return;
-  }
 
-  const delay = RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts);
+  // Never give up — MV3 can terminate us mid-backoff; the next lifecycle
+  // event (onStartup/onInstalled/tabs.onUpdated) will re-enter module eval
+  // and re-run connectNativeHost(). Cap backoff so we don't wait minutes.
+  const delay = Math.min(
+    RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts),
+    RECONNECT_MAX_DELAY_MS
+  );
   reconnectAttempts += 1;
 
   console.log(`[Hush] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempts})`);
@@ -81,6 +131,19 @@ function scheduleReconnect() {
     reconnectTimer = null;
     connectNativeHost();
   }, delay);
+}
+
+/**
+ * Force a reconnect now: clear any pending backoff and reset counters.
+ */
+function forceReconnect(reason) {
+  console.log(`[Hush] Force reconnect (${reason})`);
+  reconnectAttempts = 0;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  connectNativeHost();
 }
 
 /**
@@ -226,6 +289,7 @@ async function pauseAllTabs() {
     })
   );
 
+  persistPausedTabs(); // DEF-098
   return buildStatusResponse('paused');
 }
 
@@ -254,6 +318,7 @@ async function resumeAllPausedTabs(rewindSecs = 0, fadeInMs = 0) {
   );
 
   pausedTabs.clear();
+  persistPausedTabs(); // DEF-098
   return buildStatusResponse('playing');
 }
 
@@ -277,6 +342,7 @@ async function pauseSingleTab(tabId) {
     url: tab.url ?? '',
     timestamp: Date.now(),
   });
+  persistPausedTabs(); // DEF-098
 
   return buildStatusResponse();
 }
@@ -304,6 +370,7 @@ async function resumeSingleTab(tabId, rewindSecs = 0, fadeInMs = 0) {
     });
   }
   pausedTabs.delete(tabId);
+  persistPausedTabs(); // DEF-098
 
   return buildStatusResponse();
 }
@@ -500,6 +567,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (pausedTabs.has(tabId)) {
     pausedTabs.delete(tabId);
+    persistPausedTabs(); // DEF-098
     updateBadge();
   }
 });
@@ -508,13 +576,19 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // If a tab navigated away, the media is gone — remove from tracking
   if (changeInfo.status === 'loading' && pausedTabs.has(tabId)) {
     pausedTabs.delete(tabId);
+    persistPausedTabs(); // DEF-098
     updateBadge();
   }
 });
 
 // ---------------------------------------------------------------------------
-// Startup
+// Lifecycle — MV3 service workers are ephemeral. Revive the native port
+// whenever Chrome re-runs this module (startup, install/update) and on
+// the tab events we already register for.
 // ---------------------------------------------------------------------------
+
+chrome.runtime.onStartup.addListener(() => forceReconnect('onStartup'));
+chrome.runtime.onInstalled.addListener(() => forceReconnect('onInstalled'));
 
 connectNativeHost();
 console.log('[Hush] Service worker started');

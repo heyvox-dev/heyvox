@@ -71,12 +71,18 @@ def isolate_flags(tmp_path, monkeypatch):
     tts_flag = str(tmp_path / "heyvox-tts-playing")
     cmd_file = str(tmp_path / "heyvox-tts-cmd")
     hud_sock = str(tmp_path / "heyvox-hud.sock")
+    tts_echo_journal = str(tmp_path / "heyvox-tts-echo.jsonl")
 
     # Patch source of truth
     monkeypatch.setattr("heyvox.constants.RECORDING_FLAG", rec_flag)
     monkeypatch.setattr("heyvox.constants.TTS_PLAYING_FLAG", tts_flag)
     monkeypatch.setattr("heyvox.constants.TTS_CMD_FILE", cmd_file)
     monkeypatch.setattr("heyvox.constants.HUD_SOCKET_PATH", hud_sock)
+    monkeypatch.setattr("heyvox.constants.TTS_ECHO_JOURNAL", tts_echo_journal)
+    try:
+        monkeypatch.setattr("heyvox.audio.echo.TTS_ECHO_JOURNAL", tts_echo_journal)
+    except AttributeError:
+        pass  # Module not yet imported
 
     # Patch consumers that imported at module level
     try:
@@ -95,6 +101,11 @@ def isolate_flags(tmp_path, monkeypatch):
 
     try:
         monkeypatch.setattr("heyvox.recording.RECORDING_FLAG", rec_flag)
+    except AttributeError:
+        pass
+
+    try:
+        monkeypatch.setattr("heyvox.recording.TTS_PLAYING_FLAG", tts_flag)
     except AttributeError:
         pass
 

@@ -1,7 +1,5 @@
 """Herald Worker — TTS extraction and WAV generation.
 
-Port of heyvox/herald/lib/worker.sh to Python.
-
 Handles the full pipeline from raw Claude response text to WAV files
 enqueued in the herald queue directory:
   1. Extract <tts>...</tts> blocks from response text
@@ -25,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -40,6 +39,8 @@ from heyvox.constants import (
     HERALD_CLAIM_DIR,
     KOKORO_DAEMON_PID,
     KOKORO_DAEMON_SOCK,
+    QWEN_DAEMON_PID,
+    QWEN_DAEMON_SOCK,
     VERBOSITY_FILE,
     HERALD_GENERATING_WAV_PREFIX,
 )
@@ -56,7 +57,7 @@ _herald_logger.addHandler(_file_handler)
 _herald_logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
-# Voice constants (from worker.sh)
+# Voice constants
 # ---------------------------------------------------------------------------
 
 MOOD_VOICES: dict[str, str] = {
@@ -74,6 +75,61 @@ AGENT_VOICE_POOL = [
 DEFAULT_VOICE = "af_sarah"
 DEFAULT_LANG = "en-us"
 DEFAULT_SPEED = 1.2
+
+# Qwen3-TTS voice roster (used for non-Kokoro languages like German).
+# Voice identity is cross-lingual — same character speaks all Qwen3 langs.
+QWEN_MOOD_VOICES: dict[str, str] = {
+    "neutral": "Serena",
+    "cheerful": "Vivian",
+    "alert": "Aura",
+    "thoughtful": "Aria",
+}
+
+QWEN_DEFAULT_VOICE = "Serena"
+
+# Languages routed to the Qwen3 daemon (lazy-loaded). Kokoro covers
+# en-us, en-gb, es, fr-fr, it, pt, ja, cmn, hi — everything else goes
+# here. Start with German since that's what we've validated; extend
+# when we confirm quality for other langs.
+QWEN_LANGS: frozenset[str] = frozenset({"de"})
+
+
+def _engine_for_lang(lang: str) -> str:
+    """Return 'qwen' or 'kokoro' for the given language code."""
+    return "qwen" if lang in QWEN_LANGS else "kokoro"
+
+
+def _allowed_languages() -> frozenset[str] | None:
+    """Return the set of TTS languages the user has allowed, or None for 'auto'.
+
+    Priority: HEYVOX_TTS_LANGS env var > config.tts.languages > "auto".
+    Value shapes accepted: "auto", "en-us,de", ["en-us", "de"].
+    Returning None means "no restriction" (detect + route freely).
+    """
+    raw: object | None = None
+    env = os.environ.get("HEYVOX_TTS_LANGS", "").strip()
+    if env:
+        raw = env
+    else:
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+            raw = getattr(getattr(cfg, "tts", None), "languages", None)
+        except Exception as exc:
+            log.debug("Could not load tts.languages from config: %s", exc)
+            raw = None
+
+    if raw is None or raw == "" or raw == "auto":
+        return None
+    if isinstance(raw, str):
+        items = [s.strip() for s in raw.split(",") if s.strip()]
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        items = [str(s).strip() for s in raw if str(s).strip()]
+    else:
+        return None
+    if not items or "auto" in items:
+        return None
+    return frozenset(items)
 
 # ---------------------------------------------------------------------------
 # Standalone utility functions
@@ -110,7 +166,6 @@ def normalize_wav_in_place(path: str) -> None:
 def detect_mood(text: str) -> str:
     """Detect the emotional mood of a TTS text fragment.
 
-    Ports detect_mood() from worker.sh lines 73-95.
     Returns one of: 'alert', 'cheerful', 'thoughtful', 'neutral'.
     """
     t = text.lower()
@@ -155,14 +210,14 @@ def detect_language(text: str) -> tuple[str, str | None]:
     if re.search(r"[\u4e00-\u9fff]", text):
         return "cmn", "zf_xiaoxiao"
 
-    # German — umlauts + anchored ich/wir phrases. Kokoro has no German
-    # voice, and the Piper Thorsten fallback is disliked. Keep English.
+    # German — umlauts + anchored ich/wir phrases. Routes to Qwen3-TTS
+    # daemon (lazy-loaded). Voice is picked by mood in _select_voice.
     if re.search(r"[äöüÄÖÜß]", text) or re.search(
         r"\b(ich bin|ich habe|wir haben|das ist|was ist|guten (morgen|tag|abend)|"
         r"danke sch[öo]n|bitte sch[öo]n|auf wiedersehen|entschuldigung)\b",
         text, re.IGNORECASE,
     ):
-        return "en-us", None
+        return "de", None
 
     # French — anchored phrases only. No `c.est` wildcard (matched "chest"/"crest").
     if re.search(
@@ -258,14 +313,15 @@ def _ensure_orchestrator() -> None:
 class HeraldWorker:
     """TTS extraction and WAV generation for Herald.
 
-    Ports heyvox/herald/lib/worker.sh to Python.
     Stateless per call — multiple instances can run concurrently.
     """
 
     def __init__(self) -> None:
         # Workspace name from environment (D-04: only env var, no DB query).
-        # HEYVOX_WORKSPACE is the generic env var; CONDUCTOR_WORKSPACE_NAME
-        # is kept for backward compatibility with Conductor hook environments.
+        # HEYVOX_WORKSPACE is the generic env var. CONDUCTOR_WORKSPACE_NAME
+        # is a deprecated fallback kept while Conductor hook environments
+        # migrate; remove once heyvox setup ships HEYVOX_WORKSPACE in all
+        # generated launchd/hook configs.
         self._workspace: str = (
             os.environ.get("HEYVOX_WORKSPACE", "")
             or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
@@ -325,9 +381,31 @@ class HeraldWorker:
             return True
 
         # Voice/language/mood selection
-        mood = self._detect_mood(speech)
-        lang, lang_voice = self._detect_language(speech)
+        mood = detect_mood(speech)
+        lang, lang_voice = detect_language(speech)
+
+        # Apply TTS language allowlist (config.tts.languages or
+        # HEYVOX_TTS_LANGS env). If the detected language isn't allowed,
+        # demote to the fallback (first allowlist entry or en-us) so we
+        # never silently pull an unwanted engine (e.g. Qwen3 for German).
+        allowed = _allowed_languages()
+        if allowed is not None and lang not in allowed:
+            demoted = next(iter(allowed), "en-us")
+            log.info("TTS lang demoted: %s → %s (allowlist=%s)", lang, demoted, sorted(allowed))
+            lang, lang_voice = demoted, None
+
         voice = self._select_voice(mood, lang, lang_voice)
+
+        # DEF-078: Register the finalized speech text with the cross-process
+        # echo buffer BEFORE generation. The heyvox daemon's STT filter reads
+        # the shared journal to strip speaker-to-mic bleed from transcriptions.
+        # This worker runs in its own short-lived process spawned by a Claude
+        # Code hook, so the in-process buffer wouldn't reach the STT filter.
+        try:
+            from heyvox.audio.echo import register_tts_text
+            register_tts_text(speech)
+        except Exception as e:
+            log.debug("DEF-078: register_tts_text failed (non-fatal): %s", e)
 
         # Generate WAV
         log.info("Generating TTS: mood=%s lang=%s voice=%s len=%d", mood, lang, voice, len(speech))
@@ -343,7 +421,6 @@ class HeraldWorker:
     def _extract_tts_blocks(self, text: str) -> list[str]:
         """Extract all <tts>...</tts> blocks (DOTALL, multiline).
 
-        Ports from worker.sh lines 38-42 (multiline match with inline fallback).
         """
         # Try anchored form first (at start of line, as Claude often emits)
         matches = re.findall(r"^<tts>(.*?)</tts>", text, re.DOTALL | re.MULTILINE)
@@ -358,45 +435,63 @@ class HeraldWorker:
                 matches = all_matches
         return matches
 
-    # ------------------------------------------------------------------
-    # Private: mood/language/voice (thin wrappers for testability)
-    # ------------------------------------------------------------------
-
-    def _detect_mood(self, text: str) -> str:
-        return detect_mood(text)
-
-    def _detect_language(self, text: str) -> tuple[str, str | None]:
-        return detect_language(text)
-
     def _select_voice(self, mood: str, lang: str, lang_voice: str | None) -> str:
-        """Select Kokoro voice name from mood + language + agent context.
+        """Select TTS voice name from mood + language + agent context.
 
-        Ports voice selection logic from worker.sh lines 86-131.
         Priority: agent env var > language override > mood.
+        Different voice roster per engine: Kokoro (af_*/am_*) vs Qwen3
+        (Serena/Ethan/etc.) — picked based on lang.
         """
-        # Mood → default voice
-        voice = MOOD_VOICES.get(mood, DEFAULT_VOICE)
+        engine = _engine_for_lang(lang)
+
+        # Mood → default voice for this engine
+        if engine == "qwen":
+            voice = QWEN_MOOD_VOICES.get(mood, QWEN_DEFAULT_VOICE)
+        else:
+            voice = MOOD_VOICES.get(mood, DEFAULT_VOICE)
 
         # Language override (higher priority than mood)
         if lang_voice and lang != "en-us":
             voice = lang_voice
 
-        # Multi-agent voice routing (highest priority).
-        # HEYVOX_AGENT is the generic env var; CONDUCTOR_AGENT and
-        # CLAUDE_AGENT_NAME are kept for backward compatibility.
-        agent_name = (
-            os.environ.get("HEYVOX_AGENT", "")
-            or os.environ.get("CONDUCTOR_AGENT", "")
-            or os.environ.get("CLAUDE_AGENT_NAME", "")
-        )
-        if agent_name:
-            idx = int(hashlib.md5(agent_name.encode()).hexdigest(), 16) % len(AGENT_VOICE_POOL)
-            voice = AGENT_VOICE_POOL[idx]
+        # Multi-agent voice routing (highest priority) — Kokoro only.
+        # Qwen3's 9-voice roster isn't large enough for agent hashing,
+        # and cross-lingual voice identity already gives agents stable
+        # character across languages.
+        # CONDUCTOR_AGENT is a deprecated fallback; remove once setup
+        # wizard ships HEYVOX_AGENT in all generated hook configs.
+        if engine == "kokoro":
+            agent_name = (
+                os.environ.get("HEYVOX_AGENT", "")
+                or os.environ.get("CONDUCTOR_AGENT", "")
+                or os.environ.get("CLAUDE_AGENT_NAME", "")
+            )
+            if agent_name:
+                idx = int(hashlib.md5(agent_name.encode()).hexdigest(), 16) % len(AGENT_VOICE_POOL)
+                voice = AGENT_VOICE_POOL[idx]
 
-        # Explicit voice override from environment (e.g. KOKORO_VOICE)
-        env_voice = os.environ.get("KOKORO_VOICE", "")
+        # Explicit voice override from environment
+        if engine == "qwen":
+            env_voice = os.environ.get("QWEN_VOICE", "")
+        else:
+            env_voice = os.environ.get("KOKORO_VOICE", "")
         if env_voice:
             voice = env_voice
+            return voice
+
+        # Config-level voice override (set via HUD menu or config.yaml).
+        # Env wins over config so per-workspace overrides still work.
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+            if engine == "qwen":
+                ov = getattr(cfg.tts, "qwen_voice_override", None)
+            else:
+                ov = getattr(cfg.tts, "voice_override", None)
+            if ov:
+                voice = ov
+        except Exception as exc:
+            log.debug("Could not read voice_override from config: %s", exc)
 
         return voice
 
@@ -405,15 +500,76 @@ class HeraldWorker:
     # ------------------------------------------------------------------
 
     def _generate(self, text: str, voice: str, lang: str, speed: float) -> bool:
-        """Generate TTS WAV and enqueue it. Tries Kokoro daemon first, Piper fallback."""
+        """Generate TTS WAV and enqueue it.
+
+        Route by language: QWEN_LANGS (e.g. German) → Qwen3 daemon,
+        everything else → Kokoro daemon. Both fall back to Piper if
+        their daemon is unreachable.
+        """
         timestamp = str(int(time.time() * 1000))
         temp_wav = f"{HERALD_GENERATING_WAV_PREFIX}{os.getpid()}.wav"
+
+        engine = _engine_for_lang(lang)
+        if engine == "qwen":
+            if self._generate_qwen(text, voice, lang, speed, temp_wav, timestamp):
+                return True
+            log.warning("Qwen3 daemon unavailable — falling back to Piper (lang=%s)", lang)
+            return self._generate_piper(text, voice, temp_wav, timestamp, lang)
 
         if self._generate_kokoro(text, voice, lang, speed, temp_wav, timestamp):
             return True
 
         log.warning("Kokoro daemon unavailable — falling back to Piper (lang=%s)", lang)
         return self._generate_piper(text, voice, temp_wav, timestamp, lang)
+
+    def _generate_qwen(
+        self,
+        text: str,
+        voice: str,
+        lang: str,
+        speed: float,
+        temp_wav: str,
+        timestamp: str,
+    ) -> bool:
+        """Generate WAV via Qwen3 daemon. Mirrors _generate_kokoro protocol."""
+        if not self._ensure_qwen_daemon():
+            return False
+
+        request = {
+            "text": text,
+            "voice": voice,
+            "lang": lang,
+            "speed": speed,
+            "output": temp_wav,
+        }
+
+        watcher_stop = threading.Event()
+        watcher_thread = threading.Thread(
+            target=self._early_enqueue_watcher,
+            args=(temp_wav, timestamp, watcher_stop),
+            daemon=True,
+        )
+        watcher_thread.start()
+
+        try:
+            resp = self._qwen_request(request, timeout=60.0)
+        except Exception as exc:
+            log.warning("Qwen3 daemon request failed: %s", exc)
+            watcher_stop.set()
+            watcher_thread.join(timeout=2.0)
+            return False
+        finally:
+            watcher_stop.set()
+            watcher_thread.join(timeout=2.0)
+
+        if not resp.get("ok"):
+            log.warning("Qwen3 daemon returned error: %s", resp.get("error"))
+            return False
+
+        parts = resp.get("parts", 1)
+        log.info("Qwen3 generated %d part(s) in %.2fs", parts, resp.get("duration", 0))
+        self._enqueue_remaining_parts(temp_wav, timestamp, parts, "Qwen3")
+        return True
 
     def _generate_kokoro(
         self,
@@ -426,7 +582,6 @@ class HeraldWorker:
     ) -> bool:
         """Generate WAV via Kokoro daemon (AF_UNIX socket).
 
-        Ports the daemon communication block from worker.sh lines 171-243.
         """
         if not self._ensure_kokoro_daemon():
             return False
@@ -466,8 +621,23 @@ class HeraldWorker:
 
         parts = resp.get("parts", 1)
         log.info("Kokoro generated %d part(s) in %.2fs", parts, resp.get("duration", 0))
+        self._enqueue_remaining_parts(temp_wav, timestamp, parts, "Kokoro")
+        return True
 
-        # Enqueue remaining parts (part 2+)
+    def _enqueue_remaining_parts(
+        self,
+        temp_wav: str,
+        timestamp: str,
+        parts: int,
+        engine_name: str,
+    ) -> None:
+        """Move parts 2+ from temp dir into the Herald queue and clean up.
+
+        Part 1 is normally enqueued by _early_enqueue_watcher while
+        generation runs. DEF-073: if the watcher lost the race (very
+        short generations finish before its first 100ms poll), rescue
+        part 1 here from temp_wav before the unlink below deletes it.
+        """
         base = temp_wav.replace(".wav", "")
         for part_num in range(2, parts + 1):
             part_path = f"{base}.part{part_num}.wav"
@@ -481,20 +651,27 @@ class HeraldWorker:
                 except OSError as exc:
                     log.warning("Failed to enqueue part %d: %s", part_num, exc)
 
-        # Remove parts manifest now that all parts are enqueued
+        part1_name = f"{timestamp}-01.wav"
+        part1_dest = os.path.join(HERALD_QUEUE_DIR, part1_name)
+        if not os.path.isfile(part1_dest) and os.path.isfile(temp_wav):
+            try:
+                os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
+                shutil.move(temp_wav, part1_dest)
+                self._write_workspace_sidecar(part1_dest)
+                log.info("DEF-073: %s rescued part 1 via main-thread fallback -> %s", engine_name, part1_name)
+            except OSError as exc:
+                log.warning("Failed to rescue part 1: %s", exc)
+
         parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
         try:
             os.unlink(parts_file)
         except FileNotFoundError:
             pass
 
-        # Clean up temp file if not moved by watcher
         try:
             os.unlink(temp_wav)
         except FileNotFoundError:
             pass
-
-        return True
 
     def _early_enqueue_watcher(
         self,
@@ -579,7 +756,6 @@ class HeraldWorker:
     ) -> bool:
         """Generate WAV via Piper TTS (fallback path).
 
-        Ports the CLI fallback from worker.sh lines 247-260.
         Normalizes output via normalize_wav_in_place() per HERALD-02.
         """
         # Find piper model path matching the requested language
@@ -630,11 +806,15 @@ class HeraldWorker:
     def _ensure_kokoro_daemon(self) -> bool:
         """Ensure Kokoro daemon is running. Start it if not.
 
-        Ports ensure_daemon() from worker.sh lines 155-167.
         Returns True if daemon is ready, False if startup failed.
         """
         if self._kokoro_daemon_alive():
             return True
+
+        # DEF-069: a stale daemon (process alive, socket missing) will trip the
+        # new daemon's PID-lock soft-check and abort spawn, causing Piper
+        # fallback. Reap it before spawning so the new daemon can take over.
+        self._reap_stale_kokoro_daemon()
 
         log.info("Starting Kokoro daemon...")
         daemon_script = self._find_kokoro_daemon_script()
@@ -677,6 +857,51 @@ class HeraldWorker:
         except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
             return False
 
+    def _reap_stale_kokoro_daemon(self) -> None:
+        """Terminate a live-but-socketless Kokoro daemon blocking new spawns.
+
+        DEF-069: The kokoro-daemon PID-lock's soft check (is_pid_alive) aborts
+        startup whenever the PID file points to any live process — even one
+        that has already closed its socket or is stuck in MLX teardown. The
+        worker then waits 8 s for a socket that will never appear and falls
+        back to Piper. Proactively SIGTERM the stuck daemon so the lock
+        releases and the new daemon can bind.
+        """
+        try:
+            pid_str = Path(KOKORO_DAEMON_PID).read_text().strip()
+            pid = int(pid_str)
+        except (FileNotFoundError, ValueError):
+            return
+        if pid <= 0 or pid == os.getpid():
+            return
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        log.warning(
+            "Stale Kokoro daemon pid=%d has no socket — terminating before respawn",
+            pid,
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        for _ in range(30):  # up to ~3 s
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.1)
+
+        log.warning("Stale Kokoro daemon pid=%d ignored SIGTERM — SIGKILL", pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        time.sleep(0.2)
+
     def _find_kokoro_daemon_script(self) -> Path | None:
         """Find the kokoro-daemon.py script path."""
         # Relative to this module's package (heyvox/herald/daemon/)
@@ -690,6 +915,124 @@ class HeraldWorker:
             if s.is_file():
                 return s
         return None
+
+    # ------------------------------------------------------------------
+    # Private: Qwen3 daemon lifecycle (mirrors the Kokoro lifecycle)
+    # ------------------------------------------------------------------
+
+    def _ensure_qwen_daemon(self) -> bool:
+        """Ensure Qwen3 daemon is running. Start it lazily on first German hit."""
+        if self._qwen_daemon_alive():
+            return True
+
+        self._reap_stale_qwen_daemon()
+
+        log.info("Starting Qwen3 daemon...")
+        daemon_script = self._find_qwen_daemon_script()
+        if not daemon_script:
+            log.warning("Qwen3 daemon script not found")
+            return False
+
+        python_exe = self._find_kokoro_python()  # same interpreter has mlx-audio
+        try:
+            subprocess.Popen(
+                [python_exe, str(daemon_script)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=open(HERALD_DEBUG_LOG, "a"),
+                start_new_session=True,
+            )
+        except OSError as exc:
+            log.warning("Failed to launch Qwen3 daemon: %s", exc)
+            return False
+
+        # First-load can take ~5s (bf16 weights + warmup). Wait up to 30s.
+        for _ in range(300):
+            if os.path.exists(QWEN_DAEMON_SOCK):
+                log.info("Qwen3 daemon started successfully")
+                return True
+            time.sleep(0.1)
+
+        log.warning("Qwen3 daemon failed to start (socket never appeared)")
+        return False
+
+    def _qwen_daemon_alive(self) -> bool:
+        if not os.path.exists(QWEN_DAEMON_SOCK):
+            return False
+        try:
+            pid_str = Path(QWEN_DAEMON_PID).read_text().strip()
+            pid = int(pid_str)
+            os.kill(pid, 0)
+            return True
+        except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+            return False
+
+    def _reap_stale_qwen_daemon(self) -> None:
+        """Mirror _reap_stale_kokoro_daemon for the Qwen3 PID lock."""
+        try:
+            pid_str = Path(QWEN_DAEMON_PID).read_text().strip()
+            pid = int(pid_str)
+        except (FileNotFoundError, ValueError):
+            return
+        if pid <= 0 or pid == os.getpid():
+            return
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        log.warning(
+            "Stale Qwen3 daemon pid=%d has no socket — terminating before respawn",
+            pid,
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+
+        for _ in range(30):
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.1)
+
+        log.warning("Stale Qwen3 daemon pid=%d ignored SIGTERM — SIGKILL", pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        time.sleep(0.2)
+
+    def _find_qwen_daemon_script(self) -> Path | None:
+        script = Path(__file__).parent / "daemon" / "qwen-daemon.py"
+        if script.is_file():
+            return script
+        env_home = os.environ.get("HERALD_HOME", "")
+        if env_home:
+            s = Path(env_home) / "daemon" / "qwen-daemon.py"
+            if s.is_file():
+                return s
+        return None
+
+    def _qwen_request(self, request: dict, timeout: float = 60.0) -> dict:
+        """Send JSON request to Qwen3 daemon and return parsed response."""
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(QWEN_DAEMON_SOCK)
+            sock.sendall(json.dumps(request).encode("utf-8"))
+            raw = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                raw += chunk
+            if not raw:
+                return {"ok": False, "error": "empty response"}
+            return json.loads(raw.decode("utf-8"))
+        finally:
+            sock.close()
 
     def _find_kokoro_python(self) -> str:
         """Find the Python executable to use for the Kokoro daemon.
@@ -775,7 +1118,6 @@ class HeraldWorker:
     def _kokoro_request(self, request: dict, timeout: float = 30.0) -> dict:
         """Send a request to the Kokoro daemon via AF_UNIX socket.
 
-        Ports the daemon call from worker.sh lines 198-222.
         """
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)

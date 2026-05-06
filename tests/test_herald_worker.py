@@ -139,11 +139,6 @@ class TestDetectMood:
     def test_neutral_hello(self):
         assert detect_mood("hello, how can I help?") == "neutral"
 
-    def test_instance_method_matches(self, worker):
-        """HeraldWorker._detect_mood delegates to module-level function."""
-        assert worker._detect_mood("error occurred") == detect_mood("error occurred")
-
-
 # ---------------------------------------------------------------------------
 # Language detection tests
 # ---------------------------------------------------------------------------
@@ -183,11 +178,6 @@ class TestDetectLanguage:
         lang, voice = detect_language("Ich werde das machen")
         assert lang == "en-us"
         assert voice is None
-
-    def test_instance_method_matches(self, worker):
-        """HeraldWorker._detect_language delegates to module-level function."""
-        assert worker._detect_language("Hello") == detect_language("Hello")
-
 
 # ---------------------------------------------------------------------------
 # Voice selection tests

@@ -32,9 +32,21 @@ def start_orchestrator() -> None:
 
     Loads the app profile config to configure workspace switching.
     """
+    from pathlib import Path as _Path
     from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
+
+    # DEF-092 hybrid C: lower bash idle gate from 5s to 2s, paired with
+    # --force removal in _switch_workspace and the post-Sent flag grace
+    # in recording.py. Brief listening pauses no longer false-skip;
+    # real typing/clicking (sub-2s idle) still gates the switch.
+    try:
+        _Path("/tmp/herald-switch-idle-threshold").write_text("2\n")
+    except OSError:
+        pass
+
     ws_switch_cmd = ""
     ws_app_name = ""
+    hold_queue_enabled = False
     try:
         from heyvox.config import load_config
         cfg = load_config()
@@ -43,17 +55,19 @@ def start_orchestrator() -> None:
                 ws_switch_cmd = profile.workspace_switch_cmd
                 ws_app_name = profile.name
                 break
+        hold_queue_enabled = bool(cfg.hold_queue.enabled)
     except Exception:
         pass
     orch_cfg = OrchestratorConfig(
         workspace_switch_cmd=ws_switch_cmd,
         workspace_app_name=ws_app_name,
+        hold_queue_enabled=hold_queue_enabled,
     )
     orch = HeraldOrchestrator(config=orch_cfg)
     orch.run()
 
 
-# Python orchestrator (pure Python replacement for orchestrator.sh)
+# Python orchestrator
 from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig  # noqa: E402
 
 __all__ = [

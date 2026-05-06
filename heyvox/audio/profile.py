@@ -38,6 +38,15 @@ _CALIBRATION_MULTIPLIER = 3.5
 # Maximum silence_threshold from calibration (prevents absurd values on very noisy mics)
 _CALIBRATION_MAX_THRESHOLD = 500
 
+# DEF-097: Minimum silence_threshold floor. Hardware-gated mics (some Jabra,
+# certain Bluetooth profiles) report idle audio at level 0, which would
+# multiply to silence_threshold = 0 and disable the VAD silent gate
+# entirely. Without a working gate the DEF-096 silence-transition reset
+# and pre-silence threshold discount can never fire, regressing stop-wake
+# reliability. Real speech is consistently > 1000, so a floor of 50 is
+# well below speech and well above any plausible quiet-mic noise floor.
+_CALIBRATION_MIN_THRESHOLD = 50
+
 
 @dataclass
 class MicProfileEntry:
@@ -54,6 +63,7 @@ class MicProfileEntry:
     gain: float | None = None
     voice_isolation_mode: bool | None = None
     echo_safe: bool | None = None
+    min_audio_dbfs: float | None = None  # DEF-101: per-mic energy-gate floor
 
 
 class MicProfileManager:
@@ -186,6 +196,8 @@ class MicProfileManager:
                 entry.voice_isolation_mode = config_entry.voice_isolation_mode
             if config_entry.echo_safe is not None:
                 entry.echo_safe = config_entry.echo_safe
+            if config_entry.min_audio_dbfs is not None:
+                entry.min_audio_dbfs = config_entry.min_audio_dbfs
 
         return entry
 
@@ -198,7 +210,16 @@ class MicProfileManager:
 
         Algorithm (D-04, D-12):
         - noise_floor = median of per-chunk peak values
-        - silence_threshold = min(noise_floor * 3.5, 500)
+        - silence_threshold = clamp(noise_floor * 3.5,
+                                    _CALIBRATION_MIN_THRESHOLD,
+                                    _CALIBRATION_MAX_THRESHOLD)
+
+        DEF-097: the floor (`_CALIBRATION_MIN_THRESHOLD = 50`) prevents
+        hardware-gated mics that report idle level 0 from collapsing the
+        silence_threshold to 0. A 0 threshold disables the VAD silent
+        gate, which in turn disables every downstream feature that keys
+        off VAD silence (DEF-053 grace, DEF-096-A silence reset,
+        DEF-096-B pre-silence discount).
 
         Args:
             chunks: List of int16 numpy arrays (audio frames).
@@ -207,11 +228,15 @@ class MicProfileManager:
             (noise_floor, silence_threshold) — both as int.
         """
         if not chunks:
-            return 0, 0
+            return 0, _CALIBRATION_MIN_THRESHOLD
 
         peak_levels = [int(np.abs(chunk).max()) for chunk in chunks]
         noise_floor = int(np.median(peak_levels))
-        silence_threshold = min(int(noise_floor * _CALIBRATION_MULTIPLIER), _CALIBRATION_MAX_THRESHOLD)
+        silence_threshold = max(
+            _CALIBRATION_MIN_THRESHOLD,
+            min(int(noise_floor * _CALIBRATION_MULTIPLIER),
+                _CALIBRATION_MAX_THRESHOLD),
+        )
         return noise_floor, silence_threshold
 
     def save_calibration(

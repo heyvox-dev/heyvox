@@ -87,7 +87,7 @@ class TestFindBestMic:
 
     def test_priority_ordering(self, monkeypatch):
         """Returns highest-priority matching device when multiple candidates exist."""
-        monkeypatch.setattr("heyvox.audio.mic._get_dead_input_device_names", lambda: set())
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
         devices = [
             {"name": "MacBook Pro Microphone", "maxInputChannels": 1},
             {"name": "BlackHole 2ch", "maxInputChannels": 2},
@@ -99,7 +99,7 @@ class TestFindBestMic:
 
     def test_cooldown_skips_device(self, monkeypatch):
         """Skips devices in cooldown and falls back to next candidate."""
-        monkeypatch.setattr("heyvox.audio.mic._get_dead_input_device_names", lambda: set())
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
         add_device_cooldown("blackhole 2ch")
         devices = [
             {"name": "BlackHole 2ch", "maxInputChannels": 2},
@@ -113,7 +113,7 @@ class TestFindBestMic:
     def test_dead_device_filtered(self, monkeypatch):
         """Skips devices reported dead by CoreAudio."""
         monkeypatch.setattr(
-            "heyvox.audio.mic._get_dead_input_device_names",
+            "heyvox.audio.mic.get_dead_input_device_names",
             lambda: {"jabra link 380"},
         )
         devices = [
@@ -127,7 +127,7 @@ class TestFindBestMic:
 
     def test_fallback_to_non_priority_device(self, monkeypatch):
         """Falls back to non-priority device when no priority device matches."""
-        monkeypatch.setattr("heyvox.audio.mic._get_dead_input_device_names", lambda: set())
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
         devices = [
             {"name": "Unknown USB Mic", "maxInputChannels": 1},
         ]
@@ -138,7 +138,7 @@ class TestFindBestMic:
 
     def test_returns_default_when_all_fail(self, monkeypatch):
         """Returns system default device index when all candidates fail to open."""
-        monkeypatch.setattr("heyvox.audio.mic._get_dead_input_device_names", lambda: set())
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
         devices = [
             {"name": "Dead Mic", "maxInputChannels": 1},
         ]
@@ -152,7 +152,7 @@ class TestFindBestMic:
 
     def test_returns_none_when_no_devices(self, monkeypatch):
         """Returns None when no input devices are available at all."""
-        monkeypatch.setattr("heyvox.audio.mic._get_dead_input_device_names", lambda: set())
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
         pa = _mock_pa([])
         pa.get_default_input_device_info.side_effect = IOError("No devices")
         result = find_best_mic(pa, mic_priority=["anything"])

@@ -96,6 +96,12 @@ SPEAKER_MODE_THRESHOLD_MULT = 1.4
 # Requirement: ECHO-03
 TTS_ECHO_BUFFER_SECS = 30.0
 
+# DEF-078: Cross-process echo journal. Herald's TTS worker runs in a separate
+# process (spawned by Claude Code hooks), so the in-process echo buffer never
+# sees Herald-initiated TTS. Every TTS producer appends to this JSONL file;
+# filter_tts_echo() reads it in addition to the in-memory buffer.
+TTS_ECHO_JOURNAL = f"{_TMP}/heyvox-tts-echo.jsonl"
+
 # Default AEC stream delay (ms) for built-in speakers.
 # Used by livekit WebRTC APM when no calibrated value is configured.
 # Requirement: ECHO-06
@@ -125,6 +131,13 @@ HUD_SOCKET_PATH = f"{_TMP}/heyvox-hud.sock"
 # Mic mute flag — when this file exists, wake word detection is paused.
 # Written/removed by HUD menu toggle or CLI.
 MIC_MUTE_FLAG = f"{_TMP}/heyvox-mic-mute"
+
+# Mic warning file (DEF-101) — written by recording.py when energy gate
+# rejects audio as too quiet. HUD overlay reads this on every menu bar
+# refresh and surfaces the warning until auto-expiry.
+# Format: single line plain text. mtime drives expiry.
+MIC_WARN_FILE = f"{_TMP}/heyvox-mic-warn"
+MIC_WARN_TTL_SECS = 60
 
 # Active mic name file — written by main.py on startup and device switch.
 # Read by HUD overlay to display the current mic in the menu bar.
@@ -164,6 +177,10 @@ HERALD_PLAY_NEXT = f"{_TMP}/herald-play-next"
 # Kokoro TTS daemon IPC — Unix socket + PID file
 KOKORO_DAEMON_SOCK = f"{_TMP}/kokoro-daemon.sock"
 KOKORO_DAEMON_PID = f"{_TMP}/kokoro-daemon.pid"
+
+# Qwen3-TTS daemon IPC — German + other non-Kokoro languages. Lazy-started.
+QWEN_DAEMON_SOCK = f"{_TMP}/qwen-daemon.sock"
+QWEN_DAEMON_PID = f"{_TMP}/qwen-daemon.pid"
 
 # ---------------------------------------------------------------------------
 # Core process files (IPC-01)
@@ -216,7 +233,8 @@ HEYVOX_MEDIA_PAUSED_PREFIX = f"{_TMP}/heyvox-media-paused-"
 # Hush (browser media control) (IPC-01)
 # ---------------------------------------------------------------------------
 
-HUSH_SOCK = f"{_TMP}/hush.sock"
+HUSH_SOCK = f"{_TMP}/hush.sock"  # legacy symlink, last-binder wins
+HUSH_SOCK_GLOB = f"{_TMP}/hush-*.sock"  # DEF-105: per-host PID-suffixed sockets
 HUSH_LOG = f"{_TMP}/hush.log"
 
 # ---------------------------------------------------------------------------
@@ -247,14 +265,14 @@ def cleanup_ipc_files(herald_too: bool = True):
     # native-messaging process with its own socket lifecycle (bind on startup,
     # atexit cleanup). If HeyVox unlinks the file while the host process is
     # still alive, the listener keeps its in-kernel bind but the socket file
-    # vanishes from the filesystem — no client can connect, media pause
-    # silently falls through to the less reliable MediaRemote/media-key tiers.
-    # See DEF-039.
+    # vanishes from the filesystem — no client can connect, and browser media
+    # simply won't be paused during TTS. See DEF-039.
     for path in (RECORDING_FLAG, TTS_PLAYING_FLAG, TTS_CMD_FILE,
                  VERBOSITY_FILE, HUD_SOCKET_PATH, ACTIVE_MIC_FILE,
                  MIC_SWITCH_REQUEST_FILE, HEYVOX_PID_FILE,
                  HEYVOX_HEARTBEAT_FILE, HEYVOX_STATE_FILE,
                  HUD_POSITION_FILE, TTS_STYLE_FILE,
+                 TTS_ECHO_JOURNAL,
                  HEYVOX_MEDIA_PAUSED_REC):
         try:
             os.unlink(path)

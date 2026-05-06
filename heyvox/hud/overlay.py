@@ -330,9 +330,46 @@ def _apply_state(
             if crashed:
                 icon = "\u26a0\ufe0f"
                 label = f" {'+'.join(crashed)} crashed"
+        # DEF-100: held TTS count badge \u2014 surfaces hold-queue state.
+        # Stays at 0 with default config (hold_queue.enabled=false), but if
+        # the user opts back into hold-queue behaviour, this makes it visible.
+        _held_count = 0
+        try:
+            from pathlib import Path as _Path
+            from heyvox.constants import HERALD_HOLD_DIR
+            _held_count = sum(1 for _ in _Path(HERALD_HOLD_DIR).glob("*.wav"))
+        except Exception:
+            pass
+        # DEF-101: mic-warn banner \u2014 read warning text from MIC_WARN_FILE if
+        # mtime within TTL. Auto-expires (file kept for forensics, but display
+        # only while fresh). Cleared on state-change refresh once stale.
+        _mic_warn = ""
+        try:
+            from heyvox.constants import MIC_WARN_FILE, MIC_WARN_TTL_SECS
+            import time as _time
+            if os.path.exists(MIC_WARN_FILE):
+                _age = _time.time() - os.path.getmtime(MIC_WARN_FILE)
+                if _age < MIC_WARN_TTL_SECS:
+                    with open(MIC_WARN_FILE) as _wf:
+                        _mic_warn = _wf.read().strip()[:60]
+                else:
+                    # Stale: drop it so other overlay redraws don't keep checking.
+                    try:
+                        os.remove(MIC_WARN_FILE)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
         # Build menu bar title with SF Symbol-style mute indicators
         _bar_title = f"{icon}{label}"
-        if state_str == "idle" and not crashed:
+        if _held_count > 0:
+            _bar_title += f"  \U0001f4e5{_held_count}"
+        if _mic_warn:
+            # Override icon with a warning marker so it's loud
+            _bar_title = f"\u26a0\ufe0f {_mic_warn}"
+        # When a mic warning is fresh, force text-mode title (skip SF symbol)
+        # so the user sees the warning, not just an icon.
+        if state_str == "idle" and not crashed and not _mic_warn:
             from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE
             _mic_muted = os.path.exists(_MIC_MUTE)
             _spk_muted = False
@@ -355,7 +392,12 @@ def _apply_state(
                 ])
                 _mic_img = _mic_img.imageWithSymbolConfiguration_(_cfg)
             btn.setImage_(_mic_img)
-            btn.setTitle_(" \U0001f507" if _spk_muted else "")
+            _idle_suffix = ""
+            if _held_count > 0:
+                _idle_suffix += f"  \U0001f4e5{_held_count}"
+            if _spk_muted:
+                _idle_suffix += " \U0001f507"
+            btn.setTitle_(_idle_suffix)
         else:
             # Non-idle states or crashed: use emoji text, clear image
             status_item.button().setImage_(None)
@@ -660,6 +702,45 @@ def _make_menu_action_class():
             except Exception:
                 pass
 
+        def setTTSLanguages_(self, sender):
+            """Set TTS languages allowlist. 'auto' or comma-list like 'en-us,de'."""
+            try:
+                val = sender.representedObject()
+                if not val:
+                    return
+                from heyvox.config import update_config
+                if val == "auto":
+                    update_config(**{"tts.languages": "auto"})
+                else:
+                    items = [s.strip() for s in val.split(",") if s.strip()]
+                    update_config(**{"tts.languages": items})
+                if update_status_menu is not None:
+                    update_status_menu()
+            except Exception:
+                pass
+
+        def setTTSVoiceEN_(self, sender):
+            """Set Kokoro (English) voice override. Empty string = mood-mapping."""
+            try:
+                voice = sender.representedObject()
+                from heyvox.config import update_config
+                update_config(**{"tts.voice_override": voice or None})
+                if update_status_menu is not None:
+                    update_status_menu()
+            except Exception:
+                pass
+
+        def setTTSVoiceDE_(self, sender):
+            """Set Qwen3 (German) voice override. Empty string = mood-mapping."""
+            try:
+                voice = sender.representedObject()
+                from heyvox.config import update_config
+                update_config(**{"tts.qwen_voice_override": voice or None})
+                if update_status_menu is not None:
+                    update_status_menu()
+            except Exception:
+                pass
+
         def switchMic_(self, sender):
             """Write mic switch request file for main.py to pick up (atomic)."""
             device_name = sender.representedObject()
@@ -730,67 +811,58 @@ def _make_menu_action_class():
                 pass
 
         def restartHeyVox_(self, sender):
-            """Kill heyvox.main, relaunch it (which spawns a new overlay), then quit this overlay."""
+            """Signal heyvox.main to exit non-zero so launchd respawns it (DEF-071).
+
+            Previous approach (Popen relaunch from the HUD) was unreliable:
+            DEF-066 bit us via a dead cwd; DEF-071 hit a silent spawn failure
+            that left HeyVox fully dead with no respawn since clean SIGTERM
+            exits 0 and the plist uses KeepAlive: SuccessfulExit=false.
+
+            New approach: send SIGUSR2 → main's signal handler does
+            os._exit(42). Non-zero exit triggers launchd's respawn, which
+            reads WorkingDirectory and env fresh from the plist — the HUD
+            is no longer in the process-supervision business.
+            """
             import subprocess
-            import sys
             import time
             import os
             import signal as _sig
 
-            # Send SIGTERM to main process and wait for clean shutdown
-            # (atexit handler releases PID lock). Avoid pkill which can
-            # also kill the newly spawned process.
-            from heyvox.constants import HEYVOX_PID_FILE, HEYVOX_RESTART_LOG
+            from heyvox.constants import HEYVOX_PID_FILE
             pid_file = HEYVOX_PID_FILE
             old_pid = 0
+            delivered = False
             try:
                 with open(pid_file) as f:
                     old_pid = int(f.read().strip())
-                os.kill(old_pid, _sig.SIGTERM)
+                os.kill(old_pid, _sig.SIGUSR2)
+                delivered = True
             except (FileNotFoundError, ValueError, ProcessLookupError):
-                # No PID file or process already dead — try pkill as fallback
-                subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
+                # No PID file or process already dead — use pkill as fallback.
+                result = subprocess.run(
+                    ["pkill", "-USR2", "-f", "heyvox.main"],
+                    capture_output=True,
+                )
+                delivered = result.returncode == 0
 
-            # Wait for process to exit and release PID lock
-            if old_pid:
-                for _ in range(20):  # up to 2 seconds
+            # Best-effort: wait briefly for the process to exit so launchd
+            # reliably sees the non-zero code. If it won't exit, SIGKILL —
+            # launchd treats a signal-induced kill as non-success as well.
+            if delivered and old_pid:
+                for _ in range(30):  # up to 3s
                     time.sleep(0.1)
                     try:
-                        os.kill(old_pid, 0)  # Check if still alive
+                        os.kill(old_pid, 0)
                     except ProcessLookupError:
-                        break  # Process exited
+                        break
                 else:
-                    # Force kill if still alive after 2s
                     try:
                         os.kill(old_pid, _sig.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    time.sleep(0.3)
 
-            # Clean up stale PID file in case atexit didn't run
-            try:
-                os.unlink(pid_file)
-            except FileNotFoundError:
-                pass
-
-            # Relaunch main process — it will spawn its own overlay.
-            # Log stderr so startup failures are diagnosable.
-            restart_log = open(HEYVOX_RESTART_LOG, "w")
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "heyvox.main"],
-                stdout=subprocess.DEVNULL, stderr=restart_log,
-                start_new_session=True,  # Detach so our exit doesn't kill it
-            )
-
-            # Wait briefly and verify the new process is alive before quitting
-            time.sleep(0.5)
-            if proc.poll() is not None:
-                # New process already exited — don't quit overlay so user
-                # still has the menu bar icon and can see something went wrong.
-                restart_log.close()
-                return
-
-            # Quit this overlay — the new main process launches a fresh one
+            # Quit this overlay; launchd will respawn heyvox.main, which
+            # spawns a fresh overlay on startup.
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
 
@@ -808,6 +880,20 @@ def _make_menu_action_class():
                 subprocess.run(["pkill", "-f", "heyvox.main"], capture_output=True)
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
+
+        def drainHeldQueue_(self, sender):
+            """DEF-100: drain one held TTS message from the cross-workspace hold queue.
+
+            Touches the orchestrator's play-next flag so the next held WAV plays
+            regardless of workspace mismatch. Useful when running parallel
+            Conductor sessions where TTS from background workspaces gets parked.
+            """
+            from pathlib import Path
+            from heyvox.constants import HERALD_PLAY_NEXT
+            try:
+                Path(HERALD_PLAY_NEXT).touch()
+            except OSError:
+                pass
 
     return _MenuActionHandler
 
@@ -1041,6 +1127,7 @@ def _build_transcript_menu(handler):
     _STYLE_LABELS = {
         "detailed": "Detailed", "concise": "Concise",
         "technical": "Technical", "casual": "Casual",
+        "briefing": "Briefing",
     }
     style_display = _STYLE_LABELS.get(current_style, "Detailed")
     voice_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -1056,6 +1143,7 @@ def _build_transcript_menu(handler):
         ("concise", "Concise"),
         ("technical", "Technical"),
         ("casual", "Casual"),
+        ("briefing", "Briefing"),
     ]:
         s_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             f"  {style_desc}", "setTTSStyle:", "",
@@ -1070,6 +1158,122 @@ def _build_transcript_menu(handler):
 
     voice_parent.setSubmenu_(voice_sub)
     menu.addItem_(voice_parent)
+
+    # ── TTS Languages submenu ──
+    try:
+        from heyvox.config import load_config as _load_cfg
+        _cfg = _load_cfg()
+        _cfg_langs = getattr(_cfg.tts, "languages", "auto")
+        _cfg_voice_en = getattr(_cfg.tts, "voice_override", None)
+        _cfg_voice_de = getattr(_cfg.tts, "qwen_voice_override", None)
+    except Exception:
+        _cfg_langs = "auto"
+        _cfg_voice_en = None
+        _cfg_voice_de = None
+
+    if isinstance(_cfg_langs, list):
+        _cfg_lang_key = ",".join(_cfg_langs)
+        _cfg_lang_label = " + ".join(_cfg_langs).upper()
+    else:
+        _cfg_lang_key = "auto"
+        _cfg_lang_label = "Auto"
+
+    lang_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f30d Languages: {_cfg_lang_label}", None, "",
+    )
+    _styled(lang_parent)
+    lang_sub = NSMenu.alloc().init()
+    lang_sub.setAutoenablesItems_(False)
+    for key, label in [
+        ("auto",       "  Auto (detect + route)"),
+        ("en-us",      "  English only"),
+        ("en-us,de",   "  English + German"),
+        ("de",         "  German only"),
+    ]:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setTTSLanguages:", "",
+        )
+        item.setTarget_(handler)
+        item.setRepresentedObject_(key)
+        item.setEnabled_(True)
+        if key == _cfg_lang_key:
+            item.setState_(1)
+        _styled(item)
+        lang_sub.addItem_(item)
+    lang_parent.setSubmenu_(lang_sub)
+    menu.addItem_(lang_parent)
+
+    # ── Voice (EN) submenu — Kokoro ──
+    _en_voices = [
+        ("",            "  Auto (mood-based)"),
+        ("af_sarah",    "  Sarah (neutral)"),
+        ("af_heart",    "  Heart (warm)"),
+        ("af_nova",     "  Nova (alert)"),
+        ("af_sky",      "  Sky (thoughtful)"),
+        ("af_bella",    "  Bella"),
+        ("af_nicole",   "  Nicole"),
+        ("af_jessica",  "  Jessica"),
+        ("af_river",    "  River"),
+        ("af_kore",     "  Kore"),
+        ("bf_emma",     "  Emma (British)"),
+        ("bf_alice",    "  Alice (British)"),
+    ]
+    _en_current = _cfg_voice_en or ""
+    _en_display = next((n.strip() for v, n in _en_voices if v == _en_current), "Auto")
+    en_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f5e3️ Voice (EN): {_en_display}", None, "",
+    )
+    _styled(en_parent)
+    en_sub = NSMenu.alloc().init()
+    en_sub.setAutoenablesItems_(False)
+    for v, label in _en_voices:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setTTSVoiceEN:", "",
+        )
+        item.setTarget_(handler)
+        item.setRepresentedObject_(v)
+        item.setEnabled_(True)
+        if v == _en_current:
+            item.setState_(1)
+        _styled(item)
+        en_sub.addItem_(item)
+    en_parent.setSubmenu_(en_sub)
+    menu.addItem_(en_parent)
+
+    # ── Voice (DE) submenu — Qwen3 ──
+    _de_voices = [
+        ("",          "  Auto (mood-based)"),
+        ("Serena",    "  Serena (neutral)"),
+        ("Vivian",    "  Vivian (cheerful)"),
+        ("Aura",      "  Aura (alert)"),
+        ("Aria",      "  Aria (thoughtful)"),
+        ("Chelsie",   "  Chelsie"),
+        ("Ethan",     "  Ethan ♂"),
+        ("Aidan",     "  Aidan ♂"),
+        ("Davis",     "  Davis ♂"),
+        ("Leo",       "  Leo ♂"),
+    ]
+    _de_current = _cfg_voice_de or ""
+    _de_display = next((n.strip() for v, n in _de_voices if v == _de_current), "Auto")
+    de_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"\U0001f5e3️ Voice (DE): {_de_display}", None, "",
+    )
+    _styled(de_parent)
+    de_sub = NSMenu.alloc().init()
+    de_sub.setAutoenablesItems_(False)
+    for v, label in _de_voices:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label, "setTTSVoiceDE:", "",
+        )
+        item.setTarget_(handler)
+        item.setRepresentedObject_(v)
+        item.setEnabled_(True)
+        if v == _de_current:
+            item.setState_(1)
+        _styled(item)
+        de_sub.addItem_(item)
+    de_parent.setSubmenu_(de_sub)
+    menu.addItem_(de_parent)
 
     menu.addItem_(NSMenuItem.separatorItem())
 
@@ -1281,6 +1485,16 @@ def _build_transcript_menu(handler):
     log_item.setEnabled_(True)
     _styled(log_item)
     settings_sub.addItem_(log_item)
+
+    # DEF-100: drain held TTS messages from cross-workspace hold queue.
+    # One tap drains one held WAV regardless of which workspace it belongs to.
+    drain_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Drain held messages", "drainHeldQueue:", "",
+    )
+    drain_item.setTarget_(handler)
+    drain_item.setEnabled_(True)
+    _styled(drain_item)
+    settings_sub.addItem_(drain_item)
 
     settings_parent.setSubmenu_(settings_sub)
     menu.addItem_(settings_parent)

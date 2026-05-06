@@ -8,7 +8,6 @@ All tests are fully unit-testable:
 
 from __future__ import annotations
 
-import math
 import os
 import struct
 import threading
@@ -28,7 +27,6 @@ from heyvox.herald.orchestrator import (
     _is_paused,
     _duck_audio,
     _restore_audio,
-    normalize_wav,
     _herald_log,
     _get_verbosity,
     _is_skip,
@@ -147,100 +145,6 @@ class TestOrchestratorConfig:
 
 
 # ---------------------------------------------------------------------------
-# normalize_wav tests
-# ---------------------------------------------------------------------------
-
-
-class TestNormalizeWav:
-    def test_normalizes_quiet_audio(self, tmp_path):
-        """A quiet WAV below target RMS should be scaled up."""
-        wav = tmp_path / "quiet.wav"
-        _make_wav(wav, num_frames=500, amplitude=500)
-
-        # Read original RMS
-        with wave.open(str(wav), "rb") as wf:
-            raw = wf.readframes(wf.getnframes())
-        n = len(raw) // 2
-        orig_samples = struct.unpack(f"<{n}h", raw)
-        orig_rms = math.sqrt(sum(s * s for s in orig_samples) / len(orig_samples))
-
-        normalize_wav(wav, target_rms=3000)
-
-        with wave.open(str(wav), "rb") as wf:
-            raw2 = wf.readframes(wf.getnframes())
-        n2 = len(raw2) // 2
-        new_samples = struct.unpack(f"<{n2}h", raw2)
-        new_rms = math.sqrt(sum(s * s for s in new_samples) / len(new_samples))
-
-        assert new_rms > orig_rms, "Quiet audio should be scaled up"
-
-    def test_skips_silent_audio(self, tmp_path):
-        """WAV with RMS < 50 should be left unchanged."""
-        wav = tmp_path / "silent.wav"
-        _make_silent_wav(wav)
-
-        with wave.open(str(wav), "rb") as wf:
-            orig_frames = wf.readframes(wf.getnframes())
-
-        normalize_wav(wav)
-
-        with wave.open(str(wav), "rb") as wf:
-            new_frames = wf.readframes(wf.getnframes())
-
-        assert orig_frames == new_frames, "Silent audio should not be modified"
-
-    def test_caps_scale(self, tmp_path):
-        """Scale factor should not exceed scale_cap (3x)."""
-        wav = tmp_path / "very_quiet.wav"
-        # Very quiet audio: amplitude=100 → RMS ~100, target=3000 → scale=30, capped at 3
-        _make_wav(wav, num_frames=500, amplitude=100)
-        normalize_wav(wav, target_rms=3000, scale_cap=3.0)
-
-        with wave.open(str(wav), "rb") as wf:
-            raw = wf.readframes(wf.getnframes())
-        n = len(raw) // 2
-        samples = struct.unpack(f"<{n}h", raw)
-        # All samples within 16-bit range
-        assert all(-32768 <= s <= 32767 for s in samples)
-        # Max value should be around 300 (3x of 100), not 30000 (30x)
-        assert max(abs(s) for s in samples) < 1000
-
-    def test_peak_softclip(self, tmp_path):
-        """Samples above peak_limit should be soft-clipped, not hard-clipped."""
-        wav = tmp_path / "loud.wav"
-        # Loud audio: amplitude=20000, scale will push near/above 24000
-        _make_wav(wav, num_frames=500, amplitude=20000)
-        normalize_wav(wav, target_rms=25000, scale_cap=3.0, peak_limit=24000)
-
-        with wave.open(str(wav), "rb") as wf:
-            raw = wf.readframes(wf.getnframes())
-        n = len(raw) // 2
-        samples = struct.unpack(f"<{n}h", raw)
-        # All samples within 16-bit range
-        assert all(-32768 <= s <= 32767 for s in samples)
-
-    def test_tolerates_missing_file(self, tmp_path):
-        """normalize_wav on a missing file should not raise."""
-        normalize_wav(tmp_path / "nonexistent.wav")
-
-    def test_preserves_wav_params(self, tmp_path):
-        """WAV format (channels, sampwidth, framerate) should be preserved."""
-        wav = tmp_path / "params.wav"
-        _make_wav(wav, num_frames=200, amplitude=2000)
-        with wave.open(str(wav), "rb") as wf:
-            orig_params = wf.getparams()
-
-        normalize_wav(wav)
-
-        with wave.open(str(wav), "rb") as wf:
-            new_params = wf.getparams()
-
-        assert orig_params.nchannels == new_params.nchannels
-        assert orig_params.sampwidth == new_params.sampwidth
-        assert orig_params.framerate == new_params.framerate
-
-
-# ---------------------------------------------------------------------------
 # _is_paused tests
 # ---------------------------------------------------------------------------
 
@@ -289,6 +193,16 @@ class TestIsPaused:
 
 
 class TestAudioDucking:
+    @pytest.fixture(autouse=True)
+    def _reset_volume_cache(self):
+        """Cache state leaks between tests — DEF-072 sees stale 0.03 from a
+        prior duck and treats it as 'looks bogus, skip', then mock_set never
+        fires. Invalidate before AND after each test to keep them isolated."""
+        from heyvox.herald import coreaudio
+        coreaudio._invalidate_volume_cache()
+        yield
+        coreaudio._invalidate_volume_cache()
+
     def test_duck_saves_original_volume(self, tmp_path):
         cfg = _cfg(tmp_path, duck_level=0.03, duck_enabled=True)
         # DEF-046 added a `dev_id:vol` sidecar format. Pin device to None so

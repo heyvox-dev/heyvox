@@ -288,7 +288,7 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
 
 
 def detect_mood_voice(text):
-    """Match the mood detection in worker.sh."""
+    """Match the mood detection in worker.py."""
     t = text.lower()
     if any(w in t for w in ["error", "fail", "broke", "crash", "warning",
                              "careful", "danger", "critical", "urgent",
@@ -361,6 +361,14 @@ def process_new_lines(filepath):
                     detect_ms = int(time.time() * 1000)
                     log(f"Detected TTS in {os.path.basename(filepath)}: "
                         f"\"{speech[:50]}...\"")
+                    # DEF-078: watcher also initiates TTS when the hook loses
+                    # the race. Register with the cross-process echo journal so
+                    # STT can strip speaker bleed.
+                    try:
+                        from heyvox.audio.echo import register_tts_text
+                        register_tts_text(speech)
+                    except Exception as _e:
+                        log(f"DEF-078: register_tts_text failed: {_e}")
                     ok = send_to_kokoro(speech, workspace=workspace,
                                         hook_epoch_ms=detect_ms)
                     if not ok:

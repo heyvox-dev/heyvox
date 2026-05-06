@@ -115,7 +115,7 @@ def _kill_heyvox_processes() -> int:
     import time
 
     patterns = ["heyvox.main", "heyvox.cli start", "heyvox.hud.overlay",
-                "herald/lib/orchestrator.sh", "herald/daemon/kokoro-daemon.py",
+                "herald/daemon/kokoro-daemon.py",
                 "herald/daemon/watcher.py", "heyvox.herald.cli"]
     killed = 0
 
