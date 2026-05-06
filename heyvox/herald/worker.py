@@ -383,8 +383,8 @@ class HeraldWorker:
             return True
 
         # Voice/language/mood selection
-        mood = self._detect_mood(speech)
-        lang, lang_voice = self._detect_language(speech)
+        mood = detect_mood(speech)
+        lang, lang_voice = detect_language(speech)
 
         # Apply TTS language allowlist (config.tts.languages or
         # HEYVOX_TTS_LANGS env). If the detected language isn't allowed,
@@ -437,16 +437,6 @@ class HeraldWorker:
             if len(all_matches) > len(matches):
                 matches = all_matches
         return matches
-
-    # ------------------------------------------------------------------
-    # Private: mood/language/voice (thin wrappers for testability)
-    # ------------------------------------------------------------------
-
-    def _detect_mood(self, text: str) -> str:
-        return detect_mood(text)
-
-    def _detect_language(self, text: str) -> tuple[str, str | None]:
-        return detect_language(text)
 
     def _select_voice(self, mood: str, lang: str, lang_voice: str | None) -> str:
         """Select TTS voice name from mood + language + agent context.
