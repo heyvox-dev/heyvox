@@ -346,12 +346,12 @@ class TestMultiAppInjection:
     def test_injection_config_defaults_match_production(self):
         """InjectionConfig default delays match expected production values."""
         cfg = InjectionConfig()
-        assert cfg.app_delays["conductor"] == 0.3
-        assert cfg.app_delays["cursor"] == 0.15
-        assert cfg.app_delays["windsurf"] == 0.15
-        assert cfg.app_delays["visual studio code"] == 0.15
-        assert cfg.app_delays["iterm2"] == 0.03
-        assert cfg.app_delays["terminal"] == 0.03
+        assert cfg.app_delays["Conductor"] == 0.3
+        assert cfg.app_delays["Cursor"] == 0.15
+        assert cfg.app_delays["Windsurf"] == 0.15
+        assert cfg.app_delays["Visual Studio Code"] == 0.15
+        assert cfg.app_delays["iTerm2"] == 0.03
+        assert cfg.app_delays["Terminal"] == 0.03
         assert cfg.focus_settle_secs == 0.1
         assert cfg.max_retries == 2
 
