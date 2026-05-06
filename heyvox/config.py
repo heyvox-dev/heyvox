@@ -362,12 +362,12 @@ class InjectionConfig(BaseModel):
     focus_settle_secs: float = 0.1
     max_retries: int = 2
     app_delays: dict[str, float] = {
-        "conductor": 0.3,
-        "cursor": 0.15,
-        "windsurf": 0.15,
-        "visual studio code": 0.15,
-        "iterm2": 0.03,
-        "terminal": 0.03,
+        "Conductor": 0.3,
+        "Cursor": 0.15,
+        "Windsurf": 0.15,
+        "Visual Studio Code": 0.15,
+        "iTerm2": 0.03,
+        "Terminal": 0.03,
     }
 
 
