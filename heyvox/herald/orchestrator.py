@@ -766,7 +766,7 @@ def _play_wav(
                 except ProcessLookupError:
                     pass
                 _violation_check(f"orchestrator:watchdog-kill:{basename}", cfg)
-                _herald_log(f"ORCH: WATCHDOG killed afplay (recording started during playback)", debug_log)
+                _herald_log("ORCH: WATCHDOG killed afplay (recording started during playback)", debug_log)
                 break
             time.sleep(0.1)
 

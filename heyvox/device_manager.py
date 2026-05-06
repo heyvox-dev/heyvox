@@ -443,7 +443,7 @@ class DeviceManager:
                 require_audio=True,
             )
         if dev_index is None:
-            self._log(f"No mic after reinit, retrying in 2s...")
+            self._log("No mic after reinit, retrying in 2s...")
             time.sleep(2)
             self.ctx.zombie_mic_reinit = True
             return

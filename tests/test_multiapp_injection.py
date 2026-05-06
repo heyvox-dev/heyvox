@@ -10,10 +10,8 @@ so no real clipboard, app, or osascript calls are made.
 
 Requirement coverage: PASTE-01, PASTE-02, PASTE-03, PASTE-04, PASTE-05
 """
-import sys
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
-import pytest
 
 from heyvox.input.injection import (
     type_text,

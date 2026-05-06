@@ -158,7 +158,9 @@ class TestEnergyThreshold:
         assert db == -96.0
 
     def test_threshold_value(self):
-        """Energy threshold should be -60 dBFS (allows quiet speech)."""
+        """Energy threshold is -48 dBFS — raised from -60 to suppress
+        quiet-room hallucinations on Whisper without losing whisper-volume
+        speech."""
         from heyvox.recording import _MIN_AUDIO_DBFS
 
-        assert _MIN_AUDIO_DBFS == -60.0, f"Threshold should be -60.0, got {_MIN_AUDIO_DBFS}"
+        assert _MIN_AUDIO_DBFS == -48.0, f"Threshold should be -48.0, got {_MIN_AUDIO_DBFS}"

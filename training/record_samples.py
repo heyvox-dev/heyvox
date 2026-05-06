@@ -10,9 +10,6 @@ fast, slow) to improve model robustness.
 """
 
 import argparse
-import os
-import sys
-import time
 import wave
 from pathlib import Path
 
@@ -118,7 +115,7 @@ def main():
             print(f"  Saved: {filepath} (RMS={rms:.4f})\n")
 
     except KeyboardInterrupt:
-        print(f"\n\nStopped early.")
+        print("\n\nStopped early.")
 
     total = start_idx + recorded
     print(f"\nTotal recordings: {total}/{args.count}")

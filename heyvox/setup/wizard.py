@@ -422,11 +422,11 @@ def run_setup(config) -> None:
             # Step 8a: Prompt user to side-load the extension
             console.print()
             console.print("  [bold]Load the extension in Chrome:[/bold]")
-            console.print(f"    1. Open Chrome → [cyan]chrome://extensions[/cyan]")
-            console.print(f"    2. Enable [bold]Developer mode[/bold] (top-right toggle)")
-            console.print(f"    3. Click [bold]Load unpacked[/bold] → select:")
+            console.print("    1. Open Chrome → [cyan]chrome://extensions[/cyan]")
+            console.print("    2. Enable [bold]Developer mode[/bold] (top-right toggle)")
+            console.print("    3. Click [bold]Load unpacked[/bold] → select:")
             console.print(f"       [dim]{ext_dir}[/dim]")
-            console.print(f"    4. Copy the [bold]Extension ID[/bold] (32 lowercase letters)")
+            console.print("    4. Copy the [bold]Extension ID[/bold] (32 lowercase letters)")
             console.print()
 
             ext_id = ""

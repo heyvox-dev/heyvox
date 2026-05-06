@@ -21,7 +21,6 @@ on top of Google's speech embedding model (used by openwakeword).
 """
 
 import argparse
-import os
 import sys
 import wave
 from pathlib import Path
@@ -271,7 +270,6 @@ def train_classifier(
         best_snap = (W1.copy(), b1.copy(), W2.copy(), b2.copy())
         patience_counter = 0
         batch_size = 64
-        last_metrics: dict = {}
 
         for epoch in range(n_epochs):
             # Linearly ramp false_weight over the sequence
@@ -324,7 +322,6 @@ def train_classifier(
 
             val_probs = forward(X_val)
             val_metrics = compute_metrics(val_probs, y_val)
-            last_metrics = val_metrics
             maybe_store_checkpoint(val_metrics)
 
             if val_metrics["loss"] < best_val_loss:
@@ -581,14 +578,14 @@ def main():
     export_onnx(weights, str(output_path))
 
     # Summary
-    print(f"\nTraining complete!")
+    print("\nTraining complete!")
     print(f"  Model: {output_path}")
     print(f"  Positive samples: {len(pos_clips)}")
     print(f"  Negative samples: {len(neg_clips)}")
-    print(f"\nTo use with HeyVox, update ~/.config/heyvox/config.yaml:")
-    print(f"  wake_word:")
-    print(f"    start: hey_vox")
-    print(f"    stop: hey_vox")
+    print("\nTo use with HeyVox, update ~/.config/heyvox/config.yaml:")
+    print("  wake_word:")
+    print("    start: hey_vox")
+    print("    stop: hey_vox")
 
 
 if __name__ == "__main__":
