@@ -92,9 +92,6 @@ heyvox = [
     "hush/host/*.py",
     "hush/host/*.json",
     "hush/scripts/*.sh",
-    "hush/integration/*.sh",
-    "hush/integration/*.py",
-    "hush/integration/*.patch",
 ]
 
 [build-system]
