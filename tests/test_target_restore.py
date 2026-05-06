@@ -6,10 +6,9 @@ Covers:
 - focus_shortcut is only used after actual workspace switch
 - _detect_app_workspace returns correct workspace from AX tree
 """
-import sys
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 
 @dataclass

@@ -7,7 +7,6 @@ References: .planning/DEFECT-LOG.md
 """
 
 import importlib
-import io
 import os
 import pkgutil
 import re
@@ -79,7 +78,7 @@ def test_py_compile_all():
         if result.returncode != 0:
             failures.append(f"{os.path.relpath(path, root)}: {result.stderr.strip()}")
 
-    assert not failures, f"py_compile failures:\n" + "\n".join(failures)
+    assert not failures, "py_compile failures:\n" + "\n".join(failures)
 
 
 # ---------------------------------------------------------------------------
@@ -159,12 +158,12 @@ def test_no_bare_stderr_prints_in_injection():
         if "def _log" not in source.splitlines()[max(0, lineno - 4):lineno]:
             # Check if this print is inside a try block
             preceding = source.splitlines()[max(0, lineno - 5):lineno - 1]
-            in_try = any("try:" in l for l in preceding)
+            in_try = any("try:" in prev_line for prev_line in preceding)
             if not in_try:
                 bare_prints.append(f"  line {lineno}: {line.strip()}")
 
     assert not bare_prints, (
-        f"Bare print(file=sys.stderr) in injection.py (use _log() instead):\n"
+        "Bare print(file=sys.stderr) in injection.py (use _log() instead):\n"
         + "\n".join(bare_prints)
     )
 
@@ -232,8 +231,8 @@ def test_no_case_sensitive_app_comparisons():
             all_issues.extend(issues)
 
     assert not all_issues, (
-        f"Case-sensitive comparisons against OS-provided names "
-        f"(add .lower() to both sides):\n" + "\n".join(all_issues)
+        "Case-sensitive comparisons against OS-provided names "
+        "(add .lower() to both sides):\n" + "\n".join(all_issues)
     )
 
 
