@@ -177,7 +177,7 @@ class TestTypeText:
         def mock_run(cmd, **kwargs):
             if cmd[0] == "osascript":
                 osascript_calls.append(cmd)
-            return MagicMock(returncode=0, stdout="", stderr=b"")
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
 
         monkeypatch.setattr("subprocess.run", mock_run)
         monkeypatch.setattr(injection, "time", MagicMock(sleep=lambda s: None))
@@ -210,7 +210,7 @@ class TestTypeText:
         mock_appkit.NSPasteboardTypeString = "public.utf8-plain-text"
 
         def mock_run(cmd, **kwargs):
-            return MagicMock(returncode=0, stdout="", stderr=b"")
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
 
         monkeypatch.setattr("subprocess.run", mock_run)
         monkeypatch.setattr(injection, "time", MagicMock(sleep=lambda s: None))
