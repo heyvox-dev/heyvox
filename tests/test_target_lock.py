@@ -153,8 +153,8 @@ def test_capture_lock_returns_none_when_appkit_unavailable():
 
     from heyvox.input.target import capture_lock
 
-    saved_appkit = _sys.modules.get("AppKit")
-    saved_as = _sys.modules.get("ApplicationServices")
+    _sys.modules.get("AppKit")
+    _sys.modules.get("ApplicationServices")
 
     # Make AppKit import fail
     class BadMod:

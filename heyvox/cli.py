@@ -482,7 +482,7 @@ def _cmd_log_health(args):
 
     _say(f"HeyVox log-health — {target_date}")
     _say("=" * 60)
-    _say(f"Sources scanned:")
+    _say("Sources scanned:")
     _say(f"  {active_log_file} ({len(main_lines_all)} lines, current rotation)")
     _say(f"  {HERALD_DEBUG_LOG} ({len(herald_lines)} lines today)")
     _say(f"  {HERALD_VIOLATIONS_LOG} ({len(violation_lines)} entries today)")
@@ -493,14 +493,14 @@ def _cmd_log_health(args):
     near_misses = [ln for ln in main_lines_all if "[NEAR_MISS]" in ln]
     user_efforts = [ln for ln in main_lines_all if "[USER_EFFORT]" in ln]
 
-    _say(f"\n## Wake word (current rotation of heyvox.log)")
+    _say("\n## Wake word (current rotation of heyvox.log)")
     _say(f"  Triggers fired:        {triggers}")
     _say(f"  VAD drops (lost):      {len(vad_drops)}")
     _say(f"  Near-misses (sub-thr): {len(near_misses)}")
     _say(f"  USER_EFFORT events:    {len(user_efforts)}")
 
     if user_efforts:
-        _say(f"\n  Recent USER_EFFORT (user had to repeat 'Hey Vox'):")
+        _say("\n  Recent USER_EFFORT (user had to repeat 'Hey Vox'):")
         for ln in user_efforts[-5:]:
             ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
             n_match = re.search(r"attempts=(\d+) window=([\d.]+)s", ln)
@@ -509,7 +509,7 @@ def _cmd_log_health(args):
                 _say(f"    {ts}  {n_match.group(1)} attempts in {n_match.group(2)}s")
 
     if vad_drops:
-        _say(f"\n  Recent WAKE_VAD_DROP (model heard it, VAD killed it):")
+        _say("\n  Recent WAKE_VAD_DROP (model heard it, VAD killed it):")
         for ln in vad_drops[-5:]:
             ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
             score_match = re.search(r"score=([\d.]+)", ln)
@@ -530,7 +530,7 @@ def _cmd_log_health(args):
         if d:
             stt_durations.append(float(d.group(1)))
 
-    _say(f"\n## STT (current rotation of heyvox-stt-debug.log)")
+    _say("\n## STT (current rotation of heyvox-stt-debug.log)")
     _say(f"  Finals logged:         {len(stt_finals)}")
     stt_p50 = stt_p99 = None
     if stt_times:
@@ -545,11 +545,11 @@ def _cmd_log_health(args):
         _say(f"  Audio duration p50/p99: {p50:.2f}s / {p99:.2f}s")
 
     # ----- Herald -----
-    _say(f"\n## Herald (TTS playback)")
+    _say("\n## Herald (TTS playback)")
     _say(f"  Lines today:           {len(herald_lines)}")
     _say(f"  Violations today:      {len(violation_lines)}")
     if violation_lines:
-        _say(f"\n  Recent violations:")
+        _say("\n  Recent violations:")
         for ln in violation_lines[-3:]:
             _say(f"    {ln.strip()}")
 
@@ -559,7 +559,7 @@ def _cmd_log_health(args):
     sw_done = sum(1 for ln in claude_log_lines if "Switching to:" in ln)
     sw_fail = sum(1 for ln in claude_log_lines if "SWITCH FAILED" in ln)
 
-    _say(f"\n## Workspace switch (today)")
+    _say("\n## Workspace switch (today)")
     _say(f"  Switches done:         {sw_done}")
     _say(f"  Skips (HS not running):{sw_skip_hs}")
     _say(f"  Skips (user busy):     {sw_skip_idle}")
@@ -632,7 +632,7 @@ def _cmd_log_health(args):
     tier_1_p95_ms = _paste_p95(elapsed_by_tier["1"])
     tier_2_p95_ms = _paste_p95(elapsed_by_tier["2"])
 
-    _say(f"\n## Paste (current rotation of heyvox.log)")
+    _say("\n## Paste (current rotation of heyvox.log)")
     if total_resolves == 0 and verify_total == 0:
         _say("  (no [PASTE] events in current rotation)")
     else:
@@ -650,7 +650,7 @@ def _cmd_log_health(args):
             f"({tier_counts['fail_closed']}/{total_resolves} total)"
         )
         if any(fail_reasons.values()):
-            _say(f"    by reason:")
+            _say("    by reason:")
             for reason_k, n in fail_reasons.items():
                 if n > 0:
                     _say(f"      {reason_k}: {n}")
@@ -933,7 +933,7 @@ def _cmd_calibrate(args):
         noise_floor, silence_threshold = mgr.run_calibration(chunks)
         mgr.save_calibration(target_name, noise_floor, silence_threshold)
 
-        print(f"\nCalibration complete:")
+        print("\nCalibration complete:")
         print(f"  Device:             {target_name}")
         print(f"  Noise floor:        {noise_floor}")
         print(f"  Silence threshold:  {silence_threshold}")

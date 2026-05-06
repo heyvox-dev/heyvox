@@ -587,7 +587,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         # Pass collector to recording state machine for FP/FN/TP-stop hooks
         recording.training_collector = _training_collector
         log(f"Training collector enabled → {training_base} (max {config.wake_words.negatives_max_clips} clips/category)")
-        log(f"  Categories: tp/ fp/ tn/ fn/")
+        log("  Categories: tp/ fp/ tn/ fn/")
 
     # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
     # so the first words of the command aren't clipped.

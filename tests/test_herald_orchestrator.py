@@ -8,14 +8,13 @@ All tests are fully unit-testable:
 
 from __future__ import annotations
 
-import math
 import os
 import struct
 import threading
 import time
 import wave
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -196,9 +195,12 @@ class TestIsPaused:
 class TestAudioDucking:
     def test_duck_saves_original_volume(self, tmp_path):
         cfg = _cfg(tmp_path, duck_level=0.03, duck_enabled=True)
+        # DEF-046 added a `dev_id:vol` sidecar format. Pin device to None so
+        # the legacy plain-float branch runs and the assertion matches.
         with patch("heyvox.herald.coreaudio.get_system_volume", return_value=0.7):
             with patch("heyvox.herald.coreaudio.set_system_volume"):
-                original = _duck_audio(cfg, cfg.debug_log)
+                with patch("heyvox.herald.coreaudio._get_default_output_device", return_value=None):
+                    original = _duck_audio(cfg, cfg.debug_log)
         assert original == pytest.approx(0.7)
         assert cfg.original_vol_file.exists()
         assert float(cfg.original_vol_file.read_text().strip()) == pytest.approx(0.7)

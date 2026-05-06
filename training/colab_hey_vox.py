@@ -384,7 +384,7 @@ print(f"Recall on {len(pos_files)} positive clips: {recall:.1%}")
 print(f"  ({tp_count} detected)")
 
 print(f"\n{'=' * 60}")
-print(f"SUMMARY")
+print("SUMMARY")
 print(f"  FPR:    {fpr:.1%}")
 print(f"  Recall: {recall:.1%}")
 print(f"  Model:  {model_path}")
@@ -398,10 +398,10 @@ print(f"{'=' * 60}")
 # Then place in: ~/.config/heyvox/models/hey_vox.onnx
 # Or in the heyvox package: heyvox/models/hey_vox.onnx
 
-print(f"\nTo deploy locally:")
+print("\nTo deploy locally:")
 print(f"  1. Download {MODEL_NAME}.onnx from {OUTPUT_DIR}/")
 print(f"  2. Copy to ~/.config/heyvox/models/{MODEL_NAME}.onnx")
-print(f"  3. Set in config.yaml:")
-print(f"     wake_word:")
+print("  3. Set in config.yaml:")
+print("     wake_word:")
 print(f"       start: {MODEL_NAME}")
 print(f"       stop: {MODEL_NAME}")

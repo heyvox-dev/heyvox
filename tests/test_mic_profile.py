@@ -4,9 +4,7 @@ Unit tests for MicProfileManager and MicProfileEntryConfig.
 Phase 13, Plan 01: per-device mic profiles with auto-calibration.
 """
 import json
-import os
 import time
-import tempfile
 from pathlib import Path
 
 import numpy as np

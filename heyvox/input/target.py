@@ -29,7 +29,7 @@ import subprocess  # Module-level per Fact 5 — test patches via
                    # only intercept when subprocess is imported at module scope.
 import sys
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
@@ -711,8 +711,8 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
                     _log(f"yank: conductor-switch-workspace failed: {e}")
         else:
             _log(
-                f"yank: conductor_workspace_id set but profile lacks "
-                f"workspace_switch_cmd — skipping workspace switch"
+                "yank: conductor_workspace_id set but profile lacks "
+                "workspace_switch_cmd — skipping workspace switch"
             )
 
 

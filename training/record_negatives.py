@@ -381,7 +381,7 @@ def main():
 
     existing = list(output_dir.glob("*.wav"))
     print(f"\n{'=' * 60}")
-    print(f"  Negative Sample Generator")
+    print("  Negative Sample Generator")
     print(f"  Output: {output_dir}/")
     print(f"  Existing clips: {len(existing)}")
     print(f"{'=' * 60}\n")
@@ -476,11 +476,11 @@ def main():
     print(f"  Done! Saved {total_saved} new negative clips this run.")
     print(f"  Total negative clips in {output_dir}: {final_count}")
     print(f"{'=' * 60}")
-    print(f"\nNext step: train with negatives included:")
-    print(f"  python training/train_model.py \\")
-    print(f"    --positive-dir training/recordings/ training/synthetic/ \\")
-    print(f"    --negative-dir training/negatives/ \\")
-    print(f"    --output models/hey_vox.onnx")
+    print("\nNext step: train with negatives included:")
+    print("  python training/train_model.py \\")
+    print("    --positive-dir training/recordings/ training/synthetic/ \\")
+    print("    --negative-dir training/negatives/ \\")
+    print("    --output models/hey_vox.onnx")
 
 
 if __name__ == "__main__":

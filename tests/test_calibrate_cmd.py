@@ -13,14 +13,10 @@ Tests cover:
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
-import tempfile
 import time
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -264,7 +260,6 @@ class TestCalibrateSubparser:
 
     def test_calibrate_in_main_parser(self):
         """main() parser includes 'calibrate' subcommand."""
-        import sys
         from unittest.mock import patch as _patch
         # Invoke main with 'calibrate --help', which should exit 0 (help) not with an error
         with _patch("sys.argv", ["heyvox", "calibrate", "--help"]):

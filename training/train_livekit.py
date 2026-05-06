@@ -21,7 +21,6 @@ Usage:
 import argparse
 import logging
 import re
-import shutil
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -183,7 +182,8 @@ def main():
     if not args.skip_setup:
         logger.info("=== Step 1: Downloading dependencies ===")
         # Call setup logic directly (it's a typer command, so invoke via CLI)
-        import subprocess, sys
+        import subprocess
+        import sys
         cmd = [sys.executable, "-m", "livekit.wakeword", "setup", "--data-dir", config.data_dir]
         if args.skip_acav:
             cmd.append("--skip-acav")
