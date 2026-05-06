@@ -1288,8 +1288,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     else _CONSECUTIVE_FRAMES_REQUIRED_START
                 )
                 log_threshold = active_threshold * 0.5
+                # Always compute `triggered` — used by the stop-wake _fast_stop
+                # path further below (`_is_rec and triggered`). Hoisted out of
+                # the `if s > log_threshold` logging block so a quiet stretch
+                # (no wake-word activity) followed by PTT-recording can't
+                # access an unbound local. Comparison is a single float op.
+                triggered = s > active_threshold
                 if s > log_threshold:
-                    triggered = s > active_threshold
                     # DEF-053 diagnostic: include VAD state + consecutive_hits
                     # during recording so we can tell whether a stop-trigger
                     # that didn't stop recording was killed by the VAD gate
