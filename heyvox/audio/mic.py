@@ -20,6 +20,12 @@ from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 __all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch"]
 
 
+def _log(msg: str) -> None:
+    """Minimal log helper — avoids circular import with heyvox.main."""
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
 @contextmanager
 def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
     """Mute system output while opening a BT mic stream.
@@ -790,9 +796,3 @@ def clear_device_cooldowns() -> None:
     _device_failure_counts.clear()
     if count:
         _log(f"Device cooldowns cleared ({count} device(s) released)")
-
-
-def _log(msg: str) -> None:
-    """Minimal log helper — avoids circular import with heyvox.main."""
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
