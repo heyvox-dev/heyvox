@@ -8,6 +8,9 @@
   <meta property="og:title" content="HeyVox — Voice Coding, not Vibe Coding" />
   <meta property="og:description" content="Your AI coding agent doesn't just listen — it talks back. Open source voice layer, fully local STT and TTS." />
   <meta property="og:url" content="https://heyvox.dev" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
   <style>
     *, *::before, *::after {
       box-sizing: border-box;
@@ -90,14 +93,25 @@
     }
 
     .nav-logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
       font-size: 16px;
       font-weight: 600;
       letter-spacing: -0.02em;
+      text-decoration: none;
+    }
+    .nav-logo .nav-logo-mark {
+      width: 26px;
+      height: 26px;
+      display: block;
+      flex-shrink: 0;
+    }
+    .nav-logo .nav-logo-text {
       background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
-      text-decoration: none;
     }
 
     .nav-links {
@@ -837,9 +851,20 @@
     }
 
     .footer-logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
       font-size: 18px;
       font-weight: 700;
       letter-spacing: -0.03em;
+    }
+    .footer-logo .footer-logo-mark {
+      width: 30px;
+      height: 30px;
+      display: block;
+      flex-shrink: 0;
+    }
+    .footer-logo .footer-logo-text {
       background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -905,7 +930,11 @@
 
   <!-- ── NAVBAR ── -->
   <nav>
-    <a href="#" class="nav-logo">HeyVox<span class="beta-tag">Beta</span></a>
+    <a href="#" class="nav-logo">
+      <img src="heyvox-icon.svg" alt="" class="nav-logo-mark" />
+      <span class="nav-logo-text">HeyVox</span>
+      <span class="beta-tag">Beta</span>
+    </a>
     <ul class="nav-links">
       <li><a href="#conversation">The conversation</a></li>
       <li><a href="#how-it-works">How it works</a></li>
@@ -1296,7 +1325,11 @@
   <footer>
     <div class="container">
       <div class="footer-inner">
-        <div class="footer-logo">HeyVox <span class="beta-tag">Beta</span></div>
+        <div class="footer-logo">
+          <img src="heyvox-icon.svg" alt="" class="footer-logo-mark" />
+          <span class="footer-logo-text">HeyVox</span>
+          <span class="beta-tag">Beta</span>
+        </div>
 
         <ul class="footer-links">
           <li><a href="https://github.com/heyvox-dev/heyvox">GitHub</a></li>
