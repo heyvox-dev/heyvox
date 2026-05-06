@@ -193,6 +193,16 @@ class TestIsPaused:
 
 
 class TestAudioDucking:
+    @pytest.fixture(autouse=True)
+    def _reset_volume_cache(self):
+        """Cache state leaks between tests — DEF-072 sees stale 0.03 from a
+        prior duck and treats it as 'looks bogus, skip', then mock_set never
+        fires. Invalidate before AND after each test to keep them isolated."""
+        from heyvox.herald import coreaudio
+        coreaudio._invalidate_volume_cache()
+        yield
+        coreaudio._invalidate_volume_cache()
+
     def test_duck_saves_original_volume(self, tmp_path):
         cfg = _cfg(tmp_path, duck_level=0.03, duck_enabled=True)
         # DEF-046 added a `dev_id:vol` sidecar format. Pin device to None so
