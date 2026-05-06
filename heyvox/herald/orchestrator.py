@@ -1,7 +1,5 @@
 """Herald Python Orchestrator — plays queued WAV files sequentially.
 
-Pure Python replacement for heyvox/herald/lib/orchestrator.sh.
-
 Features:
   - Audio ducking: lowers system volume during playback, then restores
   - Workspace auto-switch: switches app workspace if it's the frontmost app
@@ -65,7 +63,7 @@ class OrchestratorConfig:
     playing_pid_file: Path = field(default_factory=lambda: Path(HERALD_PLAYING_PID))
     original_vol_file: Path = field(default_factory=lambda: Path(HERALD_ORIGINAL_VOL_FILE))
 
-    # State files (shared with worker.sh / main process)
+    # State files (shared with worker.py / main process)
     pause_flag: Path = field(default_factory=lambda: Path(HERALD_PAUSE_FLAG))
     mute_flag: Path = field(default_factory=lambda: Path(HERALD_MUTE_FLAG))
     recording_flag: Path = field(default_factory=lambda: Path(RECORDING_FLAG))
@@ -84,7 +82,7 @@ class OrchestratorConfig:
 
     # Audio ducking
     duck_enabled: bool = True
-    duck_level: float = 0.03      # 3% — same as orchestrator.sh HERALD_DUCK_LEVEL=3/100
+    duck_level: float = 0.03      # 3% — HERALD_DUCK_LEVEL inherited from original bash orchestrator
     # DEF-053: TTS plays at the user's pre-duck media volume. When the user's
     # music is at 37 %, TTS also plays at 37 %, which sounds "rather low" even
     # though the logic is working correctly. Enforce a minimum so TTS is always
@@ -884,7 +882,7 @@ def _play_wav(
 
 
 class HeraldOrchestrator:
-    """Pure-Python Herald orchestrator — equivalent to orchestrator.sh.
+    """Pure-Python Herald orchestrator.
 
     Runs as a singleton daemon process. Polls the herald-queue directory,
     plays WAV files via afplay, handles audio ducking, workspace switching,
@@ -1148,7 +1146,7 @@ class HeraldOrchestrator:
 
 
 # ---------------------------------------------------------------------------
-# Singleton enforcement (mirrors orchestrator.sh belt-and-suspenders logic)
+# Singleton enforcement (belt-and-suspenders against duplicate orchestrators)
 # ---------------------------------------------------------------------------
 
 
