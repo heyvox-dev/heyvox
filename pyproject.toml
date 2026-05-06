@@ -81,12 +81,9 @@ heyvox = [
     "cues/*.wav", "cues/*.mp3", "cues/*.aiff",
     # Wake word models (custom .onnx, e.g. hey_vox)
     "models/*.onnx",
-    # Herald — TTS orchestration (bash scripts + Python daemon)
-    "herald/bin/*",
-    "herald/lib/*.sh",
+    # Herald — TTS orchestration (Python daemon + hook shims)
     "herald/daemon/*.py",
     "herald/hooks/*.sh",
-    "herald/modes/*.sh",
     # Hush — browser media control (Chrome extension + native host)
     "hush/extension/*.js",
     "hush/extension/*.html",
