@@ -119,7 +119,7 @@ _kAudioDevicePropertyStreams = _fourcc("stm#")
 _kCFStringEncodingUTF8 = 0x08000100
 
 
-def _get_dead_input_device_names() -> set[str]:
+def get_dead_input_device_names() -> set[str]:
     """Return names of CoreAudio input devices that are not alive.
 
     macOS keeps paired-but-disconnected Bluetooth devices in the audio device
@@ -249,15 +249,6 @@ def _get_dead_input_device_names() -> set[str]:
     except Exception as e:
         _log(f"  CoreAudio alive check failed: {e}")
         return set()
-
-
-def get_dead_input_device_names() -> set[str]:
-    """Public wrapper for _get_dead_input_device_names.
-
-    Used by the hotplug scan in main.py to filter the device list before
-    checking for higher-priority devices.
-    """
-    return _get_dead_input_device_names()
 
 
 def force_os_default_input(name_substr: str) -> bool:
@@ -432,7 +423,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         mic_priority = ["MacBook Pro Microphone"]
 
     # Filter out disconnected Bluetooth devices (macOS keeps them in the list)
-    dead_names = _get_dead_input_device_names()
+    dead_names = get_dead_input_device_names()
 
     devices_by_priority = {name: [] for name in mic_priority}
     other_devices = []
