@@ -53,13 +53,40 @@ _WAKE_WORD_PHRASES: dict[str, list[str]] = {
 }
 
 
-def is_garbled(text: str) -> bool:
+_INTRA_TOKEN_REPEAT = re.compile(r"(.{2,3})\1{3,}")
+
+
+def is_garbled(
+    text: str,
+    *,
+    stt_secs: float | None = None,
+    audio_secs: float | None = None,
+) -> bool:
     """Detect garbled/nonsensical STT output from accidental wake word triggers.
 
     Catches common Whisper hallucination patterns:
-    - Excessive repeated words/phrases
+    - Excessive repeated words/phrases (global)
+    - Consecutive duplicate words (local run-length — catches tail repetition
+      that a coherent prefix would otherwise dilute in the global ratio)
+    - Intra-token substring repetition (e.g. "P's's's's's's")
+    - Tail-window bigram repetition (clean prefix + garbled suffix)
     - Mostly non-alphanumeric characters
     - Known Whisper filler hallucinations
+
+    Args:
+        text: The STT transcription.
+        stt_secs: Optional STT inference elapsed time (seconds). Combined with
+            audio_secs, a *catastrophic* ratio (> 0.6) on ≥ 5 s audio still
+            forces discard as a belt-and-suspenders guard for hallucination
+            shapes the text checks don't recognise (cf. DEF-075 with ratio
+            0.66). Moderate ratios (0.3–0.6) are NOT a discard signal on their
+            own — DEF-081's tighter compression/logprob thresholds intentionally
+            invoke temperature fallback on borderline audio, which costs time
+            but produces clean output. Discarding clean output because
+            inference was slow throws away exactly the cases DEF-081 was
+            designed to rescue (cf. DEF-093). Text-level checks above remain
+            authoritative for most hallucination shapes.
+        audio_secs: Optional audio duration (seconds). See stt_secs.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -83,6 +110,45 @@ def is_garbled(text: str) -> bool:
         if len(unique_bigrams) / len(bigrams) < 0.3:
             return True
 
+    # DEF-083: Consecutive duplicate words (run-length).
+    # A coherent prefix can dilute the global unique-ratio check, so a local
+    # run of identical words (e.g. "can can can can can can can" at the tail
+    # of an otherwise sensible sentence) is a slam-dunk garbled signal.
+    if len(words) >= 4:
+        _norm = lambda w: w.lower().strip(".,!?'\"")  # noqa: E731
+        run_len = 1
+        for i in range(1, len(words)):
+            if _norm(words[i]) and _norm(words[i]) == _norm(words[i - 1]):
+                run_len += 1
+                if run_len >= 4:
+                    return True
+            else:
+                run_len = 1
+
+    # DEF-083: Intra-token substring repetition. MLX Whisper's temperature
+    # fallback occasionally emits a single token where a 2-3 char substring
+    # repeats 4+ times (e.g. "P's's's's's's's's's's's's"). Legit contractions
+    # ("surpass's") and onomatopoeia ("sooo") are unaffected because the
+    # regex requires ≥ 4 consecutive copies of the captured group.
+    for word in words:
+        if len(word) >= 8 and _INTRA_TOKEN_REPEAT.search(word):
+            return True
+
+    # DEF-083: Tail-window bigram repetition. For longer outputs, compute the
+    # unique-bigram ratio over the last 40% of words. Catches the "clean
+    # prefix + garbled suffix" pattern that the global bigram check misses
+    # because the coherent start dominates the denominator.
+    if len(words) >= 10:
+        tail_start = int(len(words) * 0.6)
+        tail_words = words[tail_start:]
+        if len(tail_words) >= 4:
+            tail_bigrams = [
+                f"{tail_words[i]} {tail_words[i + 1]}".lower()
+                for i in range(len(tail_words) - 1)
+            ]
+            if tail_bigrams and len(set(tail_bigrams)) / len(tail_bigrams) < 0.4:
+                return True
+
     # Mostly non-letter characters (Unicode garbage)
     alpha_chars = sum(1 for c in cleaned if c.isalpha())
     if len(cleaned) > 3 and alpha_chars / len(cleaned) < 0.4:
@@ -99,6 +165,33 @@ def is_garbled(text: str) -> bool:
     for pattern in hallucination_patterns:
         if re.match(pattern, cleaned):
             return True
+
+    # DEF-083 / DEF-093: Catastrophic STT ratio guard. MLX whisper-small on
+    # Apple Silicon runs ~10-25x realtime when warm. A ratio > 0.6 on ≥ 5 s
+    # audio means temperature fallback exhausted multiple passes without
+    # converging — near-certain hallucination even when text-level checks
+    # didn't trip (cf. DEF-075: 13 s audio → 8.6 s inference → "doc doc doc").
+    #
+    # Threshold deliberately raised from 0.3 (DEF-083 original) to 0.6
+    # (DEF-093). The 0.3 floor was discarding clean transcriptions whenever
+    # DEF-081's tighter compression/logprob thresholds invoked temperature
+    # fallback on borderline audio (low SNR, complex compounds, GPU pressure
+    # from parallel Kokoro inference). The fallback there is success — the
+    # final pass converged on clean output — but the wall-clock cost falsely
+    # tripped DEF-083's hallucination heuristic. Examples observed:
+    #   - 2026-04-27 07:28: 15.2 s audio → 5.3 s STT (ratio 0.35) → clean
+    #     German sentence DISCARDED.
+    #   - Multiple other 3-5 s spikes throughout the morning that escaped only
+    #     because audio_secs was < 5 s or ratio was just under threshold.
+    # Text-level checks above remain authoritative for the dominant hallucination
+    # shapes (repetition, intra-token, low alpha, known patterns); the catastrophic
+    # ratio is kept as a belt-and-suspenders guard for novel shapes.
+    if (
+        stt_secs is not None and audio_secs is not None
+        and stt_secs >= 5.0 and audio_secs >= 5.0
+        and stt_secs / audio_secs > 0.6
+    ):
+        return True
 
     return False
 

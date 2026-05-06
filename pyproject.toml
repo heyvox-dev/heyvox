@@ -81,12 +81,9 @@ heyvox = [
     "cues/*.wav", "cues/*.mp3", "cues/*.aiff",
     # Wake word models (custom .onnx, e.g. hey_vox)
     "models/*.onnx",
-    # Herald — TTS orchestration (bash scripts + Python daemon)
-    "herald/bin/*",
-    "herald/lib/*.sh",
+    # Herald — TTS orchestration (Python daemon + hook shims)
     "herald/daemon/*.py",
     "herald/hooks/*.sh",
-    "herald/modes/*.sh",
     # Hush — browser media control (Chrome extension + native host)
     "hush/extension/*.js",
     "hush/extension/*.html",
@@ -95,9 +92,6 @@ heyvox = [
     "hush/host/*.py",
     "hush/host/*.json",
     "hush/scripts/*.sh",
-    "hush/integration/*.sh",
-    "hush/integration/*.py",
-    "hush/integration/*.patch",
 ]
 
 [build-system]
@@ -119,9 +113,12 @@ markers = [
 # would obscure the rationale, and the import target is internal anyway.
 "heyvox/audio/media.py" = ["E402"]
 "heyvox/audio/tts.py" = ["E402"]
-"heyvox/hud/overlay.py" = ["E402"]
+"heyvox/hud/overlay.py" = ["E402", "F821"]  # F821: nested-class closures over enclosing-fn params (NSObject dispatcher)
 "heyvox/input/injection.py" = ["E402"]
 # CLI / Colab style scripts: imports follow conditional pip installs and
 # `if __name__ == "__main__"` guards, and some imports serve as availability probes.
 "tools/**" = ["E402"]
 "training/**" = ["E402", "F401"]
+# Skipped test class with broken mock_detect/mock_switch refs — slated for
+# rewrite in Plan 15-05 (resolve_lock); ruff sees the dead refs as F821.
+"tests/test_target_restore.py" = ["F821"]

@@ -134,6 +134,20 @@ class TTSConfig(BaseModel):
     # Uses macOS MediaRemote to send explicit pause/play commands.
     pause_media: bool = False
 
+    # Allowed output languages.
+    #   "auto"           — detect + route freely (default; includes Qwen3 for DE etc.)
+    #   ["en-us"]        — English only; foreign text gets demoted to en-us voice
+    #   ["en-us", "de"]  — bilingual; German routes to Qwen3, others demoted
+    # Any lang not in the list is demoted to the first entry (or en-us fallback).
+    # Env override: HEYVOX_TTS_LANGS="en-us,de"
+    languages: list[str] | str = "auto"
+
+    # Voice overrides — when set, replace the mood-based voice selection.
+    # None (default) → mood → voice mapping picks (af_sarah/af_heart/af_nova/af_sky
+    # for Kokoro; Serena/Vivian/Aura/Aria for Qwen3).
+    voice_override: str | None = None        # Kokoro (English + 8 other langs)
+    qwen_voice_override: str | None = None   # Qwen3 (German etc.)
+
     # DEPRECATED: Path to external TTS control script (Phase 1 bridge).
     # No longer used by the native TTS engine. Kept for backward compatibility.
     script_path: str | None = None
@@ -157,7 +171,7 @@ class TTSConfig(BaseModel):
     @field_validator("style")
     @classmethod
     def validate_style(cls, v: str) -> str:
-        valid = {"detailed", "concise", "technical", "casual"}
+        valid = {"detailed", "concise", "technical", "casual", "briefing"}
         if v not in valid:
             raise ValueError(f"style must be one of {valid}, got '{v}'")
         return v
@@ -176,6 +190,23 @@ class TTSConfig(BaseModel):
                 f"Set tts.script_path in config or set tts.enabled: false"
             )
         return v
+
+
+class HoldQueueConfig(BaseModel):
+    """Cross-workspace TTS hold-queue behaviour (DEF-100).
+
+    The Herald orchestrator originally moved TTS WAVs from inactive workspaces
+    to a hold dir until the user went idle, on the theory that a user focused
+    on workspace A doesn't want to hear a TTS response from workspace B.
+
+    In practice — especially with parallel Conductor sessions — this silently
+    swallows most TTS messages with no visible feedback. Default is now
+    disabled; users who want the original behaviour can opt in.
+    """
+    # When False (default), every TTS plays immediately regardless of which
+    # workspace it came from. When True, retain the original hold-queue
+    # behaviour (TTS from non-current workspace held until user is idle).
+    enabled: bool = False
 
 
 class AppProfileConfig(BaseModel):
@@ -242,6 +273,21 @@ class AppProfileConfig(BaseModel):
     # SQL query to list all workspace directory_name values.
     workspace_list_query: str = ""
 
+    # Whether this app supports post-paste AXValue verification (Plan 15-05).
+    # Off for Terminal/iTerm2 (TTY content readback isn't via AX). Default True.
+    # Requirement: PASTE-15-R7
+    supports_ax_verify: bool = True
+
+    # Whether the Conductor adapter (or future analog) can enrich the lock with
+    # a workspace+session ID at capture time. Currently only Conductor sets this.
+    # Requirement: PASTE-15-R3
+    has_session_detection: bool = False
+
+    # Delay (seconds) between paste keystroke and AXValue readback for verification.
+    # Conductor (Tauri web view) needs slightly more for AXValue commit to land.
+    # Requirement: PASTE-15-R7
+    ax_settle_before_verify: float = 0.1
+
 
 # Built-in profiles for common apps. Users can override or add more via config.
 _DEFAULT_APP_PROFILES: list[dict] = [
@@ -262,6 +308,8 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "workspace_list_query": (
             "SELECT directory_name, branch FROM workspaces WHERE state = 'ready'"
         ),
+        "has_session_detection": True,
+        "ax_settle_before_verify": 0.15,
     },
     {
         "name": "Cursor",
@@ -282,12 +330,14 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "focus_shortcut": "",
         "enter_count": 1,
         "is_electron": False,
+        "supports_ax_verify": False,
     },
     {
         "name": "iTerm2",
         "focus_shortcut": "",
         "enter_count": 1,
         "is_electron": False,
+        "supports_ax_verify": False,
     },
 ]
 
@@ -312,12 +362,12 @@ class InjectionConfig(BaseModel):
     focus_settle_secs: float = 0.1
     max_retries: int = 2
     app_delays: dict[str, float] = {
-        "conductor": 0.3,
-        "cursor": 0.15,
-        "windsurf": 0.15,
-        "visual studio code": 0.15,
-        "iterm2": 0.03,
-        "terminal": 0.03,
+        "Conductor": 0.3,
+        "Cursor": 0.15,
+        "Windsurf": 0.15,
+        "Visual Studio Code": 0.15,
+        "iTerm2": 0.03,
+        "Terminal": 0.03,
     }
 
 
@@ -373,6 +423,11 @@ class MicProfileEntryConfig(BaseModel):
     chunk_size: int | None = None
     gain: float | None = None
     voice_isolation_mode: bool | None = None
+    # DEF-101: per-mic minimum dBFS for the energy gate that rejects "too
+    # quiet" recordings. Hardcoded global default is -48 in recording.py;
+    # BT headsets / USB-C dongles / internal mics differ widely. Override
+    # here to make the gate fit the device's actual noise floor.
+    min_audio_dbfs: float | None = None
     echo_safe: bool | None = None
 
     model_config = ConfigDict(extra="ignore")
@@ -412,6 +467,7 @@ class HeyvoxConfig(BaseModel):
 
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
+    hold_queue: HoldQueueConfig = HoldQueueConfig()
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
@@ -569,10 +625,16 @@ def update_config(**kwargs) -> None:
 
         for key, value in kwargs.items():
             # Convert Python values to YAML scalars
-            if isinstance(value, bool):
+            if value is None:
+                yaml_val = "null"
+            elif isinstance(value, bool):
                 yaml_val = "true" if value else "false"
             elif isinstance(value, str):
                 yaml_val = _yaml_escape(value)
+            elif isinstance(value, (list, tuple)):
+                # Compact flow style for small lists
+                items = ", ".join(_yaml_escape(str(v)) for v in value)
+                yaml_val = f"[{items}]"
             else:
                 yaml_val = str(value)
 
@@ -594,20 +656,34 @@ def update_config(**kwargs) -> None:
                 # Nested key (e.g., tts.verbosity)
                 section, subkey = parts
                 in_section = False
+                section_start_idx = -1
+                section_last_idx = -1
+                section_indent = ""
                 for i, line in enumerate(lines):
                     stripped = line.lstrip()
                     if stripped.startswith(f"{section}:"):
                         in_section = True
+                        section_start_idx = i
                         continue
                     if in_section:
                         if stripped and not stripped.startswith("#") and not line[0].isspace():
                             in_section = False  # Left the section
                             continue
+                        # Track last indented (section-member) line for insertion point
+                        if line.strip() and line[0].isspace():
+                            section_last_idx = i
+                            if not section_indent:
+                                section_indent = line[:len(line) - len(stripped)]
                         if stripped.startswith(f"{subkey}:"):
                             indent = line[:len(line) - len(stripped)]
                             lines[i] = f"{indent}{subkey}: {yaml_val}\n"
                             found = True
                             break
+                if not found and section_start_idx >= 0:
+                    # Section exists but subkey missing — insert inside the section.
+                    insert_idx = (section_last_idx + 1) if section_last_idx >= 0 else (section_start_idx + 1)
+                    indent = section_indent or "  "
+                    lines.insert(insert_idx, f"{indent}{subkey}: {yaml_val}\n")
 
         # Atomic write: temp file + rename prevents partial writes on crash
         new_content = "".join(lines)
@@ -729,6 +805,14 @@ tts:
   volume_boost: 10         # Added to system volume during TTS (capped at 100)
   ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
   pause_media: false       # Pause YouTube/Spotify/etc. during TTS, resume after
+
+  # Allowed output languages. "auto" = detect + route freely.
+  # List form forces a fallback: text in any language not listed is spoken
+  # with the first entry's voice. Set to ["en-us"] for strict English-only
+  # (skips the Qwen3 German daemon entirely — saves 1.2 GB download + 650 MB RAM).
+  # Env override: HEYVOX_TTS_LANGS="en-us,de"
+  languages: auto          # auto | [en-us] | [en-us, de] | [de]
+
   # script_path: null      # DEPRECATED: external TTS script path (Phase 1 bridge, no longer needed)
 
 # ---------------------------------------------------------------------------

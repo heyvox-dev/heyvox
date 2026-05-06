@@ -22,10 +22,10 @@ Requirements for Polish & Reliability release. Each maps to roadmap phases.
 ### Paste Injection
 
 - [ ] **PASTE-01**: NSPasteboard direct replaces pbcopy subprocess for clipboard writes
-- [ ] **PASTE-02**: Configurable focus settle delay with retry on focus steal
+- [x] **PASTE-02**: Configurable focus settle delay with retry on focus steal
 - [ ] **PASTE-03**: Per-app delay profiles (Conductor, Cursor, Windsurf, Terminal, generic)
-- [ ] **PASTE-04**: AXUIElement fast-path for native AppKit apps
-- [ ] **PASTE-05**: Focus detection verifies correct app/field before paste, with fallback to clipboard + notification
+- [x] **PASTE-04**: AXUIElement fast-path for native AppKit apps
+- [x] **PASTE-05**: Focus detection verifies correct app/field before paste, with fallback to clipboard + notification
 - [ ] **PASTE-06**: Paste works reliably in non-Conductor apps (Cursor, Windsurf, VS Code, iTerm, etc.)
 
 ### Audio Reliability
@@ -88,10 +88,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEBT-02 | Phase 11 | Complete |
 | DEBT-03 | Phase 11 | Complete |
 | PASTE-01 | Phase 12 | Pending |
-| PASTE-02 | Phase 12 | Pending |
+| PASTE-02 | Phase 12 | Complete |
 | PASTE-03 | Phase 12 | Pending |
-| PASTE-04 | Phase 12 | Pending |
-| PASTE-05 | Phase 12 | Pending |
+| PASTE-04 | Phase 12 | Complete |
+| PASTE-05 | Phase 12 | Complete |
 | PASTE-06 | Phase 12 | Pending |
 | AUDIO-01 | Phase 13 | Complete |
 | AUDIO-02 | Phase 13 | Complete |

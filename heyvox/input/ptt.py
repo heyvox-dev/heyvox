@@ -71,8 +71,29 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     _stop_lock = threading.Lock()
     _stop_in_progress = False  # prevent duplicate stop calls
 
+    # DEF-087: Track actual event flow so the watchdog can distinguish
+    # "tap enabled but dead" from "tap working but user is idle". The old
+    # watchdog only polled CGEventTapIsEnabled — which keeps returning True
+    # even when macOS has silently stopped delivering events (Accessibility
+    # permission hiccup, tccd restart, etc.). Now we count events received
+    # and surface a WARNING if none arrive across a long observation window.
+    _event_count = 0
+    _first_event_logged = False
+    _last_event_at = time.time()
+
     def callback(proxy, event_type, event, refcon):
         nonlocal ptt_held, _last_keydown_time, _stop_in_progress
+        nonlocal _event_count, _first_event_logged, _last_event_at
+
+        # DEF-087: touch the flow counters on every delivery. Cheap (two
+        # integer writes + one time.time()) and runs in the Quartz C
+        # thread, so we keep it outside the try/except to guarantee we
+        # notice dead taps even if _callback_inner raises consistently.
+        _event_count += 1
+        _last_event_at = time.time()
+        if not _first_event_logged:
+            _first_event_logged = True
+            _log(f"PTT event tap delivering events (first event: type={event_type})")
 
         # CRITICAL: Any unhandled exception in this Quartz C callback causes
         # macOS to permanently disable the event tap. All action callbacks
@@ -209,8 +230,24 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     # under load or after transient Accessibility permission changes.
     # Poll every 5s and re-enable if needed. Without this, ESC and fn stop
     # working with no visible error.
+    # DEF-087: `CGEventTapIsEnabled` can keep returning True while the tap
+    # is effectively dead (no events flowing). Cross-check the event-flow
+    # counters from the callback closure and surface a WARNING + forced
+    # re-enable if the tap stays silent for too long. Heartbeat cadence
+    # (HEARTBEAT_SECS) keeps the log readable while still catching tap
+    # death quickly enough to explain user reports like "fn doesn't work".
+    # DEF-087 follow-up (DEF-088): 120s was too aggressive — a normal user
+    # reading code or in a meeting easily generates zero events for 2 min,
+    # spamming the log with false-positive WARNs every cycle. 600s (10 min)
+    # is rare under genuine activity and still catches the dead-tap case
+    # the original DEF-087 was after.
+    SILENT_WARN_SECS = 600.0   # no events for this long → WARN + re-enable
+    HEARTBEAT_SECS = 1800.0    # log an alive-heartbeat every N seconds
+
     def _tap_watchdog():
         _consecutive_reenable = 0
+        _last_heartbeat = time.time()
+        _silence_warned = False
         while True:
             time.sleep(1.0)
             try:
@@ -218,8 +255,37 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
                     _consecutive_reenable += 1
                     Quartz.CGEventTapEnable(tap, True)
                     _log(f"WARNING: CGEventTap was disabled by macOS, re-enabled (#{_consecutive_reenable})")
+                    _silence_warned = False  # re-enable may restore flow
                 else:
                     _consecutive_reenable = 0
+
+                now = time.time()
+                silence = now - _last_event_at
+                if silence > SILENT_WARN_SECS and not _silence_warned:
+                    # Tap "enabled" per Quartz but we have not observed a
+                    # single event in two minutes. Most common cause: the
+                    # Accessibility permission was revoked or tccd is in
+                    # a bad state. Attempt re-enable and tell the user.
+                    Quartz.CGEventTapEnable(tap, True)
+                    _log(
+                        f"WARNING: PTT event tap enabled but silent for "
+                        f"{silence:.0f}s (received {_event_count} events "
+                        f"since start). Toggled re-enable; if fn still "
+                        f"does nothing, re-grant Accessibility permission "
+                        f"to the Python binary in System Settings."
+                    )
+                    _silence_warned = True
+                elif silence < 5.0:
+                    # Fresh events flowing — reset the warn latch so a
+                    # later silent period produces another WARN.
+                    _silence_warned = False
+
+                if now - _last_heartbeat > HEARTBEAT_SECS:
+                    _log(
+                        f"[PTT] heartbeat: events={_event_count} "
+                        f"last_event={silence:.0f}s ago enabled={bool(Quartz.CGEventTapIsEnabled(tap))}"
+                    )
+                    _last_heartbeat = now
             except Exception:
                 break  # Tap object gone — thread exits
 

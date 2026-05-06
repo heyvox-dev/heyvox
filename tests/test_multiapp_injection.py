@@ -46,13 +46,17 @@ def _make_snap(
     ax_element=None,
     conductor_workspace: str = "",
 ):
-    """Return a minimal TargetSnapshot-like mock."""
+    """Return a minimal TargetLock-like mock (Phase 15-02 field shape)."""
     snap = MagicMock()
     snap.app_name = app_name
     snap.app_pid = app_pid
+    # Old-shape (retained for legacy consumers)
     snap.element_role = element_role
-    snap.app_bundle_id = app_bundle_id
     snap.ax_element = ax_element if ax_element is not None else MagicMock()
+    # TargetLock fields (new)
+    snap.leaf_role = element_role
+    snap.conductor_workspace_id = None
+    snap.app_bundle_id = app_bundle_id
     snap.conductor_workspace = conductor_workspace
     return snap
 
@@ -225,6 +229,8 @@ class TestMultiAppInjection:
         snap = _make_snap("Xcode", element_role="AXTextField", app_bundle_id="com.apple.dt.Xcode")
         mock_appkit, mock_pb = _make_appkit("hello")
         mock_ax = MagicMock()
+        # AX fast-path now reads focused element first; provide (err, focused).
+        mock_ax.AXUIElementCopyAttributeValue = MagicMock(return_value=(0, MagicMock()))
         mock_ax.AXUIElementSetAttributeValue = MagicMock(return_value=0)
         with patch.dict("sys.modules", {"AppKit": mock_appkit, "ApplicationServices": mock_ax}):
             with patch("heyvox.input.injection._chrome_type_text", return_value=False):
@@ -340,12 +346,12 @@ class TestMultiAppInjection:
     def test_injection_config_defaults_match_production(self):
         """InjectionConfig default delays match expected production values."""
         cfg = InjectionConfig()
-        assert cfg.app_delays["conductor"] == 0.3
-        assert cfg.app_delays["cursor"] == 0.15
-        assert cfg.app_delays["windsurf"] == 0.15
-        assert cfg.app_delays["visual studio code"] == 0.15
-        assert cfg.app_delays["iterm2"] == 0.03
-        assert cfg.app_delays["terminal"] == 0.03
+        assert cfg.app_delays["Conductor"] == 0.3
+        assert cfg.app_delays["Cursor"] == 0.15
+        assert cfg.app_delays["Windsurf"] == 0.15
+        assert cfg.app_delays["Visual Studio Code"] == 0.15
+        assert cfg.app_delays["iTerm2"] == 0.03
+        assert cfg.app_delays["Terminal"] == 0.03
         assert cfg.focus_settle_secs == 0.1
         assert cfg.max_retries == 2
 

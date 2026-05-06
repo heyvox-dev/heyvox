@@ -167,40 +167,63 @@ def _verify_target_focused(expected_bundle_id: str | None) -> bool:
 _AX_NATIVE_ROLES = frozenset({"AXTextField", "AXTextArea"})
 
 
+# 15-02: migrated from legacy snapshot fields (ax_element, element_role,
+# detected_workspace) to the new record-start lock fields (leaf_role,
+# conductor_workspace_id, app_pid). AX element handle is now acquired live
+# from the frontmost app's AXFocusedUIElement at call time (the lock does
+# not carry an AX ref — D-04: refs are ephemeral, role-path is the durable
+# identity).
 def _ax_inject_text(snap, text: str) -> bool:
     """Inject text directly via AX value set — only for native AppKit text fields.
 
     Bypasses clipboard entirely by setting AXValue directly on the element.
     Only applicable for AXTextField and AXTextArea (native AppKit widgets).
-    Explicitly skips AXWebArea (Electron/WebKit apps) where AXValue write has no effect.
+    Explicitly skips AXWebArea (Electron/WebKit apps) where AXValue write has
+    no effect.
 
     Args:
-        snap: TargetSnapshot (or None). Must have ax_element and element_role.
+        snap: TargetLock (or None). Reads leaf_role + conductor_workspace_id
+            from the lock; element handle is acquired live from the focused
+            element of the current frontmost app.
         text: Text to inject.
 
     Returns:
         True if text was injected via AX, False if not applicable or failed.
 
-    Requirement: PASTE-04
+    Requirement: PASTE-04 (Phase 12)
     """
     if snap is None:
         return False
-    if not hasattr(snap, "element_role") or snap.element_role not in _AX_NATIVE_ROLES:
+    leaf_role = getattr(snap, "leaf_role", None)
+    if not leaf_role or leaf_role not in _AX_NATIVE_ROLES:
         return False
-    if snap.ax_element is None:
-        return False
-    # Skip for Electron/Tauri apps — AXValue set returns success but doesn't
-    # update the web framework's internal state, so Enter submits empty text.
-    app_name = getattr(snap, "app_name", None)
-    detected_ws = getattr(snap, "detected_workspace", None)
-    if isinstance(detected_ws, str) and detected_ws:
+    # Skip for workspace-managed Electron/Tauri apps — AXValue set returns
+    # success but doesn't update the web framework's internal state, so Enter
+    # submits empty text. Presence of conductor_workspace_id (set by adapter
+    # at capture time) marks a workspace-managed app.
+    conductor_ws = getattr(snap, "conductor_workspace_id", None)
+    if conductor_ws:
+        app_name = getattr(snap, "app_name", "?")
         _log(f"AX fast-path: skipping for workspace-managed app ({app_name})")
         return False
+    pid = getattr(snap, "app_pid", 0)
+    if not pid:
+        return False
     try:
-        from ApplicationServices import AXUIElementSetAttributeValue
-        err = AXUIElementSetAttributeValue(snap.ax_element, "AXValue", text)
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+            AXUIElementSetAttributeValue,
+        )
+        ax_app = AXUIElementCreateApplication(pid)
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, "AXFocusedUIElement", None
+        )
+        if err != 0 or focused is None:
+            return False
+        err = AXUIElementSetAttributeValue(focused, "AXValue", text)
         if err == 0:
-            _log(f"AX fast-path: injected {len(text)} chars into {snap.element_role}")
+            _log(f"AX fast-path: injected {len(text)} chars into {leaf_role}")
             return True
         _log(f"AX fast-path: failed (err={err})")
         return False
@@ -226,7 +249,7 @@ def _settle_delay_for(app_name: str | None, app_delays: dict[str, float], defaul
     return default
 
 
-def _save_frontmost_pid() -> int:
+def save_frontmost_pid() -> int:
     """Return the PID of the currently frontmost app (for restoring later)."""
     try:
         import AppKit
@@ -234,19 +257,6 @@ def _save_frontmost_pid() -> int:
         return app.processIdentifier() if app else 0
     except Exception:
         return 0
-
-
-def _restore_frontmost(pid: int) -> None:
-    """Re-activate the app that was frontmost before we stole focus."""
-    if not pid:
-        return
-    try:
-        import AppKit
-        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        if app:
-            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-    except Exception:
-        pass
 
 
 def _osascript_type_text(
@@ -309,7 +319,7 @@ def _osascript_type_text(
         _log(f"paste: clipboard verified OK ({len(text)} chars)")
 
         frontmost_before = _get_frontmost_app()
-        original_pid = _save_frontmost_pid()
+        original_pid = save_frontmost_pid()
         _log(f"paste: frontmost app BEFORE = {frontmost_before} (pid={original_pid})")
 
         # DEF-054: PID-aware guard. For Electron bundles (Conductor, VS Code,
@@ -345,7 +355,7 @@ def _osascript_type_text(
 
     # Use the actual process name from System Events (frontmost_before) for the
     # AppleScript target, not the user-facing app_name — macOS process names are
-    # case-sensitive (e.g., "conductor" not "Conductor").
+    # case-sensitive and often differ from the app's display name (DEF-027).
     process_name = frontmost_before if frontmost_before and frontmost_before != "?" else app_name
     already_frontmost = process_name and frontmost_before and process_name.lower() == _get_frontmost_app().lower()
 
@@ -430,11 +440,11 @@ def _osascript_type_text(
         _log(f"paste: WARNING: target was {app_name} but frontmost is {frontmost_after} — may have pasted to wrong app!")
 
     # DEF-054: PID-level post-paste check. For multi-PID bundles the name
-    # guard above always passes ("conductor" == "conductor") even when paste
-    # lands in a different window within the same bundle. Compare PIDs to
-    # catch that case.
+    # guard above always passes (same process name on both sides) even when
+    # paste lands in a different window within the same bundle. Compare PIDs
+    # to catch that case.
     if expected_pid:
-        frontmost_after_pid = _save_frontmost_pid()
+        frontmost_after_pid = save_frontmost_pid()
         if frontmost_after_pid and frontmost_after_pid != expected_pid:
             _log(
                 f"paste: WARNING: target pid={expected_pid} but frontmost "
@@ -445,7 +455,7 @@ def _osascript_type_text(
     return True
 
 
-def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
+def _osascript_press_enter(count: int, app_name: str | None = None, enter_delay: float = 0.2) -> None:
     """Press Enter via osascript.
 
     When app_name is provided, targets that process directly via
@@ -456,7 +466,7 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
     _log(f"enter: count={count}, target={app_name or 'frontmost'}")
 
     enter_script = "\n        ".join(
-        ["keystroke return", "delay 0.2"] * count
+        ["keystroke return", f"delay {enter_delay}"] * count
     )
     # Use actual process name from System Events (case-sensitive)
     process_name = _get_frontmost_app() if app_name else None
@@ -503,16 +513,6 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def save_frontmost_pid() -> int:
-    """Return the PID of the currently frontmost app (for restoring later)."""
-    return _save_frontmost_pid()
-
-
-def restore_frontmost(pid: int) -> None:
-    """Re-activate the app that was frontmost before injection stole focus."""
-    _restore_frontmost(pid)
-
-
 def type_text(
     text: str,
     app_name: str | None = None,
@@ -539,7 +539,7 @@ def type_text(
     Args:
         text: Text to inject.
         app_name: Target app process name (for osascript targeting).
-        snap: TargetSnapshot (or None). Used for AX fast-path and focus verification.
+        snap: TargetLock (or None). Used for AX fast-path and focus verification.
         settle_secs: Focus settle delay before Cmd-V (per-app tuned via InjectionConfig).
         max_retries: Number of retries on clipboard theft.
         enter_count: Number of Enter keystrokes after paste (0 = no auto-send).
@@ -621,68 +621,102 @@ def focus_input(app_name: str, shortcuts: dict[str, str] | None = None) -> None:
         )
 
 
-def conductor_paste_and_send(text: str, enter_count: int = 1) -> bool:
-    """One-shot Conductor injection: Cmd+L → Cmd+V → Enter in a single osascript.
+def app_fast_paste(profile, text: str, enter_count: int | None = None) -> bool:
+    """One-shot paste using profile-driven shortcuts: focus-shortcut -> Cmd+V -> Enter*N.
 
-    Combines focus-input + clipboard-paste + submit into one subprocess call,
-    saving ~0.3s over the multi-step approach. Clipboard is set via NSPasteboard
-    (no subprocess) before the osascript runs.
+    Combines focus + paste + Enter into a single osascript subprocess call
+    (saves ~0.3s vs multi-step). Clipboard is set via NSPasteboard before
+    the osascript runs.
+
+    Args:
+        profile: AppProfileConfig - provides focus_shortcut, settle_delay,
+            is_electron, and the default enter_count. NEVER hardcoded.
+        text: Text to paste.
+        enter_count: Optional override for the number of Enter presses.
+            Pass 0 to suppress auto-send (e.g. PTT mode). Pass None to use
+            profile.enter_count (the wake-word default).
 
     Returns True on success, False on failure.
+
+    Process name for `tell process` is read from the LIVE frontmost app
+    (via _get_frontmost_app) rather than profile.name, because macOS process
+    names are case-sensitive and frequently differ from display names
+    (DEF-027 - lowercase System Events form vs TitleCase bundle display name).
+
+    Requirement: PASTE-15-R8
     """
     _t0 = time.time()
-    _log(f"conductor_paste_and_send: {len(text)} chars + Enter x{enter_count}")
+    effective_enter_count = profile.enter_count if enter_count is None else enter_count
+    _log(
+        f"app_fast_paste: profile={profile.name} focus_shortcut="
+        f"{profile.focus_shortcut!r} enter_count={effective_enter_count} "
+        f"text_len={len(text)}"
+    )
 
+    # 1. Clipboard write + verify
     ok, expected_count = _set_clipboard(text)
     if not ok:
-        _log("ERROR: failed to set clipboard")
+        _log("app_fast_paste: ERROR failed to set clipboard")
         audio_cue("error")
         return False
-
     verify = get_clipboard_text()
     if verify != text:
-        _log(f"ERROR: clipboard verify failed ({len(text)} vs {len(verify)} chars)")
+        _log(
+            f"app_fast_paste: ERROR clipboard verify failed "
+            f"({len(text)} vs {len(verify)} chars)"
+        )
         audio_cue("error")
         return False
 
-    # Build single script: Cmd+L (focus input) → brief delay → Cmd+V (paste) → Enter(s)
-    keystrokes = [
-        'keystroke "l" using command down',  # Focus text input
-        "delay 0.1",                          # Let input field focus
-        'keystroke "v" using command down',   # Paste
-    ]
-    if enter_count > 0:
-        keystrokes.append("delay 0.15")       # Electron needs time to process paste
-        for i in range(enter_count):
+    # 2. Build keystroke block from profile (NO hardcoded shortcuts)
+    keystrokes = []
+    if profile.focus_shortcut:
+        keystrokes.append(
+            f'keystroke "{profile.focus_shortcut}" using command down'
+        )
+        keystrokes.append("delay 0.1")  # Brief settle for input focus to land
+    keystrokes.append('keystroke "v" using command down')
+    if effective_enter_count > 0:
+        # Use profile.settle_delay for Electron/Tauri paste-IPC settle
+        keystrokes.append(f"delay {profile.settle_delay}")
+        for i in range(effective_enter_count):
             keystrokes.append("keystroke return")
-            if i < enter_count - 1:
+            if i < effective_enter_count - 1:
                 keystrokes.append("delay 0.05")
-
     keystroke_block = "\n        ".join(keystrokes)
 
-    # Always target "conductor" — System Events process name is lowercase.
-    # Include 'set frontmost to true' to ensure Conductor has focus before
-    # keystrokes, in case another app (e.g. Chrome) briefly stole focus.
+    # 3. Live frontmost name preserves DEF-027 lowercase fix
+    process_name = _get_frontmost_app()
+    if not process_name or process_name == "?":
+        process_name = profile.name
+    safe_name = process_name.replace('\\', '\\\\').replace('"', '\\"')
+
     script = (
         f'tell application "System Events"\n'
-        f'    tell process "conductor"\n'
+        f'    tell process "{safe_name}"\n'
         f'        set frontmost to true\n'
         f'        delay 0.1\n'
         f'        {keystroke_block}\n'
         f'    end tell\n'
         f'end tell'
     )
+
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True, timeout=SUBPROCESS_TIMEOUT + 2,
     )
     if result.returncode != 0:
-        _log(f"conductor_paste_and_send: FAILED (rc={result.returncode}): "
-             f"{result.stderr.decode().strip()}")
+        _log(
+            f"app_fast_paste: FAILED rc={result.returncode}: "
+            f"{result.stderr.decode().strip()}"
+        )
         audio_cue("error")
         return False
 
-    _log(f"[TIMING] conductor_paste_and_send: OK in {(time.time() - _t0)*1000:.0f}ms")
+    _log(
+        f"[TIMING] app_fast_paste: OK profile={profile.name} "
+        f"in {(time.time() - _t0)*1000:.0f}ms"
+    )
     return True
 
 

@@ -20,6 +20,12 @@ from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 __all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch"]
 
 
+def _log(msg: str) -> None:
+    """Minimal log helper — avoids circular import with heyvox.main."""
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
 @contextmanager
 def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
     """Mute system output while opening a BT mic stream.
@@ -113,7 +119,7 @@ _kAudioDevicePropertyStreams = _fourcc("stm#")
 _kCFStringEncodingUTF8 = 0x08000100
 
 
-def _get_dead_input_device_names() -> set[str]:
+def get_dead_input_device_names() -> set[str]:
     """Return names of CoreAudio input devices that are not alive.
 
     macOS keeps paired-but-disconnected Bluetooth devices in the audio device
@@ -243,15 +249,6 @@ def _get_dead_input_device_names() -> set[str]:
     except Exception as e:
         _log(f"  CoreAudio alive check failed: {e}")
         return set()
-
-
-def get_dead_input_device_names() -> set[str]:
-    """Public wrapper for _get_dead_input_device_names.
-
-    Used by the hotplug scan in main.py to filter the device list before
-    checking for higher-priority devices.
-    """
-    return _get_dead_input_device_names()
 
 
 def force_os_default_input(name_substr: str) -> bool:
@@ -426,7 +423,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         mic_priority = ["MacBook Pro Microphone"]
 
     # Filter out disconnected Bluetooth devices (macOS keeps them in the list)
-    dead_names = _get_dead_input_device_names()
+    dead_names = get_dead_input_device_names()
 
     devices_by_priority = {name: [] for name in mic_priority}
     other_devices = []
@@ -790,9 +787,3 @@ def clear_device_cooldowns() -> None:
     _device_failure_counts.clear()
     if count:
         _log(f"Device cooldowns cleared ({count} device(s) released)")
-
-
-def _log(msg: str) -> None:
-    """Minimal log helper — avoids circular import with heyvox.main."""
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)

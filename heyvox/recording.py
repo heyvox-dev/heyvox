@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from heyvox.text_processing import is_garbled, strip_wake_words
-from heyvox.constants import RECORDING_FLAG, STT_DEBUG_DIR
+from heyvox.constants import RECORDING_FLAG, STT_DEBUG_DIR, TTS_PLAYING_FLAG
 
 if TYPE_CHECKING:
     from heyvox.app_context import AppContext
@@ -24,7 +24,37 @@ if TYPE_CHECKING:
 # threshold are treated as silence — skips Whisper to avoid hallucinations.
 # Normal speech is -30 to -42 dBFS. False triggers on background noise are
 # typically -48 to -55 dBFS. Set to -48 to catch those while allowing quiet speech.
+#
+# DEF-101: per-mic override resolved by `_resolve_min_audio_dbfs()` below.
+# This is the global fallback when no per-mic profile applies.
 _MIN_AUDIO_DBFS = -48.0
+
+
+def _resolve_min_audio_dbfs(config) -> float:
+    """Return the energy-gate dBFS floor for the currently active mic.
+
+    Resolution order (DEF-101):
+      1. config.mic_profiles[<partial match for active mic>].min_audio_dbfs
+      2. Global _MIN_AUDIO_DBFS fallback
+
+    Active mic is read from ACTIVE_MIC_FILE (written by main.py on device
+    init/switch). Match against config keys is partial + case-insensitive,
+    same algorithm as MicProfileManager.get_profile().
+    """
+    try:
+        from heyvox.constants import ACTIVE_MIC_FILE
+        with open(ACTIVE_MIC_FILE) as _f:
+            mic_name = _f.read().strip().split("\n")[0].lower()
+    except (OSError, AttributeError):
+        return _MIN_AUDIO_DBFS
+    profiles = getattr(config, "mic_profiles", None) or {}
+    for key, profile in profiles.items():
+        if key.lower() in mic_name:
+            override = getattr(profile, "min_audio_dbfs", None)
+            if override is not None:
+                return float(override)
+            break
+    return _MIN_AUDIO_DBFS
 
 
 def _audio_rms(chunks: list, sample_rate: int) -> float:
@@ -110,21 +140,38 @@ def _save_debug_audio(
         return None
 
 
-def _release_recording_guard() -> None:
+def _release_recording_guard(flag_delay: float = 0.0) -> None:
     """Release the recording guard — both in-process event and cross-process file flag.
 
     Called after STT->paste completes (or on early exit) so the TTS hook
     knows it's safe to speak again.
+
+    flag_delay: if > 0, defer the cross-process RECORDING_FLAG removal by this
+    many seconds in a daemon thread. The in-process TTS-echo flag and the HUD
+    state are still cleared synchronously. Used after auto-Enter paste so a
+    Herald-driven workspace switch can't race Conductor's async submit handler
+    and steal focus mid-submit (DEF-070-style intra-Conductor focus steal).
     """
     try:
         from heyvox.audio.tts import set_recording as _tts_set_rec
         _tts_set_rec(False)
     except ImportError:
         pass
-    try:
-        os.remove(RECORDING_FLAG)
-    except FileNotFoundError:
-        pass
+
+    def _remove_flag() -> None:
+        try:
+            os.remove(RECORDING_FLAG)
+        except FileNotFoundError:
+            pass
+
+    if flag_delay > 0:
+        def _delayed() -> None:
+            time.sleep(flag_delay)
+            _remove_flag()
+        threading.Thread(target=_delayed, daemon=True).start()
+    else:
+        _remove_flag()
+
     try:
         from heyvox.ipc import update_state
         update_state({"recording": False})
@@ -191,6 +238,21 @@ class RecordingStateMachine:
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
             self.ctx.recording_target = None  # Will be filled by background snapshot
+            # DEF-078: Seed tts-during-recording flag from the current TTS flag
+            # state. If Herald is mid-speech when the recording starts, the
+            # first ~100-500 ms of audio almost certainly contains speaker
+            # bleed. filter_tts_echo() uses this in aggressive mode.
+            self.ctx.tts_seen_during_recording = os.path.exists(TTS_PLAYING_FLAG)
+            # DEF-084: Reset cancel_transcription at recording boundary so a
+            # stale Escape-set flag from a prior STT (e.g. one that took the
+            # garbled / empty-stt / voice-command early-return path and didn't
+            # clear it) can't spuriously cancel this recording's injection.
+            if self.ctx.cancel_transcription.is_set():
+                self._log(
+                    "CANCEL_LEAK: cancel_transcription was still set at start() — "
+                    "clearing (DEF-084)"
+                )
+            self.ctx.cancel_transcription.clear()
 
         # === Instant feedback FIRST — before any blocking work ===
         from heyvox.audio.cues import audio_cue, get_cues_dir
@@ -213,30 +275,32 @@ class RecordingStateMachine:
         except ImportError:
             pass
 
-        # Snapshot target app/text field in background thread — AX tree walk
-        # can take 5-10s for Conductor workspace detection, and we must not
-        # block the "listening" feedback for that.
+        # Capture target lock in background thread — AX tree walk can take
+        # 5-10s for Conductor workspace detection, and we must not block
+        # the "listening" feedback for that.
         def _bg_snapshot():
             try:
-                from heyvox.input.target import snapshot_target
-                snap = snapshot_target(config=self.config)
+                from heyvox.input.target import capture_lock
+                snap = capture_lock(config=self.config)
                 with self.ctx.lock:
                     self.ctx.recording_target = snap
                 if snap:
                     ws_info = (
-                        f", workspace={snap.detected_workspace!r}"
-                        if snap.detected_workspace else ""
+                        f", conductor_ws={snap.conductor_workspace_id!r}, "
+                        f"conductor_sess={snap.conductor_session_id!r}"
+                        if snap.conductor_workspace_id else ""
                     )
                     self._log(
-                        f"[snapshot] app={snap.app_name}, "
+                        f"[lock] app={snap.app_name}, "
                         f"pid={snap.app_pid}, "
-                        f"window={snap.window_title!r}, "
-                        f"element={snap.element_role}{ws_info}"
+                        f"window_number={snap.window_number}, "
+                        f"leaf_role={snap.leaf_role}, "
+                        f"text_field={snap.focused_was_text_field}{ws_info}"
                     )
                 else:
-                    self._log("[snapshot] WARNING: no target snapshot (AppKit unavailable?)")
+                    self._log("[lock] WARNING: no target lock (AppKit unavailable?)")
             except Exception as e:
-                self._log(f"[snapshot] ERROR: {e}")
+                self._log(f"[lock] ERROR: {e}")
         threading.Thread(target=_bg_snapshot, daemon=True, name="vox-snapshot").start()
 
         # Pause browser/native media during recording (YouTube, Spotify, etc.)
@@ -355,8 +419,10 @@ class RecordingStateMachine:
                 # removing it would make the remaining audio seem quieter)
                 raw_rms_db = _audio_rms(recorded_chunks, self.config.audio.sample_rate)
 
-                # Save raw audio BEFORE any trimming (for debug analysis)
-                _save_debug_audio("raw", recorded_chunks, self.config.audio.sample_rate, {
+                # Save raw audio BEFORE any trimming (for debug analysis).
+                # DEF-081: capture the path so the garbled-filter branch can
+                # surface a recovery hint if the transcription is discarded.
+                _last_raw_wav = _save_debug_audio("raw", recorded_chunks, self.config.audio.sample_rate, {
                     "ptt": ptt_snapshot,
                     "raw_rms_dbfs": round(raw_rms_db, 1),
                 }, log_fn=self._log)
@@ -480,18 +546,41 @@ class RecordingStateMachine:
         from heyvox.audio.stt import transcribe_audio
         from heyvox.audio.cues import audio_cue, get_cues_dir
         from heyvox.input.injection import (
-            type_text, save_frontmost_pid, _settle_delay_for,
+            type_text, save_frontmost_pid, _settle_delay_for, app_fast_paste,
+            _set_clipboard,
         )
-        from heyvox.input.target import restore_target
+        from heyvox.input.target import resolve_lock
+        from heyvox.input.toast import show_failure_toast
         from heyvox.audio.tts import check_voice_command, execute_voice_command
 
         try:
             # Energy gate: skip STT on silent recordings to avoid Whisper hallucinations.
             # Uses raw_rms_db computed BEFORE wake word trim (wake word is the loudest part).
-            if raw_rms_db < _MIN_AUDIO_DBFS:
+            # DEF-101: per-mic threshold from config.mic_profiles[<mic>].min_audio_dbfs.
+            min_dbfs = _resolve_min_audio_dbfs(self.config)
+            if raw_rms_db < min_dbfs:
                 self._log(
-                    f"Recording too quiet ({raw_rms_db:.1f} dBFS < {_MIN_AUDIO_DBFS} dBFS), skipping STT"
+                    f"Recording too quiet ({raw_rms_db:.1f} dBFS < {min_dbfs} dBFS), skipping STT"
                 )
+                # DEF-101: surface silent-skip to user via mic-warn file.
+                # HUD overlay reads this on every menu bar refresh and prepends a
+                # ⚠ banner to the bar title until auto-expiry (MIC_WARN_TTL_SECS).
+                try:
+                    from heyvox.constants import MIC_WARN_FILE
+                    _mic_name = ""
+                    try:
+                        from heyvox.constants import ACTIVE_MIC_FILE
+                        _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
+                    except OSError:
+                        pass
+                    _warn = (
+                        f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
+                        + (f" — {_mic_name}" if _mic_name else "")
+                    )
+                    with open(MIC_WARN_FILE, "w") as _f:
+                        _f.write(_warn)
+                except OSError:
+                    pass
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
                     if self.training_collector.reclassify_tp_start_as_fp(
@@ -507,6 +596,8 @@ class RecordingStateMachine:
                     )
                 cues_dir = get_cues_dir(self.config.cues_dir)
                 audio_cue("paused", cues_dir)
+                # Reset HUD to idle so the menu bar refresh picks up the warn file
+                self._hud_send({"type": "state", "state": "idle"})
                 return
 
             _t_stt_start = time.time()
@@ -561,21 +652,85 @@ class RecordingStateMachine:
 
             # ECHO-03: Filter TTS echo from transcription (speaker mode protection).
             # If the STT output matches recently spoken TTS text, it's echo, not the user.
+            # DEF-078: When TTS_PLAYING_FLAG was observed during the recording
+            # window, bleed is almost certain — escalate to aggressive mode
+            # (overlap threshold 0.4 instead of 0.6).
             echo_filtered = False
             if text and self.config.echo_suppression.stt_echo_filter:
                 try:
                     from heyvox.audio.echo import filter_tts_echo
-                    filtered = filter_tts_echo(text)
+                    aggressive = bool(getattr(self.ctx, "tts_seen_during_recording", False))
+                    filtered = filter_tts_echo(text, aggressive=aggressive)
                     if filtered != text:
-                        self._log(f"ECHO-03: Stripped TTS echo from transcription (was: {text[:60]})")
+                        mode = " (aggressive)" if aggressive else ""
+                        self._log(f"ECHO-03{mode}: Stripped TTS echo from transcription (was: {text[:60]})")
                         echo_filtered = True
                         text = filtered
                 except Exception:
                     pass
+            # Reset the flag so the next recording starts clean.
+            try:
+                self.ctx.tts_seen_during_recording = False
+            except Exception:
+                pass
 
-            # Quality filter: discard garbled/nonsensical STT output
-            if text and is_garbled(text):
-                self._log(f"FILTER: Discarding garbled transcription: {text[:80]}")
+            # DEF-091: Strip wake-word repetitions from the trailing/leading
+            # edges of the transcription BEFORE running is_garbled. MLX
+            # frequently transcribes the user's stop wake word three or more
+            # times in a row at the end of the audio (each "Hey Vox" attempt
+            # becomes "Hey Wax. Hey Wax. Hey Wax. ..." in MLX output, plus
+            # temperature-fallback often duplicates). The repeated bigrams
+            # then trip is_garbled's tail-window or consecutive-duplicate
+            # check and the *entire transcription* is discarded — including
+            # the user's clean dictation prefix. Stripping first keeps the
+            # garbled-detector focused on real hallucination rather than
+            # legitimate stop-wake-word echoes the strip would have removed
+            # anyway. Save_fn_stop/save_tp_stop training tracking moves with
+            # the strip; the original strip block at the end of this method
+            # has been replaced with a no-op since `text` is already cleaned.
+            pre_strip_text = text
+            text = strip_wake_words(
+                text,
+                self.config.wake_words.start,
+                self.config.wake_words.stop,
+            )
+            _wake_word_stripped = text != pre_strip_text
+            if _wake_word_stripped:
+                self._log(
+                    f"Wake word strip: '{pre_strip_text[:80]}' -> '{text[:80]}'"
+                )
+                if self.training_collector and _training_chunks:
+                    self.training_collector.save_fn_stop(
+                        _training_chunks, _training_sr
+                    )
+            elif (
+                self.training_collector and _training_chunks
+                and text and text.strip()
+            ):
+                self.training_collector.save_tp_stop(
+                    _training_chunks, _training_sr
+                )
+
+            # Quality filter: discard garbled/nonsensical STT output.
+            # DEF-076 + DEF-081: surface the discard to the user with a HUD
+            # event and point at the raw WAV so the transcription is
+            # recoverable by re-running through MLX.
+            # DEF-083: pass STT elapsed + audio duration so the detector can
+            # catch hallucinations that slip past text-level checks when
+            # Whisper's temperature-fallback loop fires (abnormally slow STT).
+            if text and is_garbled(text, stt_secs=elapsed, audio_secs=duration):
+                self._log(
+                    f"FILTER (garbled, stt={elapsed:.1f}s): Discarding transcription: {text[:80]}"
+                )
+                try:
+                    if _last_raw_wav:
+                        self._log(f"FILTER (garbled): raw audio preserved at {_last_raw_wav}")
+                except NameError:
+                    pass
+                self._hud_send({
+                    "type": "transcript",
+                    "text": f"Garbled STT ({elapsed:.1f}s) - try again",
+                })
                 # Training: save as false positive (trigger led to garbled output)
                 if self.training_collector and _training_chunks:
                     self.training_collector.save_fp(_training_chunks, _training_sr, reason="garbled")
@@ -666,18 +821,12 @@ class RecordingStateMachine:
                 audio_cue("paused", cues_dir)
                 return
 
-            # Strip wake word phrases from transcription (start and end)
-            pre_strip = text
-            text = strip_wake_words(text, self.config.wake_words.start, self.config.wake_words.stop)
-            _wake_word_stripped = text != pre_strip
-            if _wake_word_stripped:
-                self._log(f"Wake word strip: '{pre_strip[:80]}' -> '{text[:80]}'")
-                # Training: STT found wake word in recording tail → model missed it (FN-stop)
-                if self.training_collector and _training_chunks:
-                    self.training_collector.save_fn_stop(_training_chunks, _training_sr)
-            elif self.training_collector and _training_chunks and text and text.strip():
-                # Clean transcription with no wake word remnants → confirmed TP-stop
-                self.training_collector.save_tp_stop(_training_chunks, _training_sr)
+            # DEF-091: wake-word strip moved upstream (right after the echo
+            # filter, before is_garbled). `pre_strip_text` and
+            # `_wake_word_stripped` are already populated. Keep the variable
+            # alias `pre_strip` for the debug-audio payload below so external
+            # log readers (heyvox log-health) keep parsing.
+            pre_strip = pre_strip_text
 
             # Final debug log entry with full pipeline result
             _save_debug_audio("_final", [], self.config.audio.sample_rate, {
@@ -715,16 +864,16 @@ class RecordingStateMachine:
             if stop_time:
                 self._log(f"[TIMING] stop→inject start: {_t_inject_start - stop_time:.2f}s")
             target_app = recording_target.app_name if recording_target else None
-            target_window = recording_target.window_title if recording_target else None
+            window_number = recording_target.window_number if recording_target else 0
             self._log(
-                f"[inject] target_app={target_app}, window={target_window!r}, "
+                f"[inject] target_app={target_app}, window_number={window_number}, "
                 f"mode={'PTT' if ptt else 'wake word'}, "
                 f"text={len(paste_text)} chars: {paste_text[:60]!r}"
             )
             try:
                 print(
                     f"[recording] Injecting -> {target_app or 'frontmost'} "
-                    f"(window={target_window!r})",
+                    f"(window_number={window_number})",
                     file=sys.stderr,
                 )
             except (BrokenPipeError, OSError):
@@ -739,7 +888,17 @@ class RecordingStateMachine:
                 f"target pid={target_pid}"
             )
 
-            paste_ok = True  # Default to True; set to False if type_text fails
+            # --- 15-05: resolve_lock + tier-aware paste + fail-closed branch ---
+            # DEF-070 PRESERVED: this paste-time workspace+session switch fires
+            # AFTER recording stopped. The orchestrator's RECORDING_FLAG check
+            # that prevents Herald-driven switches DURING recording is in
+            # heyvox/herald/orchestrator.py and is NOT touched by this path.
+            # The conductor-switch-workspace script itself does NOT consult
+            # RECORDING_FLAG (verified Plan 15-05 Task 0).
+            paste_ok = False
+            outcome = None  # W6: explicit init so later consumers can test
+                            # `outcome is not None` safely (e.g. Plan 15-06
+                            # verify_paste gating).
             combined_enter = 0
 
             adapter = self.ctx.adapter
@@ -754,52 +913,126 @@ class RecordingStateMachine:
                 combined_enter = 0
             enter_delay = profile.enter_delay if profile else 0.05
 
-            if recording_target:
-                if recording_target.detected_workspace:
-                    self._log(
-                        f"[inject] Restoring workspace "
-                        f"'{recording_target.detected_workspace}'"
-                        f" for {recording_target.app_name}"
-                    )
-                restore_target(recording_target, config=self.config)
-                self._log(f"[inject] Restored target: {recording_target.app_name}")
-
-                injection_cfg = getattr(self.config, "injection", None)
-                if injection_cfg:
-                    settle = _settle_delay_for(
-                        target_app, injection_cfg.app_delays, injection_cfg.focus_settle_secs
-                    )
-                    max_retries = injection_cfg.max_retries
-                else:
-                    settle = 0.1
-                    max_retries = 2
+            if recording_target is None:
+                self._log("[inject] WARNING: no recording_target — skipping paste")
+            else:
+                outcome = resolve_lock(recording_target, config=self.config)
                 self._log(
-                    f"[inject] generic path: auto_send={auto_send}, "
-                    f"combined_enter={combined_enter}, enter_delay={enter_delay}"
+                    f"[PASTE] outcome ok={outcome.ok} tier_used={outcome.tier_used} "
+                    f"reason={outcome.reason.value if outcome.reason else 'n/a'} "
+                    f"elapsed_ms={outcome.elapsed_ms}"
                 )
-                # Only send focus shortcut if a workspace switch actually happened
-                # (sidebar click steals focus from text input, Cmd+L restores it).
-                # When no switch was needed, focus is already on the text input.
-                # EXCEPT: if activate failed (multi-PID Electron rotation), we
-                # skipped AX refocus in restore_target — force focus shortcut so
-                # paste lands in the current frontmost helper's text input.
-                ws_switched = getattr(recording_target, '_workspace_switched', False)
-                activate_failed = getattr(recording_target, '_activate_failed', False)
-                _focus = (
-                    profile.focus_shortcut
-                    if (profile and (ws_switched or activate_failed))
-                    else ""
-                )
-                paste_ok = type_text(
+
+                if outcome.ok:
+                    # Tier 1: refocus succeeded; tier 2: profile shortcut
+                    # focused the input. Either way, paste via app_fast_paste
+                    # if profile has a focus_shortcut (R8 — Phase 12 fast-path);
+                    # else fall back to type_text.
+                    if profile and profile.focus_shortcut:
+                        # R8: first caller of app_fast_paste (landed orphaned
+                        # in Plan 15-03). Pass combined_enter explicitly so
+                        # PTT mode (combined_enter=0) suppresses auto-Enter
+                        # instead of falling through to profile.enter_count
+                        # — fix for the PTT double-paste-then-send bug.
+                        paste_ok = app_fast_paste(
+                            profile, paste_text, enter_count=combined_enter,
+                        )
+                    else:
+                        injection_cfg = getattr(self.config, "injection", None)
+                        if injection_cfg:
+                            settle = _settle_delay_for(
+                                target_app, injection_cfg.app_delays,
+                                injection_cfg.focus_settle_secs,
+                            )
+                            max_retries = injection_cfg.max_retries
+                        else:
+                            settle = 0.1
+                            max_retries = 2
+                        paste_ok = type_text(
+                            paste_text,
+                            app_name=target_app,
+                            snap=recording_target,
+                            settle_secs=settle,
+                            max_retries=max_retries,
+                            enter_count=combined_enter,
+                            enter_delay=enter_delay,
+                            focus_shortcut="",  # tier-1 success -> input focused
+                        )
+                else:
+                    # Fail-closed: write clipboard, NO Cmd+V, error cue, toast (R5).
+                    # W5: History write happens UNCONDITIONALLY upstream at the
+                    # _save_transcript call (Fact 2) — fail-closed does not lose
+                    # the transcript from history. Clipboard write is explicit
+                    # here so the user has the transcript even if their original
+                    # target is gone.
+                    # DEF-088: each step is logged so a future hang in this
+                    # branch is pin-pointed instead of stalling silently for
+                    # 60 s until the busy-flag watchdog force-resets.
+                    self._log("[PASTE] fail-closed: writing clipboard")
+                    ok_clip, _ = _set_clipboard(paste_text)
+                    if not ok_clip:
+                        self._log(
+                            "[PASTE] WARNING: clipboard write failed "
+                            "during fail-closed"
+                        )
+                    self._log("[PASTE] fail-closed: playing error cue")
+                    audio_cue("error", cues_dir)
+                    self._log("[PASTE] fail-closed: showing failure toast")
+                    show_failure_toast(outcome.message, title="HeyVox paste")
+                    self._log(
+                        f"[PASTE] FAIL_CLOSED reason={outcome.reason.value} "
+                        f"message={outcome.message}"
+                    )
+
+            # --- 15-06: post-paste verification (SPEC R7) ---
+            # W12 — defensive guard: outcome may be None when recording_target
+            # was None (15-05 explicitly initializes outcome = None per W6).
+            # Gate on BOTH `outcome is not None` AND `outcome.ok` to avoid
+            # AttributeError on `outcome.element` when no resolution happened.
+            # DEF-090: skip verify when auto-Enter is active. The send-key
+            # clears Conductor's chat input on a successful submit, so the
+            # post-Enter AX value is "1-char placeholder" or empty — which
+            # verify_paste correctly fails to match against the transcript.
+            # The original retry then fires Cmd+V into the just-cleared
+            # field, the drift branch fires `show_failure_toast`, and the
+            # whole branch hangs ~60 s in the toast subprocess until the
+            # busy-flag watchdog force-resets state. verify_paste was
+            # designed for "did paste land in the right field?" without an
+            # Enter step — it cannot tell auto-Enter success from drift.
+            run_verify = (
+                paste_ok
+                and recording_target is not None
+                and outcome is not None
+                and outcome.ok
+                and combined_enter == 0
+            )
+            if run_verify:
+                from heyvox.input.target import verify_paste
+                verify = verify_paste(
+                    recording_target,
+                    outcome.element,  # may be None for Tier 2 — verify_paste
+                                      # re-acquires via AXFocusedUIElement (W3)
                     paste_text,
-                    app_name=target_app,
-                    snap=recording_target,
-                    settle_secs=settle,
-                    max_retries=max_retries,
-                    enter_count=combined_enter,
-                    enter_delay=enter_delay,
-                    focus_shortcut=_focus,
+                    profile,
                 )
+                self._log(
+                    f"[PASTE] verify result: verified={verify.verified} "
+                    f"retried={verify.retried} drift={verify.drift} "
+                    f"detail={verify.detail!r}"
+                )
+                if verify.drift:
+                    # Content WAS sent (just possibly to wrong place) — do
+                    # NOT downgrade paste_ok. Surface: error cue + toast.
+                    audio_cue("error", cues_dir)
+                    drift_message = (
+                        "HeyVox: paste verification failed — "
+                        "content may have landed in the wrong field."
+                    )
+                    show_failure_toast(drift_message, title="HeyVox paste drift")
+            elif paste_ok and combined_enter > 0:
+                # Brief log so the operator can correlate "no verify ran"
+                # with the auto-Enter path during triage.
+                self._log("[PASTE] verify skipped (auto-Enter clears field)")
 
             if paste_ok:
                 if combined_enter > 0:
@@ -824,9 +1057,22 @@ class RecordingStateMachine:
 
             # Show confirmation in HUD — use paste_ok to decide cue and message
             if not paste_ok:
-                self._hud_send({"type": "state", "state": "idle", "text": "Paste failed"})
-                # Error cue already played by type_text — just log
-                self._log("Paste FAILED — error cue played by injection")
+                if outcome is not None and outcome.reason is not None:
+                    # Fail-closed: transcript saved to clipboard + history;
+                    # toast already fired by the fail-closed branch above.
+                    self._hud_send({
+                        "type": "state", "state": "idle",
+                        "text": "Paste failed (clipboard saved)",
+                    })
+                    self._log(
+                        f"Paste FAIL_CLOSED — reason={outcome.reason.value}; "
+                        f"clipboard + history retained"
+                    )
+                else:
+                    self._hud_send({
+                        "type": "state", "state": "idle", "text": "Paste failed",
+                    })
+                    self._log("Paste FAILED — error cue played by injection")
             elif ptt:
                 # PTT mode: no auto-Enter, just pasted -- don't say "Sending"
                 self._hud_send({"type": "state", "state": "idle", "text": "Pasted"})
@@ -842,9 +1088,27 @@ class RecordingStateMachine:
         except Exception as e:
             self._log(f"ERROR in send phase: {e}")
         finally:
-            _release_recording_guard()
+            # Hold RECORDING_FLAG ~2s past Sent! when auto-Enter was used so
+            # Herald's workspace-switch can't race Conductor's async submit
+            # handler. paste_ok and combined_enter are initialised at the top
+            # of the try-block, so they're safe to read here even on early
+            # exception paths. (Hybrid option C; partner change is --force
+            # removal + 2s idle gate in heyvox/herald/orchestrator.py.)
+            try:
+                _post_send_grace = 2.0 if (paste_ok and combined_enter > 0) else 0.0
+            except NameError:
+                _post_send_grace = 0.0
+            _release_recording_guard(flag_delay=_post_send_grace)
             with self.ctx.lock:
                 self.ctx.busy = False
+            # DEF-084: Clear cancel_transcription unconditionally at STT-path
+            # exit. Every post-STT early-return (garbled, empty-stt,
+            # voice-command) used to leak this flag; the user-cancelled branch
+            # and the pre-type re-check each cleared it locally. Centralising
+            # the reset here keeps the flag's lifecycle symmetrical with the
+            # STT call — future filters can return early without reasoning
+            # about flag cleanup.
+            self.ctx.cancel_transcription.clear()
             # Resume media that we paused at recording start
             try:
                 from heyvox.audio.media import resume_media

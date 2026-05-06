@@ -52,11 +52,38 @@ class AppContext:
     audio_buffer: list = dataclasses.field(default_factory=list)
     triggered_by_ptt: bool = False
     recording_target: object = None
-    """TargetSnapshot: app + text field captured at recording start."""
+    """TargetLock: immutable record-start target (SPEC R1)."""
+
+    tts_seen_during_recording: bool = False
+    """DEF-078: True if TTS_PLAYING_FLAG was observed at any point during the
+    current (or most recent) recording window. Causes filter_tts_echo() to
+    apply an aggressive overlap threshold when stripping echo from the STT
+    output."""
 
     cancel_transcription: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
+    """Transient intent-to-cancel signal for the in-flight STT call.
+
+    Lifecycle invariant (DEF-084):
+        - SET by: Escape key pressed while `busy` is True
+          (``heyvox/input/ptt.py`` → ``on_cancel_transcription`` callback).
+        - CLEARED by: ``RecordingStateMachine.start()`` at the next recording
+          boundary AND ``RecordingStateMachine._send_local`` finally-block at
+          STT-path exit. Both sites reset the flag unconditionally so every
+          recording begins and ends with a clean slate.
+        - CONSUMED by: two checks in ``_send_local`` (immediately after STT
+          returns, and again right before ``type_text`` is called). The
+          consumer paths also call ``.clear()`` locally for readability; the
+          centralised resets above are the correctness guarantee.
+
+    Why this matters: the flag used to leak across recordings when an early
+    return path (``is_garbled`` / ``empty-stt`` / voice-command) skipped the
+    consumer checks. The next clean recording would then hit a stale
+    ``is_set()``, take the bogus user-cancelled branch, pollute the wake-word
+    training data via ``reclassify_tp_start_as_fp``, and silently drop the
+    injection. Always clear at operation boundaries — never rely on a
+    consumer path to mop up transient intent flags."""
     shutdown: threading.Event = dataclasses.field(default_factory=threading.Event)
     cancel_requested: threading.Event = dataclasses.field(
         default_factory=threading.Event

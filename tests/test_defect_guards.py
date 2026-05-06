@@ -566,6 +566,147 @@ def test_def054_paste_guard_compares_pid_not_just_name():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-103 — Stop-wake silently drops 6/10 attempts (single-frame peak
+# at G435/BT-HFP audio quality). Guards the three trigger paths added
+# alongside the consecutive-frames gate: fast-path on score >= 0.92,
+# and sliding-window 2-of-4. See DEFECT-LOG.md DEF-103 for the data.
+# ---------------------------------------------------------------------------
+
+def test_def103_high_confidence_fast_stop_constant():
+    """`_HIGH_CONFIDENCE_FAST_STOP` must exist and sit above DEF-043's
+    mid-sentence phoneme-flare ceiling (~0.85) but below 1.0 so real
+    "Hey Vox" peaks (typically 0.99+) reliably exceed it.
+    """
+    src = _read_main_py()
+    m = re.search(r"_HIGH_CONFIDENCE_FAST_STOP\s*=\s*([\d.]+)", src)
+    assert m, (
+        "DEF-103: `_HIGH_CONFIDENCE_FAST_STOP` constant missing — single-frame "
+        "fast-stop path is the primary fix for the 6/10 lost-stop pattern."
+    )
+    val = float(m.group(1))
+    assert 0.86 <= val <= 0.97, (
+        f"DEF-103: _HIGH_CONFIDENCE_FAST_STOP={val} outside safe range "
+        f"[0.86, 0.97]. Below 0.86 risks DEF-043 mid-sentence false stops; "
+        f"above 0.97 misses normal real-speech peaks (BT-HFP can attenuate "
+        f"the model's peak below 1.0)."
+    )
+
+
+def test_def103_sliding_window_constants():
+    """`_STOP_WINDOW_FRAMES` and `_STOP_WINDOW_HITS_REQUIRED` must define
+    the 2-of-N sliding window for the second stop-path. Window must be
+    short enough (<= 6 frames ≈ 480 ms) that mid-sentence phoneme runs
+    don't accumulate, but long enough (>= 3) to tolerate one dip frame
+    between two real hits.
+    """
+    src = _read_main_py()
+    m_win = re.search(r"_STOP_WINDOW_FRAMES\s*=\s*(\d+)", src)
+    m_hit = re.search(r"_STOP_WINDOW_HITS_REQUIRED\s*=\s*(\d+)", src)
+    assert m_win and m_hit, (
+        "DEF-103: sliding-window constants missing — peak→dip→peak case "
+        "(DEF-103 evidence: 149/252 single-peak frames lost) needs the "
+        "window path to recover stops the consecutive gate kills."
+    )
+    win = int(m_win.group(1))
+    hits = int(m_hit.group(1))
+    assert 3 <= win <= 6, (
+        f"DEF-103: _STOP_WINDOW_FRAMES={win} outside [3, 6]. Too narrow "
+        f"loses to brief dips; too wide enables false stops on phoneme runs."
+    )
+    assert hits == 2, (
+        f"DEF-103: _STOP_WINDOW_HITS_REQUIRED={hits}, expected 2. Single-hit "
+        f"window is what fast-path covers; >=3 reverts to consecutive-style "
+        f"strictness that DEF-103 was filed against."
+    )
+
+
+def test_def103_stop_hit_window_state_exists():
+    """The `_stop_hit_window` per-wake-word deque tracker must exist —
+    that's the data structure that lets the 2-of-4 path see across
+    multiple frames. Without it the window stop-path can't fire.
+    """
+    src = _read_main_py()
+    assert "_stop_hit_window" in src, (
+        "DEF-103: `_stop_hit_window` state container missing. Sliding-window "
+        "path needs per-ww deque of recent hit frame indices."
+    )
+    assert "collections.deque" in src or "from collections import deque" in src, (
+        "DEF-103: collections.deque must back `_stop_hit_window` (popleft "
+        "on each frame is O(1); list would scale poorly under long recordings)."
+    )
+
+
+def test_def103_fast_stop_trigger_path_present():
+    """The fast-stop trigger condition must be wired into the trigger
+    block — not just defined as a constant. Look for the conjunction of
+    `_is_rec`, `triggered`, `> _HIGH_CONFIDENCE_FAST_STOP`, and
+    `not _vad_silent` near the trigger gate.
+    """
+    src = _read_main_py()
+    # Allow flexible whitespace / line breaks but require all four conjuncts.
+    pattern = re.compile(
+        r"_is_rec[\s\S]{0,80}triggered[\s\S]{0,80}_HIGH_CONFIDENCE_FAST_STOP"
+        r"[\s\S]{0,80}not\s+_vad_silent",
+        re.MULTILINE,
+    )
+    assert pattern.search(src), (
+        "DEF-103: fast-stop trigger condition missing or mis-wired. Must "
+        "combine: _is_rec AND triggered AND s > _HIGH_CONFIDENCE_FAST_STOP "
+        "AND not _vad_silent."
+    )
+
+
+def test_def103_window_stop_trigger_path_present():
+    """The sliding-window trigger must check the deque length against
+    `_STOP_WINDOW_HITS_REQUIRED` while recording.
+    """
+    src = _read_main_py()
+    pattern = re.compile(
+        r"len\s*\(\s*_stop_hit_window[\s\S]{0,80}_STOP_WINDOW_HITS_REQUIRED",
+        re.MULTILINE,
+    )
+    assert pattern.search(src), (
+        "DEF-103: window-stop trigger missing. Must compare "
+        "`len(_stop_hit_window[ww])` against `_STOP_WINDOW_HITS_REQUIRED`."
+    )
+
+
+def test_def103_stop_path_observability():
+    """A `[STOP_PATH]` log line must record which of the three paths fired
+    (consec / fast / window) so future regressions in stop reliability are
+    attributable from logs alone — without this, a re-emergence of the
+    DEF-103 lost-stop pattern is invisible to log-health.
+    """
+    src = _read_main_py()
+    assert "[STOP_PATH]" in src, (
+        "DEF-103: `[STOP_PATH]` observability log missing. Future stop-wake "
+        "regressions need a log tag to grep for in heyvox.log; otherwise "
+        "we'll only learn about them from user complaints (the original "
+        "DEF-103 detection mode)."
+    )
+
+
+def test_def103_three_path_disjunction_in_trigger():
+    """The trigger condition must be the disjunction of all three stop
+    paths: existing consecutive-frames + fast-path + sliding-window.
+    Regression guard against accidentally collapsing back to a single
+    path during a refactor.
+    """
+    src = _read_main_py()
+    # Find the trigger expression — should be `if X or Y or Z:` involving
+    # the three named flags.
+    pattern = re.compile(
+        r"if\s+_consec_trigger\s+or\s+_fast_stop\s+or\s+_window_stop\s*:",
+    )
+    assert pattern.search(src), (
+        "DEF-103: trigger guard missing or refactored away. The three stop "
+        "paths must be disjunctively combined: `_consec_trigger or _fast_stop "
+        "or _window_stop`. If you renamed any of these, update this test "
+        "and the DEFECT-LOG entry together."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).

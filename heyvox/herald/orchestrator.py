@@ -1,7 +1,5 @@
 """Herald Python Orchestrator — plays queued WAV files sequentially.
 
-Pure Python replacement for heyvox/herald/lib/orchestrator.sh.
-
 Features:
   - Audio ducking: lowers system volume during playback, then restores
   - Workspace auto-switch: switches app workspace if it's the frontmost app
@@ -24,7 +22,6 @@ import subprocess
 import sys
 import threading
 import time
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,7 +62,7 @@ class OrchestratorConfig:
     playing_pid_file: Path = field(default_factory=lambda: Path(HERALD_PLAYING_PID))
     original_vol_file: Path = field(default_factory=lambda: Path(HERALD_ORIGINAL_VOL_FILE))
 
-    # State files (shared with worker.sh / main process)
+    # State files (shared with worker.py / main process)
     pause_flag: Path = field(default_factory=lambda: Path(HERALD_PAUSE_FLAG))
     mute_flag: Path = field(default_factory=lambda: Path(HERALD_MUTE_FLAG))
     recording_flag: Path = field(default_factory=lambda: Path(RECORDING_FLAG))
@@ -84,7 +81,7 @@ class OrchestratorConfig:
 
     # Audio ducking
     duck_enabled: bool = True
-    duck_level: float = 0.03      # 3% — same as orchestrator.sh HERALD_DUCK_LEVEL=3/100
+    duck_level: float = 0.03      # 3% — HERALD_DUCK_LEVEL inherited from original bash orchestrator
     # DEF-053: TTS plays at the user's pre-duck media volume. When the user's
     # music is at 37 %, TTS also plays at 37 %, which sounds "rather low" even
     # though the logic is working correctly. Enforce a minimum so TTS is always
@@ -95,6 +92,11 @@ class OrchestratorConfig:
     # Queue caps
     max_queued: int = 10   # drop oldest messages when queue exceeds this
     max_held: int = 5
+
+    # Cross-workspace hold queue (DEF-100). When False (default), every TTS
+    # plays immediately regardless of which workspace it came from. When True,
+    # TTS from non-current workspace is parked in hold/ until user goes idle.
+    hold_queue_enabled: bool = False
 
     # Media pause
     media_pause: bool = True
@@ -227,33 +229,6 @@ def _parts_pending(queue_dir: Path, max_age: float = 10.0) -> bool:
     return False
 
 
-# WAV normalization (legacy fallback — primary normalization is in kokoro-daemon.py)
-
-
-def normalize_wav(path: Path, target_rms: int = 3000, scale_cap: float = 3.0,
-                  peak_limit: int = 24000) -> None:
-    """Normalize WAV loudness in-place via RMS matching.
-
-    Thin wrapper around heyvox.audio.normalize.normalize_wav_int16.
-    Legacy fallback for externally-generated WAVs. Primary normalization
-    happens in kokoro-daemon.py at generation time (HERALD-02).
-    """
-    from heyvox.audio.normalize import normalize_wav_int16
-
-    try:
-        with wave.open(str(path), "rb") as wf:
-            params = wf.getparams()
-            raw_frames = wf.readframes(params.nframes)
-
-        normalized = normalize_wav_int16(raw_frames, target_rms, scale_cap, peak_limit)
-        if normalized is not raw_frames:
-            with wave.open(str(path), "wb") as wf:
-                wf.setparams(params)
-                wf.writeframes(normalized)
-    except Exception as e:
-        log.debug("normalize_wav(%s) failed: %s", path, e)
-
-
 # ---------------------------------------------------------------------------
 # State helpers
 # ---------------------------------------------------------------------------
@@ -320,14 +295,16 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
     if not cfg.workspace_app_name:
         return False
     app_lower = cfg.workspace_app_name.lower()
+    detected = ""
     try:
         import AppKit  # type: ignore
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        if app is None:
-            return False
-        return app.localizedName().lower() == app_lower
-    except Exception:
-        pass
+        if app is not None:
+            detected = (app.localizedName() or "")
+            if detected.lower() == app_lower:
+                return True
+    except Exception as e:
+        _herald_log(f"ORCH: NSWorkspace frontmost lookup failed: {e}", cfg.debug_log)
     # Fallback: osascript (System Events returns lowercase process names)
     try:
         r = subprocess.run(
@@ -335,9 +312,16 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
              "tell application \"System Events\" to get name of first application process whose frontmost is true"],
             capture_output=True, text=True, timeout=3.0,
         )
-        return r.stdout.strip().lower() == app_lower
-    except Exception:
-        return False
+        detected_osa = r.stdout.strip()
+        if detected_osa.lower() == app_lower:
+            return True
+        _herald_log(
+            f"ORCH: frontmost check: want={app_lower!r} ns={detected!r} osa={detected_osa!r}",
+            cfg.debug_log,
+        )
+    except Exception as e:
+        _herald_log(f"ORCH: osascript frontmost lookup failed: {e}", cfg.debug_log)
+    return False
 
 
 def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
@@ -357,12 +341,39 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
         else:
             return
     try:
-        subprocess.run(
+        # No --force: bash idle gate (now lowered to 2s via
+        # /tmp/herald-switch-idle-threshold) must be honoured. If the user
+        # is actively typing/clicking, we skip the switch — same intent as
+        # the original gate, paired with the post-paste RECORDING_FLAG
+        # grace window in recording.py to cover the auto-Enter race
+        # (DEF-070-style intra-Conductor focus steal after Sent!).
+        r = subprocess.run(
             [switch_cmd, workspace],
-            capture_output=True, timeout=5.0,
+            capture_output=True, text=True, timeout=5.0,
+        )
+        _herald_log(
+            f"ORCH: switching to workspace={workspace!r} rc={r.returncode} "
+            f"stdout={(r.stdout or '').strip()[:200]!r} stderr={(r.stderr or '').strip()[:200]!r}",
+            cfg.debug_log,
         )
     except Exception as e:
         _herald_log(f"ORCH: workspace switch failed: {e}", cfg.debug_log)
+
+
+def _hammerspoon_running() -> bool:
+    """True iff the Hammerspoon.app process is running.
+
+    DEF-074: When Hammerspoon is not running, `hs -c` can trigger the macOS
+    "Hammerspoon is not running — Launch?" dialog, interrupting the user.
+    Gate every `hs` invocation with this check.
+    """
+    try:
+        return subprocess.call(
+            ["pgrep", "-q", "Hammerspoon"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ) == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
@@ -371,7 +382,7 @@ def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
     count = len(held)
     ws_escaped = workspace.replace("'", "\\'")
     hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
-    if not Path(hs).exists():
+    if not Path(hs).exists() or not _hammerspoon_running():
         return
     script = (
         f"hs.notify.new({{"
@@ -470,6 +481,17 @@ def _duck_audio(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
 
     original_vol = get_system_volume_cached(cfg.volume_cache_ttl)
     dev_id = _get_default_output_device()
+    # DEF-072: If we read a near-zero volume the device is either actually
+    # muted (in which case ducking is pointless) or lying about having software
+    # volume control (in which case saving 0.0 would zero the output on
+    # restore). Either way, skip the sidecar + skip ducking entirely.
+    if original_vol is None or original_vol < 0.05:
+        _herald_log(
+            f"ORCH: skipping duck — original_vol={original_vol} (dev={dev_id}) "
+            f"looks bogus or muted; not writing sidecar",
+            debug_log,
+        )
+        return None
     try:
         if dev_id is not None:
             cfg.original_vol_file.write_text(f"{dev_id}:{original_vol}")
@@ -655,8 +677,18 @@ def _play_wav(
     current_workspace: str,
     original_vol: float | None,
     cfg: OrchestratorConfig,
+    *,
+    skip_workspace_switch: bool = False,
 ) -> tuple[str, str, float | None, bool]:
     """Play a single WAV file, handling ducking, pausing, and workspace switching.
+
+    Args:
+        skip_workspace_switch: When True, play audio without firing
+            conductor-switch-workspace. Used by the hold-queue auto-drain
+            path so a delayed TTS does not yank the user's Conductor view
+            out of the workspace they're currently working in (DEF-094).
+            The .workspace sidecar is still consumed so the file is
+            cleaned up correctly.
 
     Returns:
         (new_last_msg_prefix, new_current_workspace, original_vol, was_interrupted)
@@ -680,7 +712,27 @@ def _play_wav(
             try:
                 ws = workspace_file.read_text().strip()
                 current_workspace = ws
-                if _workspace_app_is_frontmost(cfg):
+                # DEF-070: Skip switch while HeyVox is recording/injecting. The
+                # forced Hammerspoon sidebar click steals focus mid-paste, so
+                # `keystroke return` lands on a sidebar item instead of the chat
+                # text field and the message never submits.
+                if Path(RECORDING_FLAG).exists():
+                    _herald_log(
+                        f"ORCH: skipping workspace switch to {ws!r} "
+                        f"(HeyVox recording/injecting)",
+                        debug_log,
+                    )
+                elif skip_workspace_switch:
+                    # DEF-094: hold-queue auto-drain — user has moved on to
+                    # a different workspace; play the audio in their current
+                    # context without yanking Conductor away from where they
+                    # are now.
+                    _herald_log(
+                        f"ORCH: skipping workspace switch to {ws!r} "
+                        f"(hold-queue auto-drain, audio-only mode)",
+                        debug_log,
+                    )
+                elif _workspace_app_is_frontmost(cfg):
                     _switch_workspace(ws, cfg)
                     time.sleep(0.3)
                 else:
@@ -829,7 +881,7 @@ def _play_wav(
 
 
 class HeraldOrchestrator:
-    """Pure-Python Herald orchestrator — equivalent to orchestrator.sh.
+    """Pure-Python Herald orchestrator.
 
     Runs as a singleton daemon process. Polls the herald-queue directory,
     plays WAV files via afplay, handles audio ducking, workspace switching,
@@ -909,7 +961,16 @@ class HeraldOrchestrator:
         except OSError:
             pass
 
-        _herald_log(f"ORCH: started (pid={os.getpid()})", debug_log)
+        # DEF-072: If a previous orchestrator crashed mid-duck, the sidecar may
+        # contain a stale (possibly bogus 0.0) original volume. Clear it so we
+        # don't "restore" to a dead value on the first TTS event.
+        stale_sidecar = cfg.original_vol_file.exists()
+        cfg.original_vol_file.unlink(missing_ok=True)
+
+        _herald_log(
+            f"ORCH: started (pid={os.getpid()}) stale_sidecar={stale_sidecar}",
+            debug_log,
+        )
 
         original_vol: float | None = None
         current_workspace: str = ""
@@ -969,7 +1030,8 @@ class HeraldOrchestrator:
                             pass
 
                     if (
-                        next_workspace
+                        cfg.hold_queue_enabled
+                        and next_workspace
                         and current_workspace
                         and next_workspace != current_workspace
                         and _user_is_active(cfg)
@@ -1023,17 +1085,23 @@ class HeraldOrchestrator:
                     held_wavs = sorted(cfg.hold_dir.glob("*.wav"))
                     if held_wavs and not _user_is_active(cfg):
                         _herald_log(
-                            f"ORCH: auto-draining held queue ({len(held_wavs)} pending)",
+                            f"ORCH: auto-draining held queue ({len(held_wavs)} pending, audio-only)",
                             debug_log,
                         )
-                        # Play all consecutive parts of the same message back-to-back
+                        # DEF-094: audio-only auto-drain. The user has moved
+                        # to a different workspace since these messages were
+                        # held; play their audio in the current context
+                        # without yanking Conductor's view away from the
+                        # workspace they are working in now. The .workspace
+                        # sidecar is still consumed for cleanup.
                         while held_wavs:
                             next_held = held_wavs[0]
                             if not next_held.exists():
                                 held_wavs = held_wavs[1:]
                                 continue
                             last_msg_prefix, current_workspace, original_vol, interrupted = _play_wav(
-                                next_held, last_msg_prefix, current_workspace, original_vol, cfg
+                                next_held, last_msg_prefix, current_workspace, original_vol, cfg,
+                                skip_workspace_switch=True,
                             )
                             if interrupted and last_msg_prefix:
                                 # Purge remaining parts of this message from hold too
@@ -1065,7 +1133,7 @@ class HeraldOrchestrator:
     def _show_alert(self, message: str) -> None:
         """Show a transient Hammerspoon alert."""
         hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
-        if not Path(hs).exists():
+        if not Path(hs).exists() or not _hammerspoon_running():
             return
         try:
             subprocess.Popen(
@@ -1077,7 +1145,7 @@ class HeraldOrchestrator:
 
 
 # ---------------------------------------------------------------------------
-# Singleton enforcement (mirrors orchestrator.sh belt-and-suspenders logic)
+# Singleton enforcement (belt-and-suspenders against duplicate orchestrators)
 # ---------------------------------------------------------------------------
 
 
@@ -1137,6 +1205,14 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+
+    # Lower the bash switch script's idle threshold to 2s so brief pauses
+    # don't block legitimate TTS-time switches, while real typing/clicking
+    # still gates the switch. Pairs with --force removal in _switch_workspace.
+    try:
+        Path("/tmp/herald-switch-idle-threshold").write_text("2\n")
+    except OSError:
+        pass
 
     # Load app profile config for workspace switching
     ws_switch_cmd = ""
