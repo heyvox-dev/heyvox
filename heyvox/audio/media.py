@@ -294,7 +294,8 @@ def resume_media() -> bool:
 
     # Read which method we used to pause
     try:
-        method = open(_PAUSE_FLAG).read().strip()
+        with open(_PAUSE_FLAG) as f:
+            method = f.read().strip()
     except OSError:
         method = "mr"
 
