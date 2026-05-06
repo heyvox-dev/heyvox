@@ -930,8 +930,13 @@ class RecordingStateMachine:
                     # else fall back to type_text.
                     if profile and profile.focus_shortcut:
                         # R8: first caller of app_fast_paste (landed orphaned
-                        # in Plan 15-03).
-                        paste_ok = app_fast_paste(profile, paste_text)
+                        # in Plan 15-03). Pass combined_enter explicitly so
+                        # PTT mode (combined_enter=0) suppresses auto-Enter
+                        # instead of falling through to profile.enter_count
+                        # — fix for the PTT double-paste-then-send bug.
+                        paste_ok = app_fast_paste(
+                            profile, paste_text, enter_count=combined_enter,
+                        )
                     else:
                         injection_cfg = getattr(self.config, "injection", None)
                         if injection_cfg:

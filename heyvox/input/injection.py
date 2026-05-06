@@ -621,7 +621,7 @@ def focus_input(app_name: str, shortcuts: dict[str, str] | None = None) -> None:
         )
 
 
-def app_fast_paste(profile, text: str) -> bool:
+def app_fast_paste(profile, text: str, enter_count: int | None = None) -> bool:
     """One-shot paste using profile-driven shortcuts: focus-shortcut -> Cmd+V -> Enter*N.
 
     Combines focus + paste + Enter into a single osascript subprocess call
@@ -629,9 +629,12 @@ def app_fast_paste(profile, text: str) -> bool:
     the osascript runs.
 
     Args:
-        profile: AppProfileConfig - provides focus_shortcut, enter_count,
-            settle_delay, is_electron. NEVER hardcoded.
+        profile: AppProfileConfig - provides focus_shortcut, settle_delay,
+            is_electron, and the default enter_count. NEVER hardcoded.
         text: Text to paste.
+        enter_count: Optional override for the number of Enter presses.
+            Pass 0 to suppress auto-send (e.g. PTT mode). Pass None to use
+            profile.enter_count (the wake-word default).
 
     Returns True on success, False on failure.
 
@@ -643,9 +646,10 @@ def app_fast_paste(profile, text: str) -> bool:
     Requirement: PASTE-15-R8
     """
     _t0 = time.time()
+    effective_enter_count = profile.enter_count if enter_count is None else enter_count
     _log(
         f"app_fast_paste: profile={profile.name} focus_shortcut="
-        f"{profile.focus_shortcut!r} enter_count={profile.enter_count} "
+        f"{profile.focus_shortcut!r} enter_count={effective_enter_count} "
         f"text_len={len(text)}"
     )
 
@@ -672,12 +676,12 @@ def app_fast_paste(profile, text: str) -> bool:
         )
         keystrokes.append("delay 0.1")  # Brief settle for input focus to land
     keystrokes.append('keystroke "v" using command down')
-    if profile.enter_count > 0:
+    if effective_enter_count > 0:
         # Use profile.settle_delay for Electron/Tauri paste-IPC settle
         keystrokes.append(f"delay {profile.settle_delay}")
-        for i in range(profile.enter_count):
+        for i in range(effective_enter_count):
             keystrokes.append("keystroke return")
-            if i < profile.enter_count - 1:
+            if i < effective_enter_count - 1:
                 keystrokes.append("delay 0.05")
     keystroke_block = "\n        ".join(keystrokes)
 
