@@ -1085,7 +1085,7 @@ def _build_transcript_menu(handler):
         _output_short = friendly_output_name(_active_output.name) if _active_output else "System Default"
 
         _is_verbosity_muted_for_label = current_verbosity == "skip"
-        _output_label = f"\U0001f507 Output: Muted" if _is_verbosity_muted_for_label else f"\U0001f508 Output: {_output_short}"
+        _output_label = "\U0001f507 Output: Muted" if _is_verbosity_muted_for_label else f"\U0001f508 Output: {_output_short}"
         output_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             _output_label, None, "",
         )

@@ -7,10 +7,9 @@ Uses a FakeProfile dataclass instead of Pydantic AppProfileConfig to keep the
 unit tests fast and free of Pydantic validation noise.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 @dataclass

@@ -4,11 +4,8 @@ import math
 import struct
 
 import numpy as np
-import pytest
 
 from heyvox.audio.normalize import (
-    DEFAULT_PEAK_LIMIT,
-    DEFAULT_SCALE_CAP,
     DEFAULT_TARGET_RMS,
     normalize_samples_float32,
     normalize_wav_int16,

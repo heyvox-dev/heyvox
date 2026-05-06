@@ -10,10 +10,8 @@ so no real clipboard, app, or osascript calls are made.
 
 Requirement coverage: PASTE-01, PASTE-02, PASTE-03, PASTE-04, PASTE-05
 """
-import sys
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
-import pytest
 
 from heyvox.input.injection import (
     type_text,
@@ -231,6 +229,8 @@ class TestMultiAppInjection:
         snap = _make_snap("Xcode", element_role="AXTextField", app_bundle_id="com.apple.dt.Xcode")
         mock_appkit, mock_pb = _make_appkit("hello")
         mock_ax = MagicMock()
+        # AX fast-path now reads focused element first; provide (err, focused).
+        mock_ax.AXUIElementCopyAttributeValue = MagicMock(return_value=(0, MagicMock()))
         mock_ax.AXUIElementSetAttributeValue = MagicMock(return_value=0)
         with patch.dict("sys.modules", {"AppKit": mock_appkit, "ApplicationServices": mock_ax}):
             with patch("heyvox.input.injection._chrome_type_text", return_value=False):

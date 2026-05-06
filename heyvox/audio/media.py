@@ -65,7 +65,6 @@ _hush_missing_banner_shown = False
 # Hush (Chrome extension) integration
 # ---------------------------------------------------------------------------
 
-from heyvox.constants import HUSH_SOCK as _HUSH_SOCK
 from heyvox.constants import HUSH_SOCK_GLOB as _HUSH_SOCK_GLOB
 
 

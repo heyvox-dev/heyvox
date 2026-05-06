@@ -84,7 +84,6 @@ class TestHeraldWorkerRegistersText:
     def test_worker_registers_before_generation(self, monkeypatch, tmp_path):
         """When process_response processes a <tts> block, the text must appear
         in the echo journal even if TTS generation is stubbed out."""
-        from heyvox.audio.echo import _echo_buffer
         from heyvox.constants import TTS_ECHO_JOURNAL
         from heyvox.herald import worker as worker_mod
 

@@ -21,9 +21,7 @@ Run with: pytest tests/test_integration_audio.py -v -m integration
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
-import tempfile
 import threading
 import time
 import wave
@@ -309,8 +307,6 @@ class TestMicProfileCalibrationIntegration:
         Instead: play via afplay subprocess while pyaudio records from BlackHole input.
         """
         from heyvox.audio.profile import MicProfileManager
-        import sounddevice as sd
-        import soundfile as sf
 
         output_device_idx = _find_blackhole_device_id()
         if output_device_idx is None:

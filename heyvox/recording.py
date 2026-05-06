@@ -549,7 +549,7 @@ class RecordingStateMachine:
             type_text, save_frontmost_pid, _settle_delay_for, app_fast_paste,
             _set_clipboard,
         )
-        from heyvox.input.target import resolve_lock, PasteOutcome, FailReason
+        from heyvox.input.target import resolve_lock
         from heyvox.input.toast import show_failure_toast
         from heyvox.audio.tts import check_voice_command, execute_voice_command
 

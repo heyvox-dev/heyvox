@@ -22,7 +22,6 @@ import subprocess
 import sys
 import threading
 import time
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -301,8 +300,8 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
         import AppKit  # type: ignore
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if app is not None:
-            detected = (app.localizedName() or "").lower()
-            if detected == app_lower:
+            detected = (app.localizedName() or "")
+            if detected.lower() == app_lower:
                 return True
     except Exception as e:
         _herald_log(f"ORCH: NSWorkspace frontmost lookup failed: {e}", cfg.debug_log)
@@ -313,8 +312,8 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
              "tell application \"System Events\" to get name of first application process whose frontmost is true"],
             capture_output=True, text=True, timeout=3.0,
         )
-        detected_osa = r.stdout.strip().lower()
-        if detected_osa == app_lower:
+        detected_osa = r.stdout.strip()
+        if detected_osa.lower() == app_lower:
             return True
         _herald_log(
             f"ORCH: frontmost check: want={app_lower!r} ns={detected!r} osa={detected_osa!r}",
@@ -819,7 +818,7 @@ def _play_wav(
                 except ProcessLookupError:
                     pass
                 _violation_check(f"orchestrator:watchdog-kill:{basename}", cfg)
-                _herald_log(f"ORCH: WATCHDOG killed afplay (recording started during playback)", debug_log)
+                _herald_log("ORCH: WATCHDOG killed afplay (recording started during playback)", debug_log)
                 break
             time.sleep(0.1)
 
