@@ -468,7 +468,7 @@ def _osascript_type_text(
     return True
 
 
-def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
+def _osascript_press_enter(count: int, app_name: str | None = None, enter_delay: float = 0.2) -> None:
     """Press Enter via osascript.
 
     When app_name is provided, targets that process directly via
@@ -479,7 +479,7 @@ def _osascript_press_enter(count: int, app_name: str | None = None) -> None:
     _log(f"enter: count={count}, target={app_name or 'frontmost'}")
 
     enter_script = "\n        ".join(
-        ["keystroke return", "delay 0.2"] * count
+        ["keystroke return", f"delay {enter_delay}"] * count
     )
     # Use actual process name from System Events (case-sensitive)
     process_name = _get_frontmost_app() if app_name else None
