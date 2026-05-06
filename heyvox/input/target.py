@@ -59,7 +59,7 @@ def _switch_app_workspace(workspace: str, profile) -> None:
     """
     import subprocess
     if not profile or not profile.workspace_switch_cmd:
-        _log(f"restore: no workspace_switch_cmd in profile, skipping workspace switch")
+        _log("restore: no workspace_switch_cmd in profile, skipping workspace switch")
         return
     script = os.path.expanduser(profile.workspace_switch_cmd)
     if not os.path.exists(script):
@@ -416,8 +416,8 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
     # the current frontmost helper and land the keystrokes correctly.
     if not activate_ok:
         _log(
-            f"restore: skipping AX refocus (activate failed — stale element "
-            f"would hang); relying on paste-path focus shortcut"
+            "restore: skipping AX refocus (activate failed — stale element "
+            "would hang); relying on paste-path focus shortcut"
         )
         snap._activate_failed = True
         return True
@@ -436,9 +436,9 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
         if err != -25202:
             _log(f"restore: WARNING: AX refocus failed (err={err})")
         else:
-            _log(f"restore: AX element stale (-25202), relying on app's own focus restore")
+            _log("restore: AX element stale (-25202), relying on app's own focus restore")
     elif is_web_area:
-        _log(f"restore: skipping AXWebArea refocus (not an input field), searching for text input")
+        _log("restore: skipping AXWebArea refocus (not an input field), searching for text input")
 
     # Step 3: Fallback -- find text fields in the focused window.
     # Prefer AXTextArea/AXTextField over AXWebArea -- the latter is typically
@@ -460,7 +460,7 @@ def restore_target(snap: "TargetSnapshot", config=None) -> bool:
     # App was activated -- even if we couldn't pinpoint the text field,
     # the app likely restored its own focus state. Return True so the
     # caller proceeds with pasting into the now-frontmost app.
-    _log(f"restore: done (app activated, text field focus = best-effort)")
+    _log("restore: done (app activated, text field focus = best-effort)")
     return True
 
 

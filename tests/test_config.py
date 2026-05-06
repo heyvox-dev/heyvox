@@ -15,8 +15,8 @@ class TestHeyvoxConfigDefaults:
 
     def test_default_wake_words(self):
         cfg = HeyvoxConfig()
-        assert cfg.wake_words.start == "hey_jarvis_v0.1"
-        assert cfg.wake_words.stop == "hey_jarvis_v0.1"
+        assert cfg.wake_words.start == "hey_vox"
+        assert cfg.wake_words.stop == "hey_vox"
 
     def test_default_stt(self):
         cfg = HeyvoxConfig()
@@ -138,7 +138,7 @@ class TestLoadConfig:
         cfg = load_config(f)
         assert cfg.threshold == 0.8
         assert cfg.cooldown_secs == 3.0
-        assert cfg.wake_words.start == "hey_jarvis_v0.1"  # default preserved
+        assert cfg.wake_words.start == "hey_vox"  # default preserved
 
     def test_nested_yaml_override(self, tmp_path):
         f = tmp_path / "config.yaml"

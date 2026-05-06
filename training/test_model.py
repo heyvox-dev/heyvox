@@ -90,9 +90,9 @@ def main():
     print(f"  Threshold: {args.threshold}")
 
     if detections > 0:
-        print(f"\nModel is working! Adjust threshold if needed.")
+        print("\nModel is working! Adjust threshold if needed.")
     else:
-        print(f"\nNo detections. Try lowering the threshold or retraining with more data.")
+        print("\nNo detections. Try lowering the threshold or retraining with more data.")
 
 
 if __name__ == "__main__":

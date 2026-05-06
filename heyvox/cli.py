@@ -628,7 +628,7 @@ def _cmd_calibrate(args):
         noise_floor, silence_threshold = mgr.run_calibration(chunks)
         mgr.save_calibration(target_name, noise_floor, silence_threshold)
 
-        print(f"\nCalibration complete:")
+        print("\nCalibration complete:")
         print(f"  Device:             {target_name}")
         print(f"  Noise floor:        {noise_floor}")
         print(f"  Silence threshold:  {silence_threshold}")

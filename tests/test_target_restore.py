@@ -6,10 +6,9 @@ Covers:
 - focus_shortcut is only used after actual workspace switch
 - _detect_app_workspace returns correct workspace from AX tree
 """
-import sys
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 
 @dataclass
@@ -203,7 +202,13 @@ class TestFocusShortcutInOsascript:
             with patch("heyvox.input.injection.subprocess.run") as mock_run:
                 with patch("heyvox.input.injection.time.sleep"):
                     with patch("heyvox.input.injection._clipboard_still_ours", return_value=True):
-                        mock_run.return_value = MagicMock(returncode=0, stdout="conductor")
+                        # Two subprocess paths: frontmost-lookup uses text=True
+                        # (str stdout), main osascript uses bytes (decoded later).
+                        def _mock_run(cmd, **kwargs):
+                            if kwargs.get("text"):
+                                return MagicMock(returncode=0, stdout="conductor", stderr="")
+                            return MagicMock(returncode=0, stdout=b"conductor", stderr=b"")
+                        mock_run.side_effect = _mock_run
                         _osascript_type_text(
                             "test text",
                             app_name="conductor",
@@ -235,7 +240,13 @@ class TestFocusShortcutInOsascript:
             with patch("heyvox.input.injection.subprocess.run") as mock_run:
                 with patch("heyvox.input.injection.time.sleep"):
                     with patch("heyvox.input.injection._clipboard_still_ours", return_value=True):
-                        mock_run.return_value = MagicMock(returncode=0, stdout="conductor")
+                        # Two subprocess paths: frontmost-lookup uses text=True
+                        # (str stdout), main osascript uses bytes (decoded later).
+                        def _mock_run(cmd, **kwargs):
+                            if kwargs.get("text"):
+                                return MagicMock(returncode=0, stdout="conductor", stderr="")
+                            return MagicMock(returncode=0, stdout=b"conductor", stderr=b"")
+                        mock_run.side_effect = _mock_run
                         _osascript_type_text(
                             "test text",
                             app_name="conductor",

@@ -2,7 +2,6 @@
 import os
 import time
 
-import pytest
 
 import heyvox.herald.orchestrator as orch_module
 from heyvox.herald.orchestrator import OrchestratorConfig, _gc_queue_dirs
@@ -103,7 +102,7 @@ def test_gc_frequency_gate(tmp_path):
     wav.write_bytes(b"\x00" * 44)
     _set_old(wav, 7200)
 
-    first = _gc_queue_dirs(cfg, cfg.debug_log)
+    _gc_queue_dirs(cfg, cfg.debug_log)
     # The file is gone after first call; restore it to confirm second call is skipped
     wav.write_bytes(b"\x00" * 44)
     _set_old(wav, 7200)
