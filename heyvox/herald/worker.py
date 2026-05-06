@@ -570,42 +570,7 @@ class HeraldWorker:
 
         parts = resp.get("parts", 1)
         log.info("Qwen3 generated %d part(s) in %.2fs", parts, resp.get("duration", 0))
-
-        base = temp_wav.replace(".wav", "")
-        for part_num in range(2, parts + 1):
-            part_path = f"{base}.part{part_num}.wav"
-            if os.path.isfile(part_path):
-                wav_name = f"{timestamp}-{part_num:02d}.wav"
-                dest = os.path.join(HERALD_QUEUE_DIR, wav_name)
-                try:
-                    shutil.move(part_path, dest)
-                    self._write_workspace_sidecar(dest)
-                except OSError as exc:
-                    log.warning("Failed to enqueue part %d: %s", part_num, exc)
-
-        # DEF-073 parity: rescue part 1 if the watcher lost the race.
-        part1_name = f"{timestamp}-01.wav"
-        part1_dest = os.path.join(HERALD_QUEUE_DIR, part1_name)
-        if not os.path.isfile(part1_dest) and os.path.isfile(temp_wav):
-            try:
-                os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
-                shutil.move(temp_wav, part1_dest)
-                self._write_workspace_sidecar(part1_dest)
-                log.info("rescued part 1 via main-thread fallback -> %s", part1_name)
-            except OSError as exc:
-                log.warning("Failed to rescue part 1: %s", exc)
-
-        parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
-        try:
-            os.unlink(parts_file)
-        except FileNotFoundError:
-            pass
-
-        try:
-            os.unlink(temp_wav)
-        except FileNotFoundError:
-            pass
-
+        self._enqueue_remaining_parts(temp_wav, timestamp, parts, "Qwen3")
         return True
 
     def _generate_kokoro(
@@ -659,8 +624,23 @@ class HeraldWorker:
 
         parts = resp.get("parts", 1)
         log.info("Kokoro generated %d part(s) in %.2fs", parts, resp.get("duration", 0))
+        self._enqueue_remaining_parts(temp_wav, timestamp, parts, "Kokoro")
+        return True
 
-        # Enqueue remaining parts (part 2+)
+    def _enqueue_remaining_parts(
+        self,
+        temp_wav: str,
+        timestamp: str,
+        parts: int,
+        engine_name: str,
+    ) -> None:
+        """Move parts 2+ from temp dir into the Herald queue and clean up.
+
+        Part 1 is normally enqueued by _early_enqueue_watcher while
+        generation runs. DEF-073: if the watcher lost the race (very
+        short generations finish before its first 100ms poll), rescue
+        part 1 here from temp_wav before the unlink below deletes it.
+        """
         base = temp_wav.replace(".wav", "")
         for part_num in range(2, parts + 1):
             part_path = f"{base}.part{part_num}.wav"
@@ -674,13 +654,6 @@ class HeraldWorker:
                 except OSError as exc:
                     log.warning("Failed to enqueue part %d: %s", part_num, exc)
 
-        # DEF-073: Safety net for part 1.
-        # The _early_enqueue_watcher polls at 100ms intervals to copy part 1
-        # from temp_wav -> queue. For short generations (~0.26s, one part),
-        # the watcher's stop signal can fire before a single poll has seen
-        # temp_wav, and its final-sweep path handles parts 2+ only. Result:
-        # part 1 is left at temp_wav, the unlink below deletes it, and the
-        # message is silently dropped with no "ORCH: playing" ever logged.
         part1_name = f"{timestamp}-01.wav"
         part1_dest = os.path.join(HERALD_QUEUE_DIR, part1_name)
         if not os.path.isfile(part1_dest) and os.path.isfile(temp_wav):
@@ -688,24 +661,20 @@ class HeraldWorker:
                 os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
                 shutil.move(temp_wav, part1_dest)
                 self._write_workspace_sidecar(part1_dest)
-                log.info("DEF-073: rescued part 1 via main-thread fallback -> %s", part1_name)
+                log.info("DEF-073: %s rescued part 1 via main-thread fallback -> %s", engine_name, part1_name)
             except OSError as exc:
                 log.warning("Failed to rescue part 1: %s", exc)
 
-        # Remove parts manifest now that all parts are enqueued
         parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
         try:
             os.unlink(parts_file)
         except FileNotFoundError:
             pass
 
-        # Clean up temp file if not moved by watcher or rescue above
         try:
             os.unlink(temp_wav)
         except FileNotFoundError:
             pass
-
-        return True
 
     def _early_enqueue_watcher(
         self,
