@@ -61,14 +61,11 @@ async function restorePausedTabs() {
   }
 }
 
-// Kick off restoration immediately. If the SW just woke up after a
-// suspension, the Map will be repopulated before any incoming pause/
-// resume command arrives — message handlers `await` no specific
-// signal but they read pausedTabs synchronously, so the very first
-// command after wake-up may still see an empty Map. The native host's
-// command pipeline is sequential and the first command after wake-up
-// is typically a `status` query, which is safe to answer "empty".
-restorePausedTabs();
+// Kick off restoration immediately and capture the promise so message
+// handlers can await it before reading pausedTabs. Without the await,
+// a `resume` arriving right after SW wake-up sees an empty Map and
+// returns pausedCount=0 even though the YouTube tab really is paused.
+const restoreReady = restorePausedTabs();
 
 /** @type {chrome.runtime.Port | null} */
 let nativePort = null;
@@ -177,6 +174,9 @@ async function handleNativeMessage(message) {
     console.warn('[Hush] Received malformed native message:', message);
     return;
   }
+
+  // Wait for session-storage restore before reading pausedTabs synchronously.
+  await restoreReady;
 
   // Preserve the request ID added by the native host for response routing
   const requestId = message.id;
