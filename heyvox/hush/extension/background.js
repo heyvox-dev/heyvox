@@ -590,5 +590,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.runtime.onStartup.addListener(() => forceReconnect('onStartup'));
 chrome.runtime.onInstalled.addListener(() => forceReconnect('onInstalled'));
 
+// Chrome MV3 caps service-worker lifetime at ~5 min even with active ports.
+// A 30s alarm reliably wakes us before then so the native host stays connected.
+chrome.alarms.create('hush-keepalive', { periodInMinutes: 0.5 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'hush-keepalive' && nativePort === null) {
+    connectNativeHost();
+  }
+});
+
 connectNativeHost();
 console.log('[Hush] Service worker started');
