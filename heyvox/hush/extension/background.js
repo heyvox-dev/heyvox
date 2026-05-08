@@ -23,38 +23,57 @@ const RECONNECT_MAX_DELAY_MS = 60000;
 const pausedTabs = new Map();
 
 /**
- * DEF-098: persist pausedTabs to chrome.storage.session so the in-memory
- * Map survives MV3 service-worker suspension. Without this, Chrome's
- * ~30 s SW idle timer wipes the Map and any resume call after the
- * timeout returns pausedCount=0 — the muted YouTube tab never gets
- * unmuted because the extension forgot it had paused anything.
+ * DEF-098 / DEF-110: persist pausedTabs to chrome.storage.local so the
+ * in-memory Map survives MV3 service-worker death. We use storage.local
+ * (not session) because session storage was observed to return empty
+ * even within a single SW lifetime — local is rock-solid across
+ * SW respawns, browser restarts, and extension crashes.
+ *
+ * Stale entries (older than STALE_AFTER_MS) are dropped on restore so
+ * a paused-tab record from a previous browser session never leaks into
+ * the current one.
  */
 const STORAGE_KEY = 'hush:pausedTabs';
+const STALE_AFTER_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
- * Write the current pausedTabs Map to chrome.storage.session.
- * Fire-and-forget; failures are logged but never block the caller.
+ * Write the current pausedTabs Map to chrome.storage.local.
+ * Returns a promise so callers can await commit before responding.
  */
-function persistPausedTabs() {
+async function persistPausedTabs() {
   const entries = [...pausedTabs.entries()];
-  chrome.storage.session
-    .set({ [STORAGE_KEY]: entries })
-    .catch((err) => console.warn('[Hush] persistPausedTabs failed:', err));
+  try {
+    await chrome.storage.local.set({ [STORAGE_KEY]: entries });
+    console.log(`[Hush] persisted ${entries.length} paused tabs`);
+  } catch (err) {
+    console.warn('[Hush] persistPausedTabs failed:', err);
+  }
 }
 
 /**
- * Restore pausedTabs from chrome.storage.session at SW startup.
- * Called once at module load; idempotent (won't double-add entries).
+ * Restore pausedTabs from chrome.storage.local at SW startup.
+ * Drops stale entries so the Map only contains tabs paused recently.
  */
 async function restorePausedTabs() {
   try {
-    const result = await chrome.storage.session.get(STORAGE_KEY);
+    const result = await chrome.storage.local.get(STORAGE_KEY);
     const entries = result[STORAGE_KEY];
-    if (!Array.isArray(entries) || entries.length === 0) return;
-    for (const [id, info] of entries) {
-      pausedTabs.set(id, info);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      console.log('[Hush] restore: storage was empty');
+      return;
     }
-    console.log(`[Hush] Restored ${pausedTabs.size} paused tabs from session storage`);
+    const now = Date.now();
+    let restored = 0;
+    let dropped = 0;
+    for (const [id, info] of entries) {
+      if (info?.timestamp && now - info.timestamp > STALE_AFTER_MS) {
+        dropped += 1;
+        continue;
+      }
+      pausedTabs.set(id, info);
+      restored += 1;
+    }
+    console.log(`[Hush] restore: ${restored} active, ${dropped} stale dropped`);
     updateBadge();
   } catch (err) {
     console.warn('[Hush] restorePausedTabs failed:', err);
@@ -258,6 +277,7 @@ async function handleNativeMessage(message) {
  * @returns {Promise<object>} Status response
  */
 async function pauseAllTabs() {
+  console.log(`[Hush] pauseAllTabs start, Map size before: ${pausedTabs.size}`);
   const tabs = await chrome.tabs.query({});
   const nowPlaying = await findPlayingTabs(tabs);
 
@@ -289,7 +309,7 @@ async function pauseAllTabs() {
     })
   );
 
-  persistPausedTabs(); // DEF-098
+  await persistPausedTabs(); // DEF-098 / DEF-110
   return buildStatusResponse('paused');
 }
 
@@ -301,6 +321,7 @@ async function pauseAllTabs() {
  */
 async function resumeAllPausedTabs(rewindSecs = 0, fadeInMs = 0) {
   const entries = [...pausedTabs.entries()];
+  console.log(`[Hush] resumeAllPausedTabs start, Map size: ${pausedTabs.size}, entries to resume: ${entries.length}`);
 
   await Promise.allSettled(
     entries.map(async ([tabId, info]) => {
@@ -318,7 +339,7 @@ async function resumeAllPausedTabs(rewindSecs = 0, fadeInMs = 0) {
   );
 
   pausedTabs.clear();
-  persistPausedTabs(); // DEF-098
+  await persistPausedTabs(); // DEF-098 / DEF-110
   return buildStatusResponse('playing');
 }
 
@@ -342,7 +363,7 @@ async function pauseSingleTab(tabId) {
     url: tab.url ?? '',
     timestamp: Date.now(),
   });
-  persistPausedTabs(); // DEF-098
+  await persistPausedTabs(); // DEF-098 / DEF-110
 
   return buildStatusResponse();
 }
@@ -370,7 +391,7 @@ async function resumeSingleTab(tabId, rewindSecs = 0, fadeInMs = 0) {
     });
   }
   pausedTabs.delete(tabId);
-  persistPausedTabs(); // DEF-098
+  await persistPausedTabs(); // DEF-098 / DEF-110
 
   return buildStatusResponse();
 }
@@ -566,17 +587,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (pausedTabs.has(tabId)) {
+    console.log(`[Hush] onRemoved: dropping paused tab ${tabId}`);
     pausedTabs.delete(tabId);
-    persistPausedTabs(); // DEF-098
+    persistPausedTabs(); // fire-and-forget cleanup
     updateBadge();
   }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  // If a tab navigated away, the media is gone — remove from tracking
   if (changeInfo.status === 'loading' && pausedTabs.has(tabId)) {
+    console.log(`[Hush] onUpdated(loading): dropping paused tab ${tabId}`, changeInfo);
     pausedTabs.delete(tabId);
-    persistPausedTabs(); // DEF-098
+    persistPausedTabs(); // fire-and-forget cleanup
     updateBadge();
   }
 });
