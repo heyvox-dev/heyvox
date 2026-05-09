@@ -130,6 +130,13 @@ class TTSConfig(BaseModel):
     # Requirement: TTS-04
     ducking_percent: int = 60
 
+    # Minimum TTS playback volume floor [0.0, 1.0]. After ducking, Herald sets
+    # output volume to max(your_pre_duck_volume, min_volume) so TTS stays
+    # audible even when background media was very quiet. Set to 0.0 to fully
+    # respect the user's slider; default 0.10 keeps speech audible without
+    # overriding the user's level in normal use.
+    min_volume: float = 0.10
+
     # Pause system media (YouTube, Spotify, etc.) during TTS playback.
     # Uses macOS MediaRemote to send explicit pause/play commands.
     pause_media: bool = False
@@ -180,6 +187,11 @@ class TTSConfig(BaseModel):
     @classmethod
     def validate_ducking_percent(cls, v: int) -> int:
         return max(0, min(100, v))
+
+    @field_validator("min_volume")
+    @classmethod
+    def validate_min_volume(cls, v: float) -> float:
+        return max(0.0, min(1.0, v))
 
     @field_validator("script_path")
     @classmethod
@@ -804,6 +816,8 @@ tts:
   verbosity: full          # full | summary | short | skip
   volume_boost: 10         # Added to system volume during TTS (capped at 100)
   ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
+  min_volume: 0.10         # Minimum TTS playback volume [0.0–1.0]. After ducking, Herald sets
+                           # max(your_pre_duck_volume, min_volume). 0.0 = fully respect your slider.
   pause_media: false       # Pause YouTube/Spotify/etc. during TTS, resume after
 
   # Allowed output languages. "auto" = detect + route freely.
