@@ -82,12 +82,12 @@ class OrchestratorConfig:
     # Audio ducking
     duck_enabled: bool = True
     duck_level: float = 0.03      # 3% — HERALD_DUCK_LEVEL inherited from original bash orchestrator
-    # DEF-053: TTS plays at the user's pre-duck media volume. When the user's
-    # music is at 37 %, TTS also plays at 37 %, which sounds "rather low" even
-    # though the logic is working correctly. Enforce a minimum so TTS is always
-    # audible regardless of the background media level. 0.55 ≈ normal speaking
-    # level on the G435 / MacBook speakers without being jarring.
-    tts_min_volume: float = 0.55
+    # Floor for the post-duck TTS volume. _set_tts_volume uses
+    # max(original_vol, tts_min_volume) so TTS stays audible if the pre-duck
+    # media volume was very low, but otherwise respects the user's slider.
+    # Wired from config: tts.min_volume (heyvox/config.py). Default 0.10 ≈
+    # respect the slider with a tiny safety floor.
+    tts_min_volume: float = 0.10
 
     # Queue caps
     max_queued: int = 10   # drop oldest messages when queue exceeds this
@@ -1217,6 +1217,7 @@ def main() -> None:
     # Load app profile config for workspace switching
     ws_switch_cmd = ""
     ws_app_name = ""
+    tts_min_volume: float | None = None
     try:
         from heyvox.config import load_config
         heyvox_cfg = load_config()
@@ -1225,16 +1226,20 @@ def main() -> None:
                 ws_switch_cmd = profile.workspace_switch_cmd
                 ws_app_name = profile.name
                 break
+        tts_min_volume = float(heyvox_cfg.tts.min_volume)
     except Exception:
         pass
 
-    cfg = OrchestratorConfig(
+    cfg_kwargs = dict(
         queue_dir=Path(args.queue_dir),
         duck_enabled=not args.no_duck,
         media_pause=not args.no_media_pause,
         workspace_switch_cmd=ws_switch_cmd,
         workspace_app_name=ws_app_name,
     )
+    if tts_min_volume is not None:
+        cfg_kwargs["tts_min_volume"] = tts_min_volume
+    cfg = OrchestratorConfig(**cfg_kwargs)
 
     orch = HeraldOrchestrator(config=cfg)
     if not _enforce_singleton(cfg):

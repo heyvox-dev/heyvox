@@ -47,6 +47,7 @@ def start_orchestrator() -> None:
     ws_switch_cmd = ""
     ws_app_name = ""
     hold_queue_enabled = False
+    tts_min_volume: float | None = None
     try:
         from heyvox.config import load_config
         cfg = load_config()
@@ -56,13 +57,17 @@ def start_orchestrator() -> None:
                 ws_app_name = profile.name
                 break
         hold_queue_enabled = bool(cfg.hold_queue.enabled)
+        tts_min_volume = float(cfg.tts.min_volume)
     except Exception:
         pass
-    orch_cfg = OrchestratorConfig(
+    orch_kwargs = dict(
         workspace_switch_cmd=ws_switch_cmd,
         workspace_app_name=ws_app_name,
         hold_queue_enabled=hold_queue_enabled,
     )
+    if tts_min_volume is not None:
+        orch_kwargs["tts_min_volume"] = tts_min_volume
+    orch_cfg = OrchestratorConfig(**orch_kwargs)
     orch = HeraldOrchestrator(config=orch_cfg)
     orch.run()
 

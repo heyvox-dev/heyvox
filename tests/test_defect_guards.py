@@ -462,21 +462,22 @@ def test_def053_vad_silent_grace_during_recording():
 
 
 def test_def053_tts_min_volume_floor():
-    """Herald must clamp TTS volume to a minimum floor so the user doesn't hear
-    quiet TTS when their pre-duck media volume happens to be low.
+    """Herald must expose a configurable TTS volume floor and apply it when
+    restoring volume after the duck.
 
-    DEF-053: user's media volume had drifted to 37 %, Herald faithfully played
-    TTS at 37 %, user reported "rather low volume." Fix: `tts_min_volume` in
-    OrchestratorConfig and a `max(original_vol, cfg.tts_min_volume)` clamp in
-    `_set_tts_volume`.
+    DEF-053 originally hard-coded the floor at 0.55 to keep TTS audible over
+    quiet background media. That clamp is now user-tunable via `tts.min_volume`
+    in config.yaml — users who want their slider fully respected can set it
+    near 0.0. This test only guards the wiring (knob exists, source clamps),
+    not the specific default.
     """
     from heyvox.herald.orchestrator import OrchestratorConfig
     cfg = OrchestratorConfig()
     assert hasattr(cfg, "tts_min_volume"), (
         "DEF-053: OrchestratorConfig must expose `tts_min_volume`"
     )
-    assert 0.3 <= cfg.tts_min_volume <= 1.0, (
-        f"DEF-053: tts_min_volume={cfg.tts_min_volume} outside sane range [0.3, 1.0]"
+    assert 0.0 <= cfg.tts_min_volume <= 1.0, (
+        f"DEF-053: tts_min_volume={cfg.tts_min_volume} outside [0.0, 1.0]"
     )
     import inspect
     from heyvox.herald import orchestrator as orch
