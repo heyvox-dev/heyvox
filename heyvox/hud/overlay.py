@@ -40,20 +40,21 @@ _MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.
 
 
 def _brand_menubar_image():
-    """Load the HeyVox brand icon (bubble + caret + sparkles) for the
-    macOS 22pt status bar. Coloured (NOT a template image) so the gradient
-    survives. NSImage scales the source PNG down to fit the menu bar.
+    """Load the HeyVox brand glyph (bubble + caret + sparkle) as a macOS
+    template image — black silhouette tinted by the system to match the
+    menu bar appearance (white on dark, black on light). Source SVG is
+    rendered to PNG at build/install time via rsvg-convert.
     """
     from AppKit import NSImage
     from Foundation import NSSize
 
     img = NSImage.alloc().initWithContentsOfFile_(_MENUBAR_ICON_PATH)
     if img is None:
-        # Fallback: SF Symbol mic if asset missing
         return NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "mic", "Microphone",
         )
-    img.setSize_(NSSize(21.6, 21.6))
+    img.setSize_(NSSize(26, 26))
+    img.setTemplate_(True)
     return img
 
 

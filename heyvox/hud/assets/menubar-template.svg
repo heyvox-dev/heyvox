@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="HeyVox menu bar template">
+  <!-- Speech bubble outline, thickened for menu bar legibility -->
+  <path d="M 64 56
+           h 128
+           a 28 28 0 0 1 28 28
+           v 80
+           a 28 28 0 0 1 -28 28
+           h -76
+           l -24 24
+           l 6  -24
+           h -34
+           a 28 28 0 0 1 -28 -28
+           v -80
+           a 28 28 0 0 1  28 -28
+           z"
+        fill="none" stroke="#000" stroke-width="16" stroke-linejoin="round"/>
+
+  <!-- '>' caret -->
+  <path d="M 92 100 L 134 124 L 92 148"
+        fill="none" stroke="#000"
+        stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Single sparkle, simplified -->
+  <path d="M 178 70
+           L 184 92
+           L 206 98
+           L 184 104
+           L 178 126
+           L 172 104
+           L 150 98
+           L 172 92 Z"
+        fill="#000"/>
+</svg>
