@@ -36,6 +36,27 @@ ANIM_DURATION = 0.2
 from heyvox.constants import HUD_POSITION_FILE as POSITION_FILE  # Persists user-dragged position
 _MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
 
+_MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.png")
+
+
+def _brand_menubar_image():
+    """Load the HeyVox brand icon (bubble + caret + sparkles) for the
+    macOS 22pt status bar. Coloured (NOT a template image) so the gradient
+    survives. NSImage scales the source PNG down to fit the menu bar.
+    """
+    from AppKit import NSImage
+    from Foundation import NSSize
+
+    img = NSImage.alloc().initWithContentsOfFile_(_MENUBAR_ICON_PATH)
+    if img is None:
+        # Fallback: SF Symbol mic if asset missing
+        return NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "mic", "Microphone",
+        )
+    img.setSize_(NSSize(21.6, 21.6))
+    return img
+
+
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
 STATE_COLORS = {
     "idle":       (0.35, 0.35, 0.40, 0.65),  # Subtle gray
@@ -378,19 +399,21 @@ def _apply_state(
                 _spk_muted = get_verbosity() == "skip"
             except Exception:
                 pass
-            # Use NSImage SF Symbols for clean native look
             from AppKit import NSImage, NSImageSymbolConfiguration
             btn = status_item.button()
-            _mic_symbol = "mic.slash" if _mic_muted else "mic"
-            _mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                _mic_symbol, "Microphone muted" if _mic_muted else "Microphone",
-            )
             if _mic_muted:
+                # Muted: keep SF Symbol mic.slash with red palette — clearer
+                # affordance than tinting the brand glyph.
+                _mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    "mic.slash", "Microphone muted",
+                )
                 _cfg = NSImageSymbolConfiguration.configurationWithPaletteColors_([
                     NSColor.systemRedColor(),
                     NSColor.secondaryLabelColor(),
                 ])
                 _mic_img = _mic_img.imageWithSymbolConfiguration_(_cfg)
+            else:
+                _mic_img = _brand_menubar_image()
             btn.setImage_(_mic_img)
             _idle_suffix = ""
             if _held_count > 0:
@@ -1728,12 +1751,8 @@ def main(menu_bar_only: bool = False):
         "processing": "\U0001f7e1",     # 🟡 yellow circle
         "speaking":   "\U0001f7e2",     # 🟢 green circle
     }
-    # Initial state: use SF Symbol mic image
-    from AppKit import NSImage as _NSImage
-    _init_mic_img = _NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-        "mic", "Microphone",
-    )
-    status_button.setImage_(_init_mic_img)
+    # Initial state: HeyVox brand glyph (template, auto-tinted by macOS)
+    status_button.setImage_(_brand_menubar_image())
     status_button.setTitle_("")
 
     MenuActionHandler = _make_menu_action_class()

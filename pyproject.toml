@@ -84,6 +84,8 @@ heyvox = [
     # Herald — TTS orchestration (Python daemon + hook shims)
     "herald/daemon/*.py",
     "herald/hooks/*.sh",
+    # HUD — menu bar brand icons
+    "hud/assets/*.png",
     # Hush — browser media control (Chrome extension + native host)
     "hush/extension/*.js",
     "hush/extension/*.html",
