@@ -332,12 +332,18 @@ class HeraldWorker:
         )
         if env_ws:
             self._workspace: str = env_ws
+            log.info("workspace resolved via env: %r (cwd=%r)", env_ws, os.getcwd())
         else:
             try:
                 from heyvox.herald.workspace_label import detect_workspace_from_cwd
                 self._workspace = detect_workspace_from_cwd()
+                log.info(
+                    "workspace cwd-detect: cwd=%r → %r",
+                    os.getcwd(),
+                    self._workspace,
+                )
             except Exception as e:
-                log.debug("workspace cwd-detect failed (%s) — sidecar disabled", e)
+                log.warning("workspace cwd-detect raised (%s) — sidecar disabled (cwd=%r)", e, os.getcwd())
                 self._workspace = ""
 
     # ------------------------------------------------------------------
@@ -532,24 +538,28 @@ class HeraldWorker:
         ``tts.announce_min_chars``.
         """
         if not self._workspace:
+            log.info("workspace_label: skipped (no _workspace)")
             return speech
         try:
             from heyvox.config import load_config
             cfg = load_config()
         except Exception as e:
-            log.debug("workspace_label: config load failed (%s)", e)
+            log.warning("workspace_label: config load failed (%s)", e)
             return speech
         min_chars = getattr(cfg.tts, "announce_min_chars", 0) or 0
         if min_chars and len(speech) < min_chars:
+            log.info("workspace_label: skipped (len=%d < %d)", len(speech), min_chars)
             return speech
         try:
             from heyvox.herald.workspace_label import get_workspace_label
             label = get_workspace_label(self._workspace, cfg=cfg)
         except Exception as e:
-            log.debug("workspace_label: lookup failed (%s)", e)
+            log.warning("workspace_label: lookup failed (%s)", e)
             return speech
         if not label:
+            log.info("workspace_label: empty for ws=%r (announce disabled?)", self._workspace)
             return speech
+        log.info("workspace_label: prepending %r to ws=%r", label, self._workspace)
         return f"{label}: {speech}"
 
     # ------------------------------------------------------------------
