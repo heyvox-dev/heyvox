@@ -33,11 +33,17 @@ from heyvox.herald.worker import (
 
 @pytest.fixture
 def worker(tmp_path):
-    """Create a HeraldWorker with workspace environment cleared."""
+    """Create a HeraldWorker with workspace environment cleared.
+
+    Also stubs the cwd-based workspace detection (DEF-111) so test
+    workers don't accidentally pick up the developer's real workspace
+    when the harness runs inside a Conductor checkout.
+    """
     env = {"CONDUCTOR_WORKSPACE_NAME": "", "KOKORO_VOICE": ""}
     claim_dir = str(tmp_path / "claims")
     with patch.dict(os.environ, env, clear=False), \
-         patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir):
+         patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir), \
+         patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
         yield HeraldWorker()
 
 
@@ -420,7 +426,10 @@ class TestWorkspaceLabelPrepend:
 
     def _worker_with_ws(self, ws: str):
         from heyvox.herald.worker import HeraldWorker
-        with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws}, clear=False):
+        # Force the cwd-detect fallback to "" so the test only exercises
+        # the env-var path (and an empty ws actually stays empty).
+        with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws}, clear=False), \
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
             return HeraldWorker()
 
     def test_no_workspace_returns_speech_unchanged(self):

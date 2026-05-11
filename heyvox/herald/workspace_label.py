@@ -92,6 +92,70 @@ def _pr_title_from_db(workspace_name: str, db_path: str) -> str:
     return (r.stdout or "").strip()
 
 
+def detect_workspace_from_cwd(
+    cwd: str | None = None,
+    cfg: "HeyvoxConfig | None" = None,
+) -> str:
+    """Resolve the ``directory_name`` for the workspace containing ``cwd``.
+
+    Conductor doesn't export ``HEYVOX_WORKSPACE`` or
+    ``CONDUCTOR_WORKSPACE_NAME`` into the Claude Code hook environment,
+    so the hook-spawned worker has no env signal to identify the
+    workspace. The current working directory is the only reliable hint.
+
+    Strategy:
+      1. Look up the workspace DB for the row whose ``workspace_path`` is
+         either an exact match for ``cwd`` or a parent of ``cwd`` (so a
+         shell that has cd'd into a subdir still resolves correctly).
+         Return that row's ``directory_name``.
+      2. Fall back to ``basename(cwd)`` if the DB is unavailable or has
+         no matching row. For the canonical Conductor layout
+         (``.../workspaces/<repo>/<workspace>``) this still produces the
+         right ``directory_name`` for most cases.
+      3. Return "" only if cwd is empty.
+
+    Returns the directory_name string — caller is expected to feed it
+    into ``get_workspace_label()`` for the full label resolution.
+    """
+    # Treat explicit "" as "no signal, don't guess" (distinct from None,
+    # which means "use os.getcwd()"). Lets tests pin a known absence.
+    if cwd is None:
+        cwd = os.getcwd()
+    if not cwd:
+        return ""
+
+    db_path = _get_workspace_db_path(cfg)
+    if db_path:
+        # Escape single quotes in cwd (paths can technically contain them).
+        safe_cwd = cwd.replace("'", "''")
+        try:
+            r = subprocess.run(
+                [
+                    "sqlite3",
+                    db_path,
+                    # Exact match OR cwd is a subdirectory of workspace_path.
+                    # The ``/`` separator on the LIKE pattern prevents matching
+                    # ``/workspaces/abc`` against ``/workspaces/abcd``.
+                    f"SELECT directory_name FROM workspaces "
+                    f"WHERE workspace_path = '{safe_cwd}' "
+                    f"OR '{safe_cwd}' LIKE workspace_path || '/%' "
+                    f"LIMIT 1",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+            name = (r.stdout or "").strip()
+            if name:
+                return name
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            log.debug("workspace_label: cwd lookup failed: %s", e)
+
+    # Fallback: basename of cwd. Works for the standard Conductor layout
+    # and for non-Conductor users who don't have a workspace DB at all.
+    return os.path.basename(cwd.rstrip("/")) or ""
+
+
 def _normalize_for_speech(label: str) -> str:
     """Make a DB label sound natural when spoken.
 

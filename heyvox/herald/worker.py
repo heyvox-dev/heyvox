@@ -317,15 +317,28 @@ class HeraldWorker:
     """
 
     def __init__(self) -> None:
-        # Workspace name from environment (D-04: only env var, no DB query).
-        # HEYVOX_WORKSPACE is the generic env var. CONDUCTOR_WORKSPACE_NAME
-        # is a deprecated fallback kept while Conductor hook environments
-        # migrate; remove once heyvox setup ships HEYVOX_WORKSPACE in all
-        # generated launchd/hook configs.
-        self._workspace: str = (
+        # Workspace name resolution order:
+        #   1. HEYVOX_WORKSPACE env (generic, what heyvox setup will ship)
+        #   2. CONDUCTOR_WORKSPACE_NAME (deprecated legacy fallback)
+        #   3. DEF-111: cwd-based detection via the workspace DB —
+        #      Conductor does NOT export workspace env vars into the
+        #      Claude Code hook environment, so the hook-spawned worker
+        #      has to derive the workspace from the current directory.
+        #      Without this fallback, the workspace announcement and the
+        #      .workspace sidecar both silently no-op for hook-driven TTS.
+        env_ws = (
             os.environ.get("HEYVOX_WORKSPACE", "")
             or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
         )
+        if env_ws:
+            self._workspace: str = env_ws
+        else:
+            try:
+                from heyvox.herald.workspace_label import detect_workspace_from_cwd
+                self._workspace = detect_workspace_from_cwd()
+            except Exception as e:
+                log.debug("workspace cwd-detect failed (%s) — sidecar disabled", e)
+                self._workspace = ""
 
     # ------------------------------------------------------------------
     # Public API
