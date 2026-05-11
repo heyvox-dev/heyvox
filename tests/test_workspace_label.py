@@ -160,3 +160,90 @@ class TestDBResolution:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert workspace_label._pr_title_from_db("ws", "/db") == ""
+
+
+class TestDetectWorkspaceFromCwd:
+    """DEF-111: Conductor doesn't export workspace env vars to the hook,
+    so the worker must derive the workspace from cwd."""
+
+    def test_exact_match_returns_directory_name(self, monkeypatch):
+        monkeypatch.setattr(
+            workspace_label, "_get_workspace_db_path", lambda c: "/fake/db"
+        )
+
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="seattle\n", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert (
+            workspace_label.detect_workspace_from_cwd(
+                "/Users/work/conductor/workspaces/vox-v2/seattle"
+            )
+            == "seattle"
+        )
+
+    def test_subdirectory_match(self, monkeypatch):
+        """A shell that cd'd into a subdir still resolves correctly."""
+        captured = {}
+        monkeypatch.setattr(
+            workspace_label, "_get_workspace_db_path", lambda c: "/fake/db"
+        )
+
+        def fake_run(cmd, **kw):
+            captured["sql"] = cmd[-1]
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="seattle\n", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        out = workspace_label.detect_workspace_from_cwd(
+            "/Users/work/conductor/workspaces/vox-v2/seattle/heyvox/herald"
+        )
+        assert out == "seattle"
+        # Query must use LIKE so a cd-into-subdir still hits the workspace row.
+        assert "LIKE workspace_path" in captured["sql"]
+
+    def test_fallback_to_basename_when_db_missing(self, monkeypatch):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "")
+        assert (
+            workspace_label.detect_workspace_from_cwd(
+                "/Users/me/conductor/workspaces/foo/seattle"
+            )
+            == "seattle"
+        )
+
+    def test_fallback_to_basename_when_no_row_matches(self, monkeypatch):
+        monkeypatch.setattr(
+            workspace_label, "_get_workspace_db_path", lambda c: "/fake/db"
+        )
+
+        def fake_run(*a, **kw):
+            return subprocess.CompletedProcess(args=a, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert (
+            workspace_label.detect_workspace_from_cwd("/Users/me/projects/heyvox")
+            == "heyvox"
+        )
+
+    def test_empty_cwd_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "")
+        assert workspace_label.detect_workspace_from_cwd("") == ""
+
+    def test_db_quote_escape_for_path(self, monkeypatch):
+        """Paths with single quotes shouldn't break the SQL literal."""
+        captured = {}
+        monkeypatch.setattr(
+            workspace_label, "_get_workspace_db_path", lambda c: "/fake/db"
+        )
+
+        def fake_run(cmd, **kw):
+            captured["sql"] = cmd[-1]
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        workspace_label.detect_workspace_from_cwd("/path/with'quote/dir")
+        # Single quote in the path must be doubled in the SQL literal.
+        assert "/path/with''quote/dir" in captured["sql"]
