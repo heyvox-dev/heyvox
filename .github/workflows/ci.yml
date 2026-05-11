@@ -14,6 +14,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Lint GitHub Actions workflows
+        uses: rhysd/actionlint-action@v1
+        with:
+          fail_on_error: true
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
