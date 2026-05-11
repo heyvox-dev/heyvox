@@ -73,7 +73,7 @@ Downstream agents MUST read `14-SPEC.md` before planning or implementing. Requir
 - **D-20:** Training pipeline documentation lives in **`docs/wakeword-training.md`** — references the Colab notebook, explains data flow (synthetic + real samples), shows how to validate before swapping models. Linked from README's "Customize wake word" section.
 
 ### Default Config Migration
-- **D-21:** No migration logic needed — no existing PyPI/Brew users exist yet (Phase 14 is the launch). The `config.yaml.example` ships with the new default; setup wizard writes a fresh config on first install. Existing source-install users (the maintainer only) update their config manually.
+- **D-21** [informational]: No migration logic needed — no existing PyPI/Brew users exist yet (Phase 14 is the launch). The `config.yaml.example` ships with the new default; setup wizard writes a fresh config on first install. Existing source-install users (the maintainer only) update their config manually. *No plan task required — the decision is to do nothing.*
 
 ### Claude's Discretion
 - Exact wheel/sdist build flags in `publish.yml` (cibuildwheel? plain build? — keep it simple, default to `python -m build`)
