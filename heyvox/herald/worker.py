@@ -396,11 +396,22 @@ class HeraldWorker:
 
         voice = self._select_voice(mood, lang, lang_voice)
 
+        # DEF-111: prepend the workspace label so the user hears
+        # "Seattle: done." instead of just "done." — the watcher fallback
+        # path always did this; the hook path (which usually wins the
+        # race) silently dropped it. Done AFTER mood/lang detection so a
+        # workspace called "fix-crash" doesn't push every message into
+        # alert mood, and AFTER the dedup claim so worker+watcher agree
+        # on the hash.
+        speech = self._maybe_prepend_workspace_label(speech)
+
         # DEF-078: Register the finalized speech text with the cross-process
         # echo buffer BEFORE generation. The heyvox daemon's STT filter reads
         # the shared journal to strip speaker-to-mic bleed from transcriptions.
         # This worker runs in its own short-lived process spawned by a Claude
         # Code hook, so the in-process buffer wouldn't reach the STT filter.
+        # Register the LABEL-INCLUDED text so the prepended label doesn't leak
+        # back into STT as a phantom transcription.
         try:
             from heyvox.audio.echo import register_tts_text
             register_tts_text(speech)
@@ -494,6 +505,39 @@ class HeraldWorker:
             log.debug("Could not read voice_override from config: %s", exc)
 
         return voice
+
+    # ------------------------------------------------------------------
+    # Private: workspace announcement
+    # ------------------------------------------------------------------
+
+    def _maybe_prepend_workspace_label(self, speech: str) -> str:
+        """Return ``speech`` with the workspace label prepended, when applicable.
+
+        DEF-111: mirrors the watcher.py behaviour. Returns the input unchanged
+        when there is no workspace, announcing is disabled, the resolver
+        can't produce a label, or the speech is shorter than
+        ``tts.announce_min_chars``.
+        """
+        if not self._workspace:
+            return speech
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+        except Exception as e:
+            log.debug("workspace_label: config load failed (%s)", e)
+            return speech
+        min_chars = getattr(cfg.tts, "announce_min_chars", 0) or 0
+        if min_chars and len(speech) < min_chars:
+            return speech
+        try:
+            from heyvox.herald.workspace_label import get_workspace_label
+            label = get_workspace_label(self._workspace, cfg=cfg)
+        except Exception as e:
+            log.debug("workspace_label: lookup failed (%s)", e)
+            return speech
+        if not label:
+            return speech
+        return f"{label}: {speech}"
 
     # ------------------------------------------------------------------
     # Private: generation dispatch
