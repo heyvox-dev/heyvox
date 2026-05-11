@@ -416,12 +416,42 @@ def _apply_state(
             else:
                 _mic_img = _brand_menubar_image()
             btn.setImage_(_mic_img)
+            from heyvox.hud.menu_bar_title import truncate_mic
             _idle_suffix = ""
             if _held_count > 0:
                 _idle_suffix += f"  \U0001f4e5{_held_count}"
             if _spk_muted:
                 _idle_suffix += " \U0001f507"
-            btn.setTitle_(_idle_suffix)
+            # D-12: prefix the brand icon's title with the truncated mic name
+            # so the user sees which mic is active at a glance. Full name in tooltip.
+            try:
+                from heyvox.constants import ACTIVE_MIC_FILE
+                with open(ACTIVE_MIC_FILE) as _f:
+                    _active_mic_for_title = _f.read().strip()
+            except Exception:
+                _active_mic_for_title = ""
+
+            def _friendly_idle(name: str) -> str:
+                if not name:
+                    return "None"
+                n = name
+                if "macbook" in n.lower() and "microphone" in n.lower():
+                    return "Built-in"
+                for _sfx in (" Gaming Headset", " Wireless Gaming Headset", " Microphone",
+                             " USB Audio", " Audio Device"):
+                    if n.endswith(_sfx):
+                        n = n[: -len(_sfx)]
+                        break
+                return n.strip()
+
+            _friendly = _friendly_idle(_active_mic_for_title)
+            _mic_short_title = truncate_mic(_friendly)
+            if _mic_short_title and _mic_short_title != "None":
+                _title_text = f" {_mic_short_title}{_idle_suffix}"
+            else:
+                _title_text = _idle_suffix
+            btn.setTitle_(_title_text)
+            btn.setToolTip_(f"Mic: {_friendly}")
         else:
             # Non-idle states or crashed: use emoji text, clear image
             status_item.button().setImage_(None)
@@ -1059,10 +1089,22 @@ def _build_transcript_menu(handler):
     mic_sub = NSMenu.alloc().init()
     mic_sub.setAutoenablesItems_(False)
 
+    # D-13: append voice_isolation_mode suffix to each entry, reading from the
+    # active mic profile registry. Reload config fresh on each rebuild so the
+    # submenu never shows stale state after a config.yaml edit (RESEARCH Pitfall 5).
+    from heyvox.hud.menu_bar_title import vi_suffix_for_device
+    from heyvox.config import load_config
+    try:
+        _menu_config = load_config()
+    except Exception:
+        _menu_config = None
+
     for _dev_name in _input_devices:
         _is_active = _dev_name == _active_mic
+        _vi = vi_suffix_for_device(_dev_name, _menu_config) if _menu_config else ""
+        _mic_title = f"{_friendly_mic(_dev_name)}{_vi}"
         _mic_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            _friendly_mic(_dev_name), "switchMic:", "",
+            _mic_title, "switchMic:", "",
         )
         _mic_item.setTarget_(handler)
         _mic_item.setRepresentedObject_(_dev_name)
@@ -1755,6 +1797,7 @@ def main(menu_bar_only: bool = False):
     # Initial state: HeyVox brand glyph (template, auto-tinted by macOS)
     status_button.setImage_(_brand_menubar_image())
     status_button.setTitle_("")
+    status_button.setToolTip_("Mic: (initializing)")
 
     MenuActionHandler = _make_menu_action_class()
     MenuActionHandler._status_item_ref = status_item
