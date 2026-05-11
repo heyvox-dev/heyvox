@@ -408,3 +408,64 @@ class TestKokoroSocketProtocol:
             patch("heyvox.herald.worker.KOKORO_DAEMON_PID", str(pid_file)),
         ):
             assert worker._kokoro_daemon_alive() is False
+
+
+# ---------------------------------------------------------------------------
+# Workspace label prepend (DEF-111)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceLabelPrepend:
+    """Verify worker.py prepends the workspace label to spoken text."""
+
+    def _worker_with_ws(self, ws: str):
+        from heyvox.herald.worker import HeraldWorker
+        with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws}, clear=False):
+            return HeraldWorker()
+
+    def test_no_workspace_returns_speech_unchanged(self):
+        w = self._worker_with_ws("")
+        assert w._maybe_prepend_workspace_label("hello") == "hello"
+
+    def test_prepends_when_label_resolved(self):
+        w = self._worker_with_ws("seattle")
+        with patch(
+            "heyvox.herald.workspace_label.get_workspace_label",
+            return_value="Seattle",
+        ):
+            assert (
+                w._maybe_prepend_workspace_label("done with the fix")
+                == "Seattle: done with the fix"
+            )
+
+    def test_empty_label_means_no_prepend(self):
+        # announce_workspace=False or DB miss → resolver returns "" → caller
+        # leaves the speech alone.
+        w = self._worker_with_ws("seattle")
+        with patch(
+            "heyvox.herald.workspace_label.get_workspace_label",
+            return_value="",
+        ):
+            assert w._maybe_prepend_workspace_label("done") == "done"
+
+    def test_skips_when_speech_below_min_chars(self):
+        from heyvox.config import HeyvoxConfig, TTSConfig
+        w = self._worker_with_ws("seattle")
+        cfg = HeyvoxConfig(tts=TTSConfig(announce_min_chars=50))
+        with patch("heyvox.herald.worker.load_config", return_value=cfg, create=True), \
+             patch("heyvox.config.load_config", return_value=cfg), \
+             patch(
+                 "heyvox.herald.workspace_label.get_workspace_label",
+                 # If min_chars guard is honoured, resolver should not be hit.
+                 side_effect=AssertionError("resolver must not be called"),
+             ):
+            assert w._maybe_prepend_workspace_label("short") == "short"
+
+    def test_resolver_failure_does_not_break_pipeline(self):
+        w = self._worker_with_ws("seattle")
+        with patch(
+            "heyvox.herald.workspace_label.get_workspace_label",
+            side_effect=RuntimeError("DB exploded"),
+        ):
+            # Pipeline must not raise — fall back to speech unchanged.
+            assert w._maybe_prepend_workspace_label("still works") == "still works"

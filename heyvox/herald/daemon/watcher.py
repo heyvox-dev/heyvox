@@ -51,6 +51,8 @@ def _load_workspace_db_path():
     """Load the workspace DB path from the app profile config.
 
     Returns the expanded DB path, or empty string if no profile has workspace detection.
+    Used by detect_workspace_from_path; label resolution itself is delegated to
+    heyvox.herald.workspace_label.
     """
     try:
         from heyvox.config import load_config
@@ -73,27 +75,6 @@ def _get_workspace_db_path():
     if _cached_ws_db_path is None:
         _cached_ws_db_path = _load_workspace_db_path()
     return _cached_ws_db_path
-
-
-def get_tts_label(workspace_name):
-    """Get workspace TTS label from the workspace-aware app's DB."""
-    if not workspace_name:
-        return workspace_name
-    db_path = _get_workspace_db_path()
-    if not db_path:
-        return workspace_name
-    try:
-        # Escape single quotes to prevent SQL injection from workspace names
-        safe_name = workspace_name.replace("'", "''")
-        r = subprocess.run(
-            ["sqlite3", db_path,
-             f"SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='{safe_name}'"],
-            capture_output=True, text=True, timeout=0.5)
-        if r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return workspace_name
 
 
 def extract_tts(text):
@@ -194,10 +175,21 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
 
     timestamp = str(time.time_ns())
 
-    label = get_tts_label(workspace)
-    if label:
-        spoken_label = label.replace(" \u00b7 ", ", ")
-        speech = f"{spoken_label}: {speech}"
+    # DEF-111: label resolution is shared with worker.py via
+    # heyvox.herald.workspace_label so both paths produce the same prefix
+    # and honour the same config knobs (tts.announce_workspace,
+    # tts.workspace_labels, HEYVOX_WORKSPACE_LABEL, announce_min_chars).
+    try:
+        from heyvox.config import load_config
+        from heyvox.herald.workspace_label import get_workspace_label
+        _cfg = load_config()
+        _min_chars = getattr(_cfg.tts, "announce_min_chars", 0) or 0
+        if _min_chars == 0 or len(speech) >= _min_chars:
+            spoken_label = get_workspace_label(workspace, cfg=_cfg)
+            if spoken_label:
+                speech = f"{spoken_label}: {speech}"
+    except Exception as e:
+        log(f"workspace_label lookup failed (non-fatal): {e}")
 
     voice = detect_mood_voice(speech)
 
