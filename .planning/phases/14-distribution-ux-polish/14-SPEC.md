@@ -43,10 +43,10 @@ The wake-word default is still `hey_jarvis_v0.1` from openwakeword's pretrained 
    - Target: HUD dropdown menu shows current mic's `voice_isolation_mode` as a read-only text entry (e.g. "Voice Isolation: On / Off / Auto"); reads strictly from the active profile, never from AVCaptureDevice or system APIs
    - Acceptance: HUD menu entry shows the `voice_isolation_mode` value for the active mic profile; toggling between two profiles with different settings updates the menu entry; no AVCaptureDevice import or call is added
 
-6. **Synthetic "Hey Vox" general wake-word model bundled as default**: Re-trained model + pipeline cleanup + docs.
+6. **Synthetic "Hey Vox" general wake-word model + co-default fallback**: Re-trained model + setup-download + docs.
    - Current: Default wake word in config is `hey_jarvis_v0.1` from openwakeword zoo; personalized `hey_vox` MLP exists but is owner-specific; Colab pipeline + `retrain_heyvox.py` are in place
-   - Target: Run synthetic + diverse-voice training pass via existing pipeline; produce `hey_vox.onnx` bundled inside the package (`heyvox/wakeword_models/`); update default config from `hey_jarvis_v0.1` → `hey_vox`; remove dead `hey_jarvis_v0.1` references; document the `retrain_heyvox.py` workflow in `docs/wakeword-training.md` (or README section) so users can train their own
-   - Acceptance: Fresh `pip install heyvox` followed by `heyvox setup` + `heyvox start` recognizes "Hey Vox" wake word with ≥70% TP rate on internal test set; bundled model loads without external download; `grep -r hey_jarvis heyvox/ config.yaml.example` returns zero matches in code defaults (only allowed in legacy notes); training docs exist and reference the script
+   - Target: Run synthetic + diverse-voice training pass via existing pipeline; upload trained `hey_vox.onnx` as a GitHub Releases asset on `heyvox-dev/heyvox`; `heyvox setup` downloads it on first run to `~/.config/heyvox/models/hey_vox.onnx`; default config ships with both wake words active — `wake_words: [hey_vox, hey_jarvis_v0.1]` (jarvis as fallback when hey_vox detection misses); document the Colab training workflow in `docs/wakeword-training.md` so users can train their own
+   - Acceptance: Fresh `pip install heyvox` followed by `heyvox setup` downloads the general model; `heyvox start` recognizes "Hey Vox" wake word with ≥70% TP rate AND FP < 1 per hour of normal speech on internal hybrid test set; default `wake_words` list contains both `hey_vox` and `hey_jarvis_v0.1`; training docs exist and reference the Colab notebook
 
 ## Boundaries
 
@@ -95,9 +95,9 @@ The wake-word default is still `hey_jarvis_v0.1` from openwakeword's pretrained 
 - [ ] `brew audit --strict heyvox-dev/heyvox/heyvox` passes
 - [ ] Menu-bar status item shows the friendly active-mic name; updates when mic switches
 - [ ] HUD menu entry shows `voice_isolation_mode` of the active mic profile; updates on profile change
-- [ ] Fresh install + `heyvox setup` + `heyvox start` recognises "Hey Vox" wake word with ≥70% TP on internal test set
-- [ ] `grep -r hey_jarvis_v0.1 heyvox/` returns zero matches in default config (legacy notes/comments allowed)
-- [ ] `docs/wakeword-training.md` (or equivalent) explains how a user trains their own wake-word model
+- [ ] Fresh install + `heyvox setup` downloads `hey_vox.onnx` from GitHub Releases; `heyvox start` recognises "Hey Vox" wake word with ≥70% TP AND FP < 1 per hour on internal hybrid (synth + real) test set
+- [ ] Default `wake_words` in `config.yaml.example` is `[hey_vox, hey_jarvis_v0.1]` — both active, jarvis as fallback
+- [ ] `docs/wakeword-training.md` explains the Colab training workflow and references `training/hey_vox_colab.ipynb`
 - [ ] No AVCaptureDevice import or call added (UX-02 stays config-sourced)
 - [ ] Existing `ci.yml` and `install-test.yml` workflows remain green
 
