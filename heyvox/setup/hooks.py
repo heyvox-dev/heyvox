@@ -46,6 +46,14 @@ def install_herald_hooks() -> list[tuple[bool, str]]:
     try:
         # Copy hook scripts to stable location
         _STABLE_HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+        # DEF-111: also ship the shared helper that hooks source for the
+        # workspace-aware PYTHONPATH walk-up logic. Without it the hooks
+        # would fail with "no such file" on every Claude Code event.
+        lib_src = HERALD_HOOKS / "_lib.sh"
+        if lib_src.exists():
+            lib_dest = _STABLE_HOOKS_DIR / "_lib.sh"
+            shutil.copy2(lib_src, lib_dest)
+            lib_dest.chmod(0o755)
         for info in _HOOKS.values():
             src = HERALD_HOOKS / info["script"]
             if src.exists():
