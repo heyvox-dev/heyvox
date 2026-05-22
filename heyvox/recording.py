@@ -140,6 +140,129 @@ def _save_debug_audio(
         return None
 
 
+def _reverify_garbled_async(
+    raw_wav_path: str,
+    *,
+    language: str = "",
+    hud_send=None,
+    log=None,
+) -> None:
+    """Background reverify of a garbled-flagged recording via Whisper Large v3.
+
+    Pattern P-stochastic-stt: whisper-small can hallucinate repetition on a
+    clean recording (live run trips is_garbled), while large-v3 on the same
+    raw WAV usually produces clean text. We don't auto-paste (focus may have
+    moved on by the time large-v3 finishes — ~5–15 s on M-series), instead
+    we copy the recovered text to the clipboard, persist it to history,
+    and surface a HUD note so the user knows ⌘V will paste it.
+
+    Non-fatal — every failure path logs and returns silently.
+    """
+    def _worker():
+        try:
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            import wave
+            import subprocess
+
+            if log:
+                log(f"Reverify: loading raw audio from {raw_wav_path}")
+            with wave.open(raw_wav_path, "rb") as w:
+                sr = w.getframerate()
+                raw = w.readframes(w.getnframes())
+            if not raw:
+                if log:
+                    log("Reverify: empty raw WAV — giving up")
+                return
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            audio_secs = len(audio) / sr
+
+            try:
+                import mlx_whisper  # type: ignore
+            except ImportError:
+                if log:
+                    log("Reverify: mlx_whisper not available — skipping")
+                return
+
+            if log:
+                log(f"Reverify: transcribing {audio_secs:.1f}s with whisper-large-v3...")
+            t0 = time.time()
+            kwargs = {
+                "path_or_hf_repo": "mlx-community/whisper-large-v3-mlx",
+                "word_timestamps": False,
+                # Same defensive params as the live pipeline so behaviour stays
+                # consistent: no segment-to-segment context, escape degenerate
+                # decoding sooner.
+                "condition_on_previous_text": False,
+                "compression_ratio_threshold": 2.2,
+                "logprob_threshold": -0.8,
+            }
+            if language:
+                kwargs["language"] = language
+            result = mlx_whisper.transcribe(audio, **kwargs)
+            text = (result.get("text") or "").strip()
+            elapsed = time.time() - t0
+
+            if not text:
+                if log:
+                    log(f"Reverify: empty output after {elapsed:.1f}s — giving up")
+                return
+            if is_garbled(text, stt_secs=elapsed, audio_secs=audio_secs):
+                if log:
+                    log(f"Reverify: large-v3 also garbled after {elapsed:.1f}s — giving up")
+                return
+
+            text = strip_wake_words(text, "hey vox", "hey vox")
+            if not text:
+                if log:
+                    log("Reverify: nothing left after wake-word strip — giving up")
+                return
+
+            preview = text[:80] + ("..." if len(text) > 80 else "")
+            if log:
+                log(
+                    f"Reverify: recovered {len(text)} chars in {elapsed:.1f}s — "
+                    f"copying to clipboard"
+                )
+
+            try:
+                subprocess.run(
+                    ["pbcopy"],
+                    input=text.encode("utf-8"),
+                    check=True,
+                    timeout=5,
+                )
+            except (subprocess.SubprocessError, OSError) as e:
+                if log:
+                    log(f"Reverify: pbcopy failed: {e}")
+                return
+
+            if hud_send is not None:
+                try:
+                    hud_send({
+                        "type": "transcript",
+                        "text": f"Recovered (⌘V to paste): {preview}",
+                    })
+                except Exception as e:
+                    if log:
+                        log(f"Reverify: HUD send failed: {e}")
+
+            try:
+                from heyvox.history import save as _save_transcript
+                _save_transcript(text, duration=audio_secs, ptt=False)
+            except Exception as e:
+                if log:
+                    log(f"Reverify: history save failed: {e}")
+        except Exception as e:
+            if log:
+                log(f"Reverify: unexpected error {type(e).__name__}: {e}")
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name="heyvox-garbled-reverify",
+    ).start()
+
+
 def _release_recording_guard(flag_delay: float = 0.0) -> None:
     """Release the recording guard — both in-process event and cross-process file flag.
 
@@ -722,15 +845,29 @@ class RecordingStateMachine:
                 self._log(
                     f"FILTER (garbled, stt={elapsed:.1f}s): Discarding transcription: {text[:80]}"
                 )
+                _raw_for_reverify = None
                 try:
                     if _last_raw_wav:
                         self._log(f"FILTER (garbled): raw audio preserved at {_last_raw_wav}")
+                        _raw_for_reverify = _last_raw_wav
                 except NameError:
                     pass
-                self._hud_send({
-                    "type": "transcript",
-                    "text": f"Garbled STT ({elapsed:.1f}s) - try again",
-                })
+                # P-stochastic-stt: whisper-small can hallucinate repetition on
+                # a clean recording; re-run large-v3 in the background and copy
+                # any clean recovery to the clipboard. No auto-paste — by the
+                # time large-v3 finishes (~5–15 s) the user's focus has often
+                # moved on, and silently injecting into the wrong app is worse
+                # than asking them to ⌘V into the right one.
+                hud_msg = f"Garbled STT ({elapsed:.1f}s) - reverifying with large-v3..." \
+                    if _raw_for_reverify else f"Garbled STT ({elapsed:.1f}s) - try again"
+                self._hud_send({"type": "transcript", "text": hud_msg})
+                if _raw_for_reverify:
+                    _reverify_garbled_async(
+                        _raw_for_reverify,
+                        language=getattr(self.config.stt.local, "language", "") or "",
+                        hud_send=self._hud_send,
+                        log=self._log,
+                    )
                 # Training: save as false positive (trigger led to garbled output)
                 if self.training_collector and _training_chunks:
                     self.training_collector.save_fp(_training_chunks, _training_sr, reason="garbled")
