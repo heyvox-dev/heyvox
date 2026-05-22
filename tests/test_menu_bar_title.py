@@ -52,9 +52,11 @@ class TestTruncateMic:
 class TestFormatMenuBarTitle:
     """format_menu_bar_title returns dict of title + tooltip + flags."""
 
-    def test_idle_shows_mic_name(self):
+    def test_idle_hides_mic_name_in_title_keeps_it_in_tooltip(self):
+        # Mic name moved to hover-only: title stays clean, tooltip carries the name.
         out = format_menu_bar_title(state="idle", friendly_mic="Evolve2 75")
-        assert "Evolve2 75" in out["title"]
+        assert "Evolve2 75" not in out["title"]
+        assert out["title"] == ""
         assert out["tooltip"] == "Mic: Evolve2 75"
         assert out["use_brand_icon"] is True
         assert out["mute_icon"] is False

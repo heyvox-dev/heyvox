@@ -100,13 +100,9 @@ def format_menu_bar_title(
             "mute_icon": True,
         }
 
-    short = truncate_mic(friendly_mic) if friendly_mic else ""
-    if short and short != "None":
-        title = f" {short}{suffix}"
-    else:
-        title = suffix
+    # Mic name lives in the tooltip only (hover). Title carries icon + suffixes.
     return {
-        "title": title,
+        "title": suffix,
         "tooltip": tooltip,
         "use_brand_icon": True,
         "mute_icon": False,

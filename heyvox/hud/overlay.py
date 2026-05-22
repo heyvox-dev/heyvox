@@ -58,6 +58,57 @@ def _brand_menubar_image():
     return img
 
 
+def _brand_hud_image(size=11):
+    """Brand glyph rendered white for the dark idle HUD pill.
+
+    The menu bar image is a template (black silhouette tinted by macOS); inside
+    a NSTextAttachment the template doesn't auto-tint, so we composite a
+    pre-tinted copy via SourceIn over white.
+    """
+    from AppKit import (
+        NSImage, NSColor,
+        NSCompositingOperationSourceOver, NSCompositingOperationSourceIn,
+        NSRectFillUsingOperation,
+    )
+    from Foundation import NSSize, NSMakeRect
+
+    src = NSImage.alloc().initWithContentsOfFile_(_MENUBAR_ICON_PATH)
+    if src is None:
+        return None
+    target = NSImage.alloc().initWithSize_(NSSize(size, size))
+    target.lockFocus()
+    src.drawInRect_fromRect_operation_fraction_(
+        NSMakeRect(0, 0, size, size),
+        NSMakeRect(0, 0, src.size().width, src.size().height),
+        NSCompositingOperationSourceOver,
+        1.0,
+    )
+    NSColor.whiteColor().set()
+    NSRectFillUsingOperation(
+        NSMakeRect(0, 0, size, size), NSCompositingOperationSourceIn,
+    )
+    target.unlockFocus()
+    return target
+
+
+def _idle_default_attr_string():
+    """Brand glyph + ' HeyVox' as an NSAttributedString for the idle HUD label."""
+    from AppKit import NSTextAttachment
+    from Foundation import NSAttributedString, NSMutableAttributedString
+
+    s = NSMutableAttributedString.alloc().init()
+    icon = _brand_hud_image(11)
+    if icon is not None:
+        att = NSTextAttachment.alloc().init()
+        att.setImage_(icon)
+        s.appendAttributedString_(
+            NSAttributedString.attributedStringWithAttachment_(att),
+        )
+        s.appendAttributedString_(NSAttributedString.alloc().initWithString_(" "))
+    s.appendAttributedString_(NSAttributedString.alloc().initWithString_("HeyVox"))
+    return s
+
+
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
 STATE_COLORS = {
     "idle":       (0.35, 0.35, 0.40, 0.65),  # Subtle gray
@@ -416,14 +467,12 @@ def _apply_state(
             else:
                 _mic_img = _brand_menubar_image()
             btn.setImage_(_mic_img)
-            from heyvox.hud.menu_bar_title import truncate_mic
             _idle_suffix = ""
             if _held_count > 0:
                 _idle_suffix += f"  \U0001f4e5{_held_count}"
             if _spk_muted:
                 _idle_suffix += " \U0001f507"
-            # D-12: prefix the brand icon's title with the truncated mic name
-            # so the user sees which mic is active at a glance. Full name in tooltip.
+            # Mic name is hover-only (tooltip). Title carries icon + suffixes only.
             try:
                 from heyvox.constants import ACTIVE_MIC_FILE
                 with open(ACTIVE_MIC_FILE) as _f:
@@ -445,12 +494,7 @@ def _apply_state(
                 return n.strip()
 
             _friendly = _friendly_idle(_active_mic_for_title)
-            _mic_short_title = truncate_mic(_friendly)
-            if _mic_short_title and _mic_short_title != "None":
-                _title_text = f" {_mic_short_title}{_idle_suffix}"
-            else:
-                _title_text = _idle_suffix
-            btn.setTitle_(_title_text)
+            btn.setTitle_(_idle_suffix)
             btn.setToolTip_(f"Mic: {_friendly}")
         else:
             # Non-idle states or crashed: use emoji text, clear image
@@ -505,10 +549,10 @@ def _apply_state(
             # Schedule revert to default label after 3 seconds
             from Foundation import NSTimer
             def _revert_label(timer):
-                idle_label.setStringValue_("\U0001f399 HeyVox")
+                idle_label.setAttributedStringValue_(_idle_default_attr_string())
             NSTimer.scheduledTimerWithTimeInterval_repeats_block_(3.0, False, _revert_label)
         elif not is_active:
-            idle_label.setStringValue_("\U0001f399 HeyVox")
+            idle_label.setAttributedStringValue_(_idle_default_attr_string())
 
     if not is_active:
         # Idle: show label, hide active elements
@@ -1722,7 +1766,7 @@ def main(menu_bar_only: bool = False):
     transcript_label.setHidden_(True)
     content_view.addSubview_(transcript_label)
 
-    # ---- Idle label ("🎙 HeyVox" centered in idle pill) ----
+    # ---- Idle label (brand glyph + "HeyVox" centered in idle pill) ----
     NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
     idle_label_h = 18
     idle_label_y = (PILL_H - idle_label_h) / 2
@@ -1738,7 +1782,7 @@ def main(menu_bar_only: bool = False):
     idle_label.setAlignment_(NSTextAlignmentCenter)
     idle_label.cell().setWraps_(False)
     idle_label.cell().setScrollable_(False)
-    idle_label.setStringValue_("\U0001f399 HeyVox")
+    idle_label.setAttributedStringValue_(_idle_default_attr_string())
     idle_label.setHidden_(False)
     content_view.addSubview_(idle_label)
 
