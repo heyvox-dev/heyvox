@@ -310,7 +310,15 @@ async function pauseAllTabs() {
   );
 
   await persistPausedTabs(); // DEF-098 / DEF-110
-  return buildStatusResponse('paused');
+  const pauseDiag = paused.map((t) => ({
+    tabId: t.id,
+    method: pausedTabs.get(t.id)?.method ?? 'unknown',
+    audible: t.audible === true,
+  }));
+  console.log('[Hush] pause diagnostic:', JSON.stringify(pauseDiag));
+  const resp = buildStatusResponse('paused');
+  resp._pause = pauseDiag;
+  return resp;
 }
 
 /**
@@ -323,24 +331,32 @@ async function resumeAllPausedTabs(rewindSecs = 0, fadeInMs = 0) {
   const entries = [...pausedTabs.entries()];
   console.log(`[Hush] resumeAllPausedTabs start, Map size: ${pausedTabs.size}, entries to resume: ${entries.length}`);
 
-  await Promise.allSettled(
+  // DEF-112: capture per-tab outcome so the native host (and hush.log) gets
+  // the actual play() resolution counts, not just bookkeeping success.
+  const settled = await Promise.allSettled(
     entries.map(async ([tabId, info]) => {
       if (info.method === 'tab-mute') {
-        // Unmute tabs that were muted as fallback
         await chrome.tabs.update(tabId, { muted: false }).catch(() => {});
-      } else {
-        await sendToContentScript(tabId, {
-          action: 'resume-media',
-          rewindSecs,
-          fadeInMs,
-        });
+        return { tabId, method: 'tab-mute', played: 1, failed: 0 };
       }
+      const diag = await sendToContentScript(tabId, {
+        action: 'resume-media',
+        rewindSecs,
+        fadeInMs,
+      });
+      return { tabId, method: info.method ?? 'content-script', diag };
     })
   );
+  const diagnostic = settled.map((s) =>
+    s.status === 'fulfilled' ? s.value : { error: String(s.reason) }
+  );
+  console.log('[Hush] resume diagnostic:', JSON.stringify(diagnostic));
 
   pausedTabs.clear();
   await persistPausedTabs(); // DEF-098 / DEF-110
-  return buildStatusResponse('playing');
+  const resp = buildStatusResponse('playing');
+  resp._resume = diagnostic;
+  return resp;
 }
 
 /**
