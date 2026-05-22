@@ -212,6 +212,17 @@ class DeviceManager:
         # Cooldown the zombie device so find_best_mic and hotplug scan skip it
         add_device_cooldown(self.dev_name)
 
+        # Surface the silent mic to the menu bar. Reinit can't beat a hardware
+        # mute (G435 mute button, Jabra hardware gate, etc.) — only the user
+        # can. Pattern P-new-visibility: silent state changes need a visible
+        # signal. Overlay auto-expires after MIC_WARN_TTL_SECS.
+        try:
+            from heyvox.constants import MIC_WARN_FILE
+            with open(MIC_WARN_FILE, "w") as _f:
+                _f.write(f"Mic silent — check mute ({self.dev_name[:30]})")
+        except OSError:
+            pass
+
         try:
             self.stream.stop_stream()
             self.stream.close()
