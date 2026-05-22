@@ -51,6 +51,12 @@ class AppContext:
 
     audio_buffer: list = dataclasses.field(default_factory=list)
     triggered_by_ptt: bool = False
+    stopped_via_ptt_mid_recording: bool = False
+    """DEF-116: True if PTT was pressed to stop a wake-word-started recording.
+    Distinguishes "user gave up waiting for stop-wake" from "stop-wake-word
+    actually fired." Read by RecordingStateMachine._send_local to skip the
+    wake-word end-trim — there is no stop-wake to trim when PTT was the
+    stopper, and the fixed 480 ms end-trim would clip the user's last word."""
     recording_target: object = None
     """TargetLock: immutable record-start target (SPEC R1)."""
 

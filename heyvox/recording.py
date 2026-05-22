@@ -360,6 +360,7 @@ class RecordingStateMachine:
             # Pre-roll: prepend recent audio so first words aren't clipped
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
+            self.ctx.stopped_via_ptt_mid_recording = False  # DEF-116: reset per-recording
             self.ctx.recording_target = None  # Will be filled by background snapshot
             # DEF-078: Seed tts-during-recording flag from the current TTS flag
             # state. If Herald is mid-speech when the recording starts, the
@@ -557,8 +558,15 @@ class RecordingStateMachine:
                     #
                     # Start trim: ~1.5s covers pre-roll buffer (500ms) + wake word (~1000ms).
                     # End trim: 0.5s -- conservative, only cuts actual stop wake word.
+                    #
+                    # DEF-116: if the recording was stopped by PTT mid-way (user
+                    # gave up waiting for the stop wake-word to fire), skip the
+                    # end-trim entirely — there is no stop-wake-word at the end
+                    # to remove, and 480 ms of trim would clip the user's last
+                    # word(s). Start-trim still applies — the recording was
+                    # started by wake-word, so the start wake-word IS there.
                     ww_start_trim_secs = 1.5
-                    ww_end_trim_secs = 0.5
+                    ww_end_trim_secs = 0.0 if self.ctx.stopped_via_ptt_mid_recording else 0.5
                     start_trim_chunks = int(
                         ww_start_trim_secs * self.config.audio.sample_rate / self.config.audio.chunk_size
                     )
