@@ -161,9 +161,13 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             if is_busy:
                 return event
             if is_rec:
-                # Recording active (wake-word-triggered) — FN tap stops it
+                # Recording active (wake-word-triggered) — FN tap stops it.
+                # DEF-116: use on_stop_wake_via_ptt (when registered) so the
+                # recorder knows this is NOT a stop-wake-word event and skips
+                # the wake-word end-trim. Falls back to plain on_stop for
+                # backward compat with callers that don't register the new key.
                 _log("PTT key pressed during wake-word recording, stopping")
-                on_stop = callbacks.get("on_stop")
+                on_stop = callbacks.get("on_stop_wake_via_ptt") or callbacks.get("on_stop")
                 if on_stop:
                     on_stop()
                 return event
