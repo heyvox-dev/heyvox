@@ -417,32 +417,40 @@ def _apply_state(
         # Picks the highest-level live record (error > warn > info); falls
         # back to the legacy DEF-101 MIC_WARN_FILE via HUDSurface compat path.
         # Patterns P-new (ux invisibility) + P-detector-without-action.
+        #
+        # Render policy (revised 2026-05-25 after user feedback): only the
+        # level symbol appears in the menu bar title \u2014 full text lives in
+        # the menu bar item's tooltip. Earlier full-text override pushed
+        # other menu bar items off-screen for the full TTL window.
         _mic_warn = ""
         _banner_level = "info"
         try:
             from heyvox.hud.surface import HUDSurface
             _top = HUDSurface.top_active()
             if _top is not None:
-                _mic_warn = _top["text"][:60]
+                _mic_warn = _top["text"][:120]
                 _banner_level = _top["level"]
         except Exception:
             pass
-        # Build menu bar title with SF Symbol-style mute indicators
+        _banner_symbol = ""
+        if _mic_warn:
+            _banner_symbol = {
+                "error": "\u274c",
+                "warn": "\u26a0\ufe0f",
+                "info": "\u2139\ufe0f",
+            }.get(_banner_level, "\u26a0\ufe0f")
+        # Build menu bar title with SF Symbol-style mute indicators.
+        # The banner appears as a *suffix symbol*, not a title override \u2014
+        # brand glyph + state stay intact, only a small badge gets added.
         _bar_title = f"{icon}{label}"
         if _held_count > 0:
             _bar_title += f"  \U0001f4e5{_held_count}"
-        if _mic_warn:
-            # Override icon with a level-appropriate marker so it's loud.
-            # error \u2192 red cross, warn \u2192 warning sign, info \u2192 info icon.
-            _prefix = {
-                "error": "\u274c",       # \u274c
-                "warn": "\u26a0\ufe0f",  # \u26a0\ufe0f
-                "info": "\u2139\ufe0f",  # \u2139\ufe0f
-            }.get(_banner_level, "\u26a0\ufe0f")
-            _bar_title = f"{_prefix} {_mic_warn}"
-        # When a mic warning is fresh, force text-mode title (skip SF symbol)
-        # so the user sees the warning, not just an icon.
-        if state_str == "idle" and not crashed and not _mic_warn:
+        if _banner_symbol:
+            _bar_title += f"  {_banner_symbol}"
+        # Idle branch renders brand glyph + symbol suffix; non-idle uses text.
+        # The earlier "and not _mic_warn" gate forced text-mode whenever a
+        # banner was active \u2014 now removed so the brand glyph survives.
+        if state_str == "idle" and not crashed:
             from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE
             _mic_muted = os.path.exists(_MIC_MUTE)
             _spk_muted = False
@@ -494,8 +502,16 @@ def _apply_state(
                 return n.strip()
 
             _friendly = _friendly_idle(_active_mic_for_title)
-            btn.setTitle_(_idle_suffix)
-            btn.setToolTip_(f"Mic: {_friendly}")
+            # Append the banner symbol (if any) to the idle suffix so it sits
+            # next to the brand glyph rather than replacing it.
+            _idle_title = _idle_suffix + (f"  {_banner_symbol}" if _banner_symbol else "")
+            btn.setTitle_(_idle_title)
+            # Tooltip carries the full banner text — hover to read. The mic
+            # name is still shown so the user doesn't lose that affordance.
+            if _mic_warn:
+                btn.setToolTip_(f"{_banner_symbol} {_mic_warn}\nMic: {_friendly}")
+            else:
+                btn.setToolTip_(f"Mic: {_friendly}")
         else:
             # Non-idle states or crashed: use emoji text, clear image
             status_item.button().setImage_(None)
