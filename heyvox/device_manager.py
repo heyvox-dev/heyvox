@@ -214,13 +214,18 @@ class DeviceManager:
 
         # Surface the silent mic to the menu bar. Reinit can't beat a hardware
         # mute (G435 mute button, Jabra hardware gate, etc.) — only the user
-        # can. Pattern P-new-visibility: silent state changes need a visible
-        # signal. Overlay auto-expires after MIC_WARN_TTL_SECS.
+        # can. Patterns P-new + P-detector-without-action: silent state changes
+        # need a visible signal. Banner auto-expires after MIC_WARN_TTL_SECS.
         try:
-            from heyvox.constants import MIC_WARN_FILE
-            with open(MIC_WARN_FILE, "w") as _f:
-                _f.write(f"Mic silent — check mute ({self.dev_name[:30]})")
-        except OSError:
+            from heyvox.hud.surface import HUDSurface
+            from heyvox.constants import MIC_WARN_TTL_SECS
+            HUDSurface.banner(
+                level="warn",
+                source="mic-zombie",
+                text=f"Mic silent — check mute ({self.dev_name[:30]})",
+                ttl_secs=MIC_WARN_TTL_SECS,
+            )
+        except Exception:
             pass
 
         try:
