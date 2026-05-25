@@ -413,24 +413,18 @@ def _apply_state(
             _held_count = sum(1 for _ in _Path(HERALD_HOLD_DIR).glob("*.wav"))
         except Exception:
             pass
-        # DEF-101: mic-warn banner \u2014 read warning text from MIC_WARN_FILE if
-        # mtime within TTL. Auto-expires (file kept for forensics, but display
-        # only while fresh). Cleared on state-change refresh once stale.
+        # HUDSurface banner \u2014 unified read for silent-state-change detectors.
+        # Picks the highest-level live record (error > warn > info); falls
+        # back to the legacy DEF-101 MIC_WARN_FILE via HUDSurface compat path.
+        # Patterns P-new (ux invisibility) + P-detector-without-action.
         _mic_warn = ""
+        _banner_level = "info"
         try:
-            from heyvox.constants import MIC_WARN_FILE, MIC_WARN_TTL_SECS
-            import time as _time
-            if os.path.exists(MIC_WARN_FILE):
-                _age = _time.time() - os.path.getmtime(MIC_WARN_FILE)
-                if _age < MIC_WARN_TTL_SECS:
-                    with open(MIC_WARN_FILE) as _wf:
-                        _mic_warn = _wf.read().strip()[:60]
-                else:
-                    # Stale: drop it so other overlay redraws don't keep checking.
-                    try:
-                        os.remove(MIC_WARN_FILE)
-                    except OSError:
-                        pass
+            from heyvox.hud.surface import HUDSurface
+            _top = HUDSurface.top_active()
+            if _top is not None:
+                _mic_warn = _top["text"][:60]
+                _banner_level = _top["level"]
         except Exception:
             pass
         # Build menu bar title with SF Symbol-style mute indicators
@@ -438,8 +432,14 @@ def _apply_state(
         if _held_count > 0:
             _bar_title += f"  \U0001f4e5{_held_count}"
         if _mic_warn:
-            # Override icon with a warning marker so it's loud
-            _bar_title = f"\u26a0\ufe0f {_mic_warn}"
+            # Override icon with a level-appropriate marker so it's loud.
+            # error \u2192 red cross, warn \u2192 warning sign, info \u2192 info icon.
+            _prefix = {
+                "error": "\u274c",       # \u274c
+                "warn": "\u26a0\ufe0f",  # \u26a0\ufe0f
+                "info": "\u2139\ufe0f",  # \u2139\ufe0f
+            }.get(_banner_level, "\u26a0\ufe0f")
+            _bar_title = f"{_prefix} {_mic_warn}"
         # When a mic warning is fresh, force text-mode title (skip SF symbol)
         # so the user sees the warning, not just an icon.
         if state_str == "idle" and not crashed and not _mic_warn:
