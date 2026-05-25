@@ -577,12 +577,37 @@ def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_lo
     if vol is None:
         return
 
+    # DEF-113: macOS reassigns CoreAudio device IDs on every hotplug, so the
+    # pinned dev_id may point at a ghost device. _set_volume_coreaudio returns
+    # False in that case; previously we dropped the return value and logged
+    # "restored ok" anyway, leaving the system at duck-level until the next
+    # cycle reset it. Now we capture the result and fall back to system volume.
+    ok = True
+    fallback = False
     if dev_id is not None:
-        _set_volume_coreaudio(dev_id, vol)
+        ok = _set_volume_coreaudio(dev_id, vol)
+        if not ok:
+            # Pinned device is gone — restore the current default device so
+            # the user's media isn't stranded at duck-level.
+            set_system_volume_cached(vol)
+            fallback = True
+            try:
+                from heyvox.hud.surface import HUDSurface
+                HUDSurface.banner(
+                    level="warn",
+                    source="herald-ghost-dev",
+                    text="Audio restored via system volume (device gone)",
+                    ttl_secs=30,
+                )
+            except Exception:
+                pass
     else:
         set_system_volume_cached(vol)
     cfg.original_vol_file.unlink(missing_ok=True)
-    _herald_log(f"ORCH: restored audio to {vol:.2f} (dev={dev_id})", debug_log)
+    _herald_log(
+        f"ORCH: restored audio to {vol:.2f} (dev={dev_id}) ok={ok} fallback={fallback}",
+        debug_log,
+    )
 
 
 # ---------------------------------------------------------------------------
