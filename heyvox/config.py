@@ -155,6 +155,31 @@ class TTSConfig(BaseModel):
     voice_override: str | None = None        # Kokoro (English + 8 other langs)
     qwen_voice_override: str | None = None   # Qwen3 (German etc.)
 
+    # Workspace announcement — speak the workspace name before each TTS
+    # block (e.g. "Seattle: done with the fix."). The label comes from
+    # heyvox.herald.workspace_label.get_workspace_label() which resolves
+    # in this order:
+    #   1. HEYVOX_WORKSPACE_LABEL env var (ad-hoc override)
+    #   2. workspace_labels[<directory_name>] (per-workspace short name)
+    #   3. pr_title from the workspace-aware app's DB (what's shown on the
+    #      left in Conductor's sidebar)
+    #   4. raw directory_name
+    announce_workspace: bool = True
+
+    # Skip the prepend for very short speech, where doubling playback
+    # length is more annoying than the workspace cue is useful. 0 = always
+    # prepend whenever a label is available.
+    announce_min_chars: int = 0
+
+    # Per-workspace label overrides. Keyed by the workspace's
+    # ``directory_name`` (same string Herald writes into .workspace
+    # sidecars), value is the short label to speak instead of the
+    # auto-detected pr_title. Example:
+    #   workspace_labels:
+    #     vox-v2/seattle: "vox"
+    #     geminicap-billing-2026-q2: "billing"
+    workspace_labels: dict[str, str] = {}
+
     # DEPRECATED: Path to external TTS control script (Phase 1 bridge).
     # No longer used by the native TTS engine. Kept for backward compatibility.
     script_path: str | None = None
@@ -826,6 +851,20 @@ tts:
   # (skips the Qwen3 German daemon entirely — saves 1.2 GB download + 650 MB RAM).
   # Env override: HEYVOX_TTS_LANGS="en-us,de"
   languages: auto          # auto | [en-us] | [en-us, de] | [de]
+
+  # Workspace announcement — speak the workspace name before each TTS
+  # block ("Seattle: done with the fix."). Default = on; the label comes
+  # from the workspace-aware app's pr_title (Conductor sidebar) unless
+  # overridden below.
+  announce_workspace: true
+  announce_min_chars: 0    # Skip prepend when speech is shorter than this (0 = always)
+
+  # Per-workspace short labels. Keyed by directory_name (matches the
+  # workspace sidecar Herald writes); value is what gets spoken.
+  # Env override for one-off testing: HEYVOX_WORKSPACE_LABEL="my short name"
+  # workspace_labels:
+  #   vox-v2/seattle: "vox"
+  #   geminicap-billing-2026-q2: "billing"
 
   # script_path: null      # DEPRECATED: external TTS script path (Phase 1 bridge, no longer needed)
 

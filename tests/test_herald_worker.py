@@ -33,11 +33,17 @@ from heyvox.herald.worker import (
 
 @pytest.fixture
 def worker(tmp_path):
-    """Create a HeraldWorker with workspace environment cleared."""
+    """Create a HeraldWorker with workspace environment cleared.
+
+    Also stubs the cwd-based workspace detection (DEF-111) so test
+    workers don't accidentally pick up the developer's real workspace
+    when the harness runs inside a Conductor checkout.
+    """
     env = {"CONDUCTOR_WORKSPACE_NAME": "", "KOKORO_VOICE": ""}
     claim_dir = str(tmp_path / "claims")
     with patch.dict(os.environ, env, clear=False), \
-         patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir):
+         patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir), \
+         patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
         yield HeraldWorker()
 
 
@@ -311,6 +317,9 @@ class TestVerbosityFiltering:
         """Verbosity=short truncates to first sentence."""
         verbosity_file = str(tmp_path / "heyvox-verbosity")
         Path(verbosity_file).write_text("short")
+        # heyvox.herald.tts_helpers re-resolves the constant on every call,
+        # so patching the source-of-truth in heyvox.constants is enough.
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", verbosity_file)
         monkeypatch.setattr("heyvox.herald.worker.VERBOSITY_FILE", verbosity_file)
 
         # Capture the speech text after truncation by mocking _generate
@@ -331,6 +340,7 @@ class TestVerbosityFiltering:
         """Verbosity=full plays the complete text."""
         verbosity_file = str(tmp_path / "heyvox-verbosity")
         Path(verbosity_file).write_text("full")
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", verbosity_file)
         monkeypatch.setattr("heyvox.herald.worker.VERBOSITY_FILE", verbosity_file)
 
         captured = []
@@ -348,6 +358,7 @@ class TestVerbosityFiltering:
 
     def test_verbosity_missing_defaults_to_full(self, worker, monkeypatch):
         """Missing verbosity file defaults to 'full'."""
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", "/tmp/nonexistent-verbosity-12345")
         monkeypatch.setattr("heyvox.herald.worker.VERBOSITY_FILE", "/tmp/nonexistent-verbosity-12345")
 
         captured = []
@@ -408,3 +419,67 @@ class TestKokoroSocketProtocol:
             patch("heyvox.herald.worker.KOKORO_DAEMON_PID", str(pid_file)),
         ):
             assert worker._kokoro_daemon_alive() is False
+
+
+# ---------------------------------------------------------------------------
+# Workspace label prepend (DEF-111)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceLabelPrepend:
+    """Verify worker.py prepends the workspace label to spoken text."""
+
+    def _worker_with_ws(self, ws: str):
+        from heyvox.herald.worker import HeraldWorker
+        # Force the cwd-detect fallback to "" so the test only exercises
+        # the env-var path (and an empty ws actually stays empty).
+        with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws}, clear=False), \
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
+            return HeraldWorker()
+
+    def test_no_workspace_returns_speech_unchanged(self):
+        w = self._worker_with_ws("")
+        assert w._maybe_prepend_workspace_label("hello") == "hello"
+
+    def test_prepends_when_label_resolved(self):
+        w = self._worker_with_ws("seattle")
+        with patch(
+            "heyvox.herald.workspace_label.get_workspace_label",
+            return_value="Seattle",
+        ):
+            assert (
+                w._maybe_prepend_workspace_label("done with the fix")
+                == "Seattle: done with the fix"
+            )
+
+    def test_empty_label_means_no_prepend(self):
+        # announce_workspace=False or DB miss → resolver returns "" → caller
+        # leaves the speech alone.
+        w = self._worker_with_ws("seattle")
+        with patch(
+            "heyvox.herald.workspace_label.get_workspace_label",
+            return_value="",
+        ):
+            assert w._maybe_prepend_workspace_label("done") == "done"
+
+    def test_skips_when_speech_below_min_chars(self):
+        from heyvox.config import HeyvoxConfig, TTSConfig
+        w = self._worker_with_ws("seattle")
+        cfg = HeyvoxConfig(tts=TTSConfig(announce_min_chars=50))
+        with patch("heyvox.herald.worker.load_config", return_value=cfg, create=True), \
+             patch("heyvox.config.load_config", return_value=cfg), \
+             patch(
+                 "heyvox.herald.workspace_label.get_workspace_label",
+                 # If min_chars guard is honoured, resolver should not be hit.
+                 side_effect=AssertionError("resolver must not be called"),
+             ):
+            assert w._maybe_prepend_workspace_label("short") == "short"
+
+    def test_resolver_failure_does_not_break_pipeline(self):
+        w = self._worker_with_ws("seattle")
+        with patch(
+            "heyvox.herald.workspace_label.get_workspace_label",
+            side_effect=RuntimeError("DB exploded"),
+        ):
+            # Pipeline must not raise — fall back to speech unchanged.
+            assert w._maybe_prepend_workspace_label("still works") == "still works"

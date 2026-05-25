@@ -58,6 +58,57 @@ def _brand_menubar_image():
     return img
 
 
+def _brand_hud_image(size=11):
+    """Brand glyph rendered white for the dark idle HUD pill.
+
+    The menu bar image is a template (black silhouette tinted by macOS); inside
+    a NSTextAttachment the template doesn't auto-tint, so we composite a
+    pre-tinted copy via SourceIn over white.
+    """
+    from AppKit import (
+        NSImage, NSColor,
+        NSCompositingOperationSourceOver, NSCompositingOperationSourceIn,
+        NSRectFillUsingOperation,
+    )
+    from Foundation import NSSize, NSMakeRect
+
+    src = NSImage.alloc().initWithContentsOfFile_(_MENUBAR_ICON_PATH)
+    if src is None:
+        return None
+    target = NSImage.alloc().initWithSize_(NSSize(size, size))
+    target.lockFocus()
+    src.drawInRect_fromRect_operation_fraction_(
+        NSMakeRect(0, 0, size, size),
+        NSMakeRect(0, 0, src.size().width, src.size().height),
+        NSCompositingOperationSourceOver,
+        1.0,
+    )
+    NSColor.whiteColor().set()
+    NSRectFillUsingOperation(
+        NSMakeRect(0, 0, size, size), NSCompositingOperationSourceIn,
+    )
+    target.unlockFocus()
+    return target
+
+
+def _idle_default_attr_string():
+    """Brand glyph + ' HeyVox' as an NSAttributedString for the idle HUD label."""
+    from AppKit import NSTextAttachment
+    from Foundation import NSAttributedString, NSMutableAttributedString
+
+    s = NSMutableAttributedString.alloc().init()
+    icon = _brand_hud_image(11)
+    if icon is not None:
+        att = NSTextAttachment.alloc().init()
+        att.setImage_(icon)
+        s.appendAttributedString_(
+            NSAttributedString.attributedStringWithAttachment_(att),
+        )
+        s.appendAttributedString_(NSAttributedString.alloc().initWithString_(" "))
+    s.appendAttributedString_(NSAttributedString.alloc().initWithString_("HeyVox"))
+    return s
+
+
 # State → (r, g, b, a) overlay color (semi-transparent so frosted glass shows)
 STATE_COLORS = {
     "idle":       (0.35, 0.35, 0.40, 0.65),  # Subtle gray
@@ -362,24 +413,18 @@ def _apply_state(
             _held_count = sum(1 for _ in _Path(HERALD_HOLD_DIR).glob("*.wav"))
         except Exception:
             pass
-        # DEF-101: mic-warn banner \u2014 read warning text from MIC_WARN_FILE if
-        # mtime within TTL. Auto-expires (file kept for forensics, but display
-        # only while fresh). Cleared on state-change refresh once stale.
+        # HUDSurface banner \u2014 unified read for silent-state-change detectors.
+        # Picks the highest-level live record (error > warn > info); falls
+        # back to the legacy DEF-101 MIC_WARN_FILE via HUDSurface compat path.
+        # Patterns P-new (ux invisibility) + P-detector-without-action.
         _mic_warn = ""
+        _banner_level = "info"
         try:
-            from heyvox.constants import MIC_WARN_FILE, MIC_WARN_TTL_SECS
-            import time as _time
-            if os.path.exists(MIC_WARN_FILE):
-                _age = _time.time() - os.path.getmtime(MIC_WARN_FILE)
-                if _age < MIC_WARN_TTL_SECS:
-                    with open(MIC_WARN_FILE) as _wf:
-                        _mic_warn = _wf.read().strip()[:60]
-                else:
-                    # Stale: drop it so other overlay redraws don't keep checking.
-                    try:
-                        os.remove(MIC_WARN_FILE)
-                    except OSError:
-                        pass
+            from heyvox.hud.surface import HUDSurface
+            _top = HUDSurface.top_active()
+            if _top is not None:
+                _mic_warn = _top["text"][:60]
+                _banner_level = _top["level"]
         except Exception:
             pass
         # Build menu bar title with SF Symbol-style mute indicators
@@ -387,8 +432,14 @@ def _apply_state(
         if _held_count > 0:
             _bar_title += f"  \U0001f4e5{_held_count}"
         if _mic_warn:
-            # Override icon with a warning marker so it's loud
-            _bar_title = f"\u26a0\ufe0f {_mic_warn}"
+            # Override icon with a level-appropriate marker so it's loud.
+            # error \u2192 red cross, warn \u2192 warning sign, info \u2192 info icon.
+            _prefix = {
+                "error": "\u274c",       # \u274c
+                "warn": "\u26a0\ufe0f",  # \u26a0\ufe0f
+                "info": "\u2139\ufe0f",  # \u2139\ufe0f
+            }.get(_banner_level, "\u26a0\ufe0f")
+            _bar_title = f"{_prefix} {_mic_warn}"
         # When a mic warning is fresh, force text-mode title (skip SF symbol)
         # so the user sees the warning, not just an icon.
         if state_str == "idle" and not crashed and not _mic_warn:
@@ -421,7 +472,30 @@ def _apply_state(
                 _idle_suffix += f"  \U0001f4e5{_held_count}"
             if _spk_muted:
                 _idle_suffix += " \U0001f507"
+            # Mic name is hover-only (tooltip). Title carries icon + suffixes only.
+            try:
+                from heyvox.constants import ACTIVE_MIC_FILE
+                with open(ACTIVE_MIC_FILE) as _f:
+                    _active_mic_for_title = _f.read().strip()
+            except Exception:
+                _active_mic_for_title = ""
+
+            def _friendly_idle(name: str) -> str:
+                if not name:
+                    return "None"
+                n = name
+                if "macbook" in n.lower() and "microphone" in n.lower():
+                    return "Built-in"
+                for _sfx in (" Gaming Headset", " Wireless Gaming Headset", " Microphone",
+                             " USB Audio", " Audio Device"):
+                    if n.endswith(_sfx):
+                        n = n[: -len(_sfx)]
+                        break
+                return n.strip()
+
+            _friendly = _friendly_idle(_active_mic_for_title)
             btn.setTitle_(_idle_suffix)
+            btn.setToolTip_(f"Mic: {_friendly}")
         else:
             # Non-idle states or crashed: use emoji text, clear image
             status_item.button().setImage_(None)
@@ -475,10 +549,10 @@ def _apply_state(
             # Schedule revert to default label after 3 seconds
             from Foundation import NSTimer
             def _revert_label(timer):
-                idle_label.setStringValue_("\U0001f399 HeyVox")
+                idle_label.setAttributedStringValue_(_idle_default_attr_string())
             NSTimer.scheduledTimerWithTimeInterval_repeats_block_(3.0, False, _revert_label)
         elif not is_active:
-            idle_label.setStringValue_("\U0001f399 HeyVox")
+            idle_label.setAttributedStringValue_(_idle_default_attr_string())
 
     if not is_active:
         # Idle: show label, hide active elements
@@ -1059,10 +1133,22 @@ def _build_transcript_menu(handler):
     mic_sub = NSMenu.alloc().init()
     mic_sub.setAutoenablesItems_(False)
 
+    # D-13: append voice_isolation_mode suffix to each entry, reading from the
+    # active mic profile registry. Reload config fresh on each rebuild so the
+    # submenu never shows stale state after a config.yaml edit (RESEARCH Pitfall 5).
+    from heyvox.hud.menu_bar_title import vi_suffix_for_device
+    from heyvox.config import load_config
+    try:
+        _menu_config = load_config()
+    except Exception:
+        _menu_config = None
+
     for _dev_name in _input_devices:
         _is_active = _dev_name == _active_mic
+        _vi = vi_suffix_for_device(_dev_name, _menu_config) if _menu_config else ""
+        _mic_title = f"{_friendly_mic(_dev_name)}{_vi}"
         _mic_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            _friendly_mic(_dev_name), "switchMic:", "",
+            _mic_title, "switchMic:", "",
         )
         _mic_item.setTarget_(handler)
         _mic_item.setRepresentedObject_(_dev_name)
@@ -1680,7 +1766,7 @@ def main(menu_bar_only: bool = False):
     transcript_label.setHidden_(True)
     content_view.addSubview_(transcript_label)
 
-    # ---- Idle label ("🎙 HeyVox" centered in idle pill) ----
+    # ---- Idle label (brand glyph + "HeyVox" centered in idle pill) ----
     NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
     idle_label_h = 18
     idle_label_y = (PILL_H - idle_label_h) / 2
@@ -1696,7 +1782,7 @@ def main(menu_bar_only: bool = False):
     idle_label.setAlignment_(NSTextAlignmentCenter)
     idle_label.cell().setWraps_(False)
     idle_label.cell().setScrollable_(False)
-    idle_label.setStringValue_("\U0001f399 HeyVox")
+    idle_label.setAttributedStringValue_(_idle_default_attr_string())
     idle_label.setHidden_(False)
     content_view.addSubview_(idle_label)
 
@@ -1755,6 +1841,7 @@ def main(menu_bar_only: bool = False):
     # Initial state: HeyVox brand glyph (template, auto-tinted by macOS)
     status_button.setImage_(_brand_menubar_image())
     status_button.setTitle_("")
+    status_button.setToolTip_("Mic: (initializing)")
 
     MenuActionHandler = _make_menu_action_class()
     MenuActionHandler._status_item_ref = status_item
