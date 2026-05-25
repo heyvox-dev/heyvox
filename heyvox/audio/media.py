@@ -235,6 +235,23 @@ def pause_media() -> bool:
             _log(f"pause_media: paused {paused_count} browser tab(s) via Hush ({time.time()-t0:.2f}s)")
             return True
         _log("pause_media: Hush available but no browser media playing")
+        # DEF-110 / P-success-after-clear / P-detector-without-action: Hush
+        # responded (extension alive) but pausedCount=0. Most of the time
+        # this means "no browser audio playing" — silent and correct. But
+        # the cluster around DEF-105 / DEF-112 shows the same shape when
+        # the extension actually IS broken (MV3 SW suspended, race-loser
+        # socket, etc.). Surface a low-noise info banner so the user has
+        # a chance to spot a regression without grepping logs.
+        try:
+            from heyvox.hud.surface import HUDSurface
+            HUDSurface.banner(
+                level="info",
+                source="hush-noop",
+                text="Hush: no browser media paused",
+                ttl_secs=20,
+            )
+        except Exception:
+            pass
     elif not glob.glob(_HUSH_SOCK_GLOB) and not _hush_missing_banner_shown:
         _hush_missing_banner_shown = True
         _log(
