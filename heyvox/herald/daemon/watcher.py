@@ -20,7 +20,22 @@ import subprocess
 import sys
 import time
 
-# User-scoped temp dir (cannot import heyvox.constants — runs as standalone script).
+# Shared TTS helpers — single source of truth for mood / verbosity / extraction.
+# Watcher.py and worker.py both consume from this module so the two producer
+# paths cannot drift on shared logic. See DEFECT-LOG P-producer-parity and
+# the comment at the top of heyvox/herald/tts_helpers.py.
+from heyvox.herald.tts_helpers import (
+    apply_verbosity as _apply_verbosity,
+    extract_last_tts_block as extract_tts,
+    get_verbosity as _get_verbosity,
+    mood_voice as detect_mood_voice,
+)
+
+# User-scoped temp dir. _TMP is kept as a module-level constant for the
+# IPC-flag paths below — historically watcher.py avoided importing
+# heyvox.constants so the polling script could load in minimal Python
+# environments. Today the heyvox.* imports above prove the constraint is
+# moot, but we keep _TMP as-is to minimise diff churn.
 _TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
 PID_FILE = f"{_TMP}/herald-watcher.pid"
@@ -51,6 +66,8 @@ def _load_workspace_db_path():
     """Load the workspace DB path from the app profile config.
 
     Returns the expanded DB path, or empty string if no profile has workspace detection.
+    Used by detect_workspace_from_path; label resolution itself is delegated to
+    heyvox.herald.workspace_label.
     """
     try:
         from heyvox.config import load_config
@@ -75,43 +92,7 @@ def _get_workspace_db_path():
     return _cached_ws_db_path
 
 
-def get_tts_label(workspace_name):
-    """Get workspace TTS label from the workspace-aware app's DB."""
-    if not workspace_name:
-        return workspace_name
-    db_path = _get_workspace_db_path()
-    if not db_path:
-        return workspace_name
-    try:
-        # Escape single quotes to prevent SQL injection from workspace names
-        safe_name = workspace_name.replace("'", "''")
-        r = subprocess.run(
-            ["sqlite3", db_path,
-             f"SELECT COALESCE(w.pr_title, '') FROM workspaces w WHERE w.directory_name='{safe_name}'"],
-            capture_output=True, text=True, timeout=0.5)
-        if r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return workspace_name
-
-
-def extract_tts(text):
-    """Extract last <tts> block from text, only if it's at the end."""
-    matches = re.findall(r'<tts>(.*?)</tts>', text, re.DOTALL)
-    if not matches:
-        return None
-    speech = matches[-1].strip()
-    if not speech or speech == "SKIP" or len(speech) < 5:
-        return None
-    last_tts_pos = text.rfind("<tts>")
-    if last_tts_pos < len(text) * 0.5:
-        return None
-    last_close = text.rfind("</tts>")
-    remaining = text[last_close + 6:].strip() if last_close >= 0 else ""
-    if len(remaining) > 50:
-        return None
-    return speech
+# extract_tts is imported from heyvox.herald.tts_helpers (see top of file).
 
 
 def detect_workspace_from_path(jsonl_path):
@@ -145,30 +126,10 @@ def detect_workspace_from_path(jsonl_path):
     return ""
 
 
-VERBOSITY_FILE = f"{_TMP}/heyvox-verbosity"
-
-
-def _get_verbosity():
-    """Read verbosity from shared state file. Returns 'full' if absent."""
-    try:
-        with open(VERBOSITY_FILE) as f:
-            level = f.read().strip()
-        return level if level in ("full", "summary", "short", "skip") else "full"
-    except FileNotFoundError:
-        return "full"
-
-
-def _apply_verbosity(text, verbosity):
-    """Apply TTS playback filtering. Returns None to skip."""
-    if verbosity == "skip":
-        return None
-    if verbosity == "short":
-        match = re.search(r'[.!?]', text)
-        if match:
-            return text[:match.end()].strip()
-        return text[:100]
-    # "full" and "summary" (legacy) both play everything
-    return text
+# _get_verbosity and _apply_verbosity are imported from
+# heyvox.herald.tts_helpers (see top of file).
+# VERBOSITY_FILE is resolved per-call by the helper so the test fixtures
+# that monkeypatch heyvox.constants.VERBOSITY_FILE work uniformly.
 
 
 def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
@@ -194,10 +155,21 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
 
     timestamp = str(time.time_ns())
 
-    label = get_tts_label(workspace)
-    if label:
-        spoken_label = label.replace(" \u00b7 ", ", ")
-        speech = f"{spoken_label}: {speech}"
+    # DEF-111: label resolution is shared with worker.py via
+    # heyvox.herald.workspace_label so both paths produce the same prefix
+    # and honour the same config knobs (tts.announce_workspace,
+    # tts.workspace_labels, HEYVOX_WORKSPACE_LABEL, announce_min_chars).
+    try:
+        from heyvox.config import load_config
+        from heyvox.herald.workspace_label import get_workspace_label
+        _cfg = load_config()
+        _min_chars = getattr(_cfg.tts, "announce_min_chars", 0) or 0
+        if _min_chars == 0 or len(speech) >= _min_chars:
+            spoken_label = get_workspace_label(workspace, cfg=_cfg)
+            if spoken_label:
+                speech = f"{spoken_label}: {speech}"
+    except Exception as e:
+        log(f"workspace_label lookup failed (non-fatal): {e}")
 
     voice = detect_mood_voice(speech)
 
@@ -268,7 +240,10 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             pass
 
         log(f"TIMING: watcher tts={tts_end_ms - watcher_start_ms}ms, hook->enqueue={tts_end_ms - hook_epoch_ms}ms")
-        log(f"Enqueued {part - 1} part(s) in {data['duration']:.2f}s, ws={workspace}")
+        # WATCHER_FIRED — forensic tag for P-producer-parity: counts how often
+        # the polling-fallback path actually produces a TTS that the hook
+        # path didn't. Used to decide when worker.py can be the sole producer.
+        log(f"WATCHER_FIRED Enqueued {part - 1} part(s) in {data['duration']:.2f}s, ws={workspace}")
         last_tts_time = time.time()
 
         return True
@@ -287,22 +262,9 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             pass
 
 
-def detect_mood_voice(text):
-    """Match the mood detection in worker.py."""
-    t = text.lower()
-    if any(w in t for w in ["error", "fail", "broke", "crash", "warning",
-                             "careful", "danger", "critical", "urgent",
-                             "problem", "bug"]):
-        return "af_nova"
-    if any(w in t for w in ["done", "success", "passed", "complete", "fixed",
-                             "great", "perfect", "working", "deployed",
-                             "shipped", "merged"]):
-        return "af_heart"
-    if any(w in t for w in ["should we", "want me to", "would you",
-                             "what do you", "how about", "shall i",
-                             "let me know"]):
-        return "af_sky"
-    return "af_sarah"
+# detect_mood_voice is imported from heyvox.herald.tts_helpers (see top of file).
+# That import re-exposes the function under the same name so existing
+# callers don't change.
 
 
 def find_active_transcripts():

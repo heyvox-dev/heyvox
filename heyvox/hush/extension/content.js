@@ -107,18 +107,41 @@
   function pauseAllMedia() {
     const elements = getAllMediaElements();
     let count = 0;
+    const skipReasons = [];
 
     for (const el of elements) {
-      if (!el.paused && !el.ended && el.readyState >= 2) {
-        try {
-          el.pause();
-          pausedByHush.add(el);
-          count += 1;
-        } catch (err) {
-          console.warn('[Hush] Could not pause element:', err);
-        }
+      const reason = el.paused
+        ? 'already-paused'
+        : el.ended
+          ? 'ended'
+          : el.readyState < 2
+            ? `readyState=${el.readyState}`
+            : null;
+      if (reason) {
+        skipReasons.push({
+          tag: el.tagName,
+          src: (el.currentSrc || el.src || '').slice(0, 80),
+          reason,
+        });
+        continue;
+      }
+      try {
+        el.pause();
+        pausedByHush.add(el);
+        count += 1;
+      } catch (err) {
+        console.warn('[Hush] Could not pause element:', err);
+        skipReasons.push({ tag: el.tagName, reason: `error:${err?.message}` });
       }
     }
+
+    // DEF-105 follow-up diagnostic: tells us why pause returned 0 — the
+    // background script falls back to tab-mute when count === 0, which on
+    // YouTube means the video never actually pauses, just goes silent.
+    console.log(
+      `[Hush] pauseAllMedia: total=${elements.length} paused=${count} skipped=${skipReasons.length}`,
+      skipReasons,
+    );
 
     return count;
   }
@@ -156,51 +179,90 @@
    * @param {number} [fadeInMs=0]   - fade-in duration in milliseconds (0 = instant)
    * @returns {number} Number of elements resumed
    */
-  function resumeAllMedia(rewindSecs = 0, fadeInMs = 0) {
-    let count = 0;
+  async function resumeAllMedia(rewindSecs = 0, fadeInMs = 0) {
+    // DEF-112: returns a diagnostic object so the upstream can tell whether
+    // play() actually resolved vs only being called. Truthful status >
+    // bookkeeping-success.
+    const elements = [...pausedByHush];
+    const promises = [];
+    const errors = [];
+    const setStates = []; // pre-play state snapshot per element
+    let attempted = 0;
+    let skippedAlreadyPlaying = 0;
 
-    for (const el of pausedByHush) {
-      if (el.paused) {
-        try {
-          // Rewind
+    for (const el of elements) {
+      if (!el.paused) {
+        skippedAlreadyPlaying += 1;
+        continue;
+      }
+
+      attempted += 1;
+      const originalVolume = el.volume;
+      const snap = {
+        tag: el.tagName,
+        currentTime: el.currentTime,
+        duration: el.duration,
+        readyState: el.readyState,
+        muted: el.muted,
+        src: (el.currentSrc || el.src || '').slice(0, 80),
+      };
+      setStates.push(snap);
+
+      try {
+        if (fadeInMs > 0) el.volume = 0.1;
+
+        // Call play() first — seeking before play() races with MSE players
+        // (YouTube) and causes AbortError. Defer seek + fade to .then().
+        const playPromise = el.play();
+        if (playPromise instanceof Promise) {
+          promises.push(
+            playPromise
+              .then(() => {
+                if (rewindSecs > 0 && isFinite(el.duration)) {
+                  el.currentTime = Math.max(0, el.currentTime - rewindSecs);
+                }
+                if (fadeInMs > 0) fadeVolume(el, 0.1, originalVolume, fadeInMs);
+                return { ok: true };
+              })
+              .catch((err) => {
+                el.volume = originalVolume;
+                const msg = `${err?.name || 'Error'}: ${err?.message || String(err)}`;
+                console.warn('[Hush] play() rejected:', msg, snap);
+                errors.push(msg);
+                return { ok: false, error: msg };
+              })
+          );
+        } else {
+          // Legacy synchronous play()
           if (rewindSecs > 0 && isFinite(el.duration)) {
             el.currentTime = Math.max(0, el.currentTime - rewindSecs);
           }
-
-          // Store original volume for fade-in
-          const originalVolume = el.volume;
-
-          // Start at low volume if fading
-          if (fadeInMs > 0) {
-            el.volume = 0.1;
-          }
-
-          const playPromise = el.play();
-          if (playPromise instanceof Promise) {
-            playPromise
-              .then(() => {
-                if (fadeInMs > 0) {
-                  fadeVolume(el, 0.1, originalVolume, fadeInMs);
-                }
-              })
-              .catch((err) => {
-                // Autoplay policy may block play — log but don't crash
-                console.warn('[Hush] play() rejected:', err);
-                el.volume = originalVolume; // restore on failure
-              });
-          } else if (fadeInMs > 0) {
-            fadeVolume(el, 0.1, originalVolume, fadeInMs);
-          }
-
-          count += 1;
-        } catch (err) {
-          console.warn('[Hush] Could not resume element:', err);
+          if (fadeInMs > 0) fadeVolume(el, 0.1, originalVolume, fadeInMs);
+          promises.push(Promise.resolve({ ok: true }));
         }
+      } catch (err) {
+        const msg = `${err?.name || 'Error'}: ${err?.message || String(err)}`;
+        console.warn('[Hush] Could not resume element:', msg);
+        errors.push(msg);
+        promises.push(Promise.resolve({ ok: false, error: msg }));
       }
     }
 
     pausedByHush.clear();
-    return count;
+
+    const results = await Promise.all(promises);
+    const played = results.filter((r) => r.ok).length;
+    const failed = results.length - played;
+
+    return {
+      tracked: elements.length,
+      attempted,
+      played,
+      failed,
+      skippedAlreadyPlaying,
+      errors,
+      snapshot: setStates,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -294,9 +356,8 @@
       case 'resume-media': {
         const rewind = message.rewindSecs || 0;
         const fade = message.fadeInMs || 0;
-        const resumed = resumeAllMedia(rewind, fade);
-        sendResponse(resumed);
-        return false;
+        resumeAllMedia(rewind, fade).then((diag) => sendResponse(diag));
+        return true; // async response
       }
 
       case 'type-text': {

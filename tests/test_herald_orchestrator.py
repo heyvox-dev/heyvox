@@ -277,6 +277,105 @@ class TestAudioDucking:
             _restore_audio(None, cfg, cfg.debug_log)
         mock_set.assert_not_called()
 
+    def test_restore_pre_check_catches_ghost_device(
+        self, tmp_path, monkeypatch
+    ):
+        """DEF-113 + DeviceHandle: CoreAudioHandle.revalidate() returns False
+        for a stale dev_id, so _set_volume_coreaudio is never called and the
+        orchestrator falls straight back to set_system_volume_cached. A warn
+        banner surfaces.
+        """
+        monkeypatch.setattr(
+            "heyvox.constants.HUD_BANNERS_FILE",
+            str(tmp_path / "heyvox-hud-banners.json"),
+        )
+
+        cfg = _cfg(tmp_path, duck_enabled=True)
+        cfg.original_vol_file.write_text("973:0.65")
+
+        with patch(
+            "heyvox.herald.coreaudio._is_coreaudio_device_alive", return_value=False
+        ), patch(
+            "heyvox.herald.coreaudio._set_volume_coreaudio", return_value=True
+        ) as mock_set_dev, patch(
+            "heyvox.herald.coreaudio.set_system_volume_cached"
+        ) as mock_set_sys:
+            _restore_audio(0.65, cfg, cfg.debug_log)
+
+        # Pre-check tripped — Set was never attempted on the ghost.
+        mock_set_dev.assert_not_called()
+        mock_set_sys.assert_called_once_with(0.65)
+        assert not cfg.original_vol_file.exists()
+
+        from heyvox.hud.surface import HUDSurface
+        ghost_records = [
+            r for r in HUDSurface.read_active(include_legacy=False)
+            if r["source"] == "herald-ghost-dev"
+        ]
+        assert len(ghost_records) == 1
+        assert ghost_records[0]["level"] == "warn"
+
+    def test_restore_post_check_catches_race_after_pre_check_passed(
+        self, tmp_path, monkeypatch
+    ):
+        """Rare race: device survives the HasProperty probe but dies before
+        the Set call. _set_volume_coreaudio returns False → same fallback.
+        """
+        monkeypatch.setattr(
+            "heyvox.constants.HUD_BANNERS_FILE",
+            str(tmp_path / "heyvox-hud-banners.json"),
+        )
+
+        cfg = _cfg(tmp_path, duck_enabled=True)
+        cfg.original_vol_file.write_text("973:0.65")
+
+        with patch(
+            "heyvox.herald.coreaudio._is_coreaudio_device_alive", return_value=True
+        ), patch(
+            "heyvox.herald.coreaudio._set_volume_coreaudio", return_value=False
+        ) as mock_set_dev, patch(
+            "heyvox.herald.coreaudio.set_system_volume_cached"
+        ) as mock_set_sys:
+            _restore_audio(0.65, cfg, cfg.debug_log)
+
+        mock_set_dev.assert_called_once_with(973, 0.65)
+        mock_set_sys.assert_called_once_with(0.65)
+
+        from heyvox.hud.surface import HUDSurface
+        ghost_records = [
+            r for r in HUDSurface.read_active(include_legacy=False)
+            if r["source"] == "herald-ghost-dev"
+        ]
+        assert len(ghost_records) == 1
+
+    def test_restore_ok_path_does_not_fall_back(self, tmp_path, monkeypatch):
+        """When both the pre-check and the Set call succeed, no fallback,
+        no banner.
+        """
+        monkeypatch.setattr(
+            "heyvox.constants.HUD_BANNERS_FILE",
+            str(tmp_path / "heyvox-hud-banners.json"),
+        )
+
+        cfg = _cfg(tmp_path, duck_enabled=True)
+        cfg.original_vol_file.write_text("123:0.65")
+
+        with patch(
+            "heyvox.herald.coreaudio._is_coreaudio_device_alive", return_value=True
+        ), patch(
+            "heyvox.herald.coreaudio._set_volume_coreaudio", return_value=True
+        ) as mock_set_dev, patch(
+            "heyvox.herald.coreaudio.set_system_volume_cached"
+        ) as mock_set_sys:
+            _restore_audio(0.65, cfg, cfg.debug_log)
+
+        mock_set_dev.assert_called_once_with(123, 0.65)
+        mock_set_sys.assert_not_called()
+
+        from heyvox.hud.surface import HUDSurface
+        live = HUDSurface.read_active(include_legacy=False)
+        assert all(r["source"] != "herald-ghost-dev" for r in live)
+
 
 # ---------------------------------------------------------------------------
 # Verbosity / skip tests

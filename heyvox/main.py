@@ -454,9 +454,16 @@ def _setup(config: HeyvoxConfig):
     if config.push_to_talk.enabled:
         from heyvox.input.ptt import start_ptt_listener
 
+        def _stop_wake_via_ptt():
+            # DEF-116: mark the recording as PTT-interrupted so the end-trim
+            # is skipped (no stop-wake-word at the end to remove).
+            ctx.stopped_via_ptt_mid_recording = True
+            recording.stop()
+
         ptt_callbacks = {
             "on_start": lambda: recording.start(ptt=True),
             "on_stop": lambda: recording.stop(),
+            "on_stop_wake_via_ptt": _stop_wake_via_ptt,
             "on_cancel_transcription": lambda: ctx.cancel_transcription.set(),
             "on_cancel_recording": lambda: recording.cancel(),
             "on_cancel_tts": lambda: _stop_tts_from_escape(hud_send),

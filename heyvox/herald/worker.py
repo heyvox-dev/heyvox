@@ -45,6 +45,15 @@ from heyvox.constants import (
     HERALD_GENERATING_WAV_PREFIX,
 )
 
+# Shared TTS helpers — single source of truth for mood detection + verbosity.
+# Both heyvox.herald.worker (hook path) and heyvox.herald.daemon.watcher
+# (polling path) consume from the same module. See DEFECT-LOG P-producer-parity.
+from heyvox.herald.tts_helpers import (
+    MOOD_VOICES,
+    detect_mood,
+    get_verbosity as _shared_get_verbosity,
+)
+
 log = logging.getLogger(__name__)
 
 # File-based log handler — matches herald_log() in config.sh
@@ -60,12 +69,10 @@ _herald_logger.setLevel(logging.INFO)
 # Voice constants
 # ---------------------------------------------------------------------------
 
-MOOD_VOICES: dict[str, str] = {
-    "neutral": "af_sarah",
-    "cheerful": "af_heart",
-    "alert": "af_nova",
-    "thoughtful": "af_sky",
-}
+# MOOD_VOICES lives in heyvox.herald.tts_helpers (imported at the top of this
+# file) so worker.py and watcher.py share one source of truth. Re-exported
+# here as a module attribute so existing callers (and tests) that did
+# `from heyvox.herald.worker import MOOD_VOICES` keep working.
 
 AGENT_VOICE_POOL = [
     "af_alloy", "af_bella", "af_jessica", "af_kore", "af_nicole",
@@ -163,32 +170,10 @@ def normalize_wav_in_place(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def detect_mood(text: str) -> str:
-    """Detect the emotional mood of a TTS text fragment.
-
-    Returns one of: 'alert', 'cheerful', 'thoughtful', 'neutral'.
-    """
-    t = text.lower()
-    alert_words = [
-        "error", "fail", "broke", "crash", "warning", "careful",
-        "danger", "critical", "urgent", "problem", "bug",
-    ]
-    cheerful_words = [
-        "done", "success", "passed", "complete", "fixed", "great",
-        "perfect", "working", "deployed", "shipped", "merged",
-        "awesome", "congrats", "excellent",
-    ]
-    thoughtful_words = [
-        "should we", "want me to", "would you", "what do you",
-        "how about", "shall i", "let me know", "hmm", "consider", "interesting",
-    ]
-    if any(w in t for w in alert_words):
-        return "alert"
-    if any(w in t for w in cheerful_words):
-        return "cheerful"
-    if any(w in t for w in thoughtful_words):
-        return "thoughtful"
-    return "neutral"
+# detect_mood now lives in heyvox.herald.tts_helpers and is imported at the
+# top of this file. The function is re-exported here as a module attribute
+# so existing tests (`from heyvox.herald.worker import detect_mood`) keep
+# working without changes.
 
 
 def detect_language(text: str) -> tuple[str, str | None]:
@@ -317,15 +302,34 @@ class HeraldWorker:
     """
 
     def __init__(self) -> None:
-        # Workspace name from environment (D-04: only env var, no DB query).
-        # HEYVOX_WORKSPACE is the generic env var. CONDUCTOR_WORKSPACE_NAME
-        # is a deprecated fallback kept while Conductor hook environments
-        # migrate; remove once heyvox setup ships HEYVOX_WORKSPACE in all
-        # generated launchd/hook configs.
-        self._workspace: str = (
+        # Workspace name resolution order:
+        #   1. HEYVOX_WORKSPACE env (generic, what heyvox setup will ship)
+        #   2. CONDUCTOR_WORKSPACE_NAME (deprecated legacy fallback)
+        #   3. DEF-111: cwd-based detection via the workspace DB —
+        #      Conductor does NOT export workspace env vars into the
+        #      Claude Code hook environment, so the hook-spawned worker
+        #      has to derive the workspace from the current directory.
+        #      Without this fallback, the workspace announcement and the
+        #      .workspace sidecar both silently no-op for hook-driven TTS.
+        env_ws = (
             os.environ.get("HEYVOX_WORKSPACE", "")
             or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
         )
+        if env_ws:
+            self._workspace: str = env_ws
+            log.info("workspace resolved via env: %r (cwd=%r)", env_ws, os.getcwd())
+        else:
+            try:
+                from heyvox.herald.workspace_label import detect_workspace_from_cwd
+                self._workspace = detect_workspace_from_cwd()
+                log.info(
+                    "workspace cwd-detect: cwd=%r → %r",
+                    os.getcwd(),
+                    self._workspace,
+                )
+            except Exception as e:
+                log.warning("workspace cwd-detect raised (%s) — sidecar disabled (cwd=%r)", e, os.getcwd())
+                self._workspace = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -396,11 +400,22 @@ class HeraldWorker:
 
         voice = self._select_voice(mood, lang, lang_voice)
 
+        # DEF-111: prepend the workspace label so the user hears
+        # "Seattle: done." instead of just "done." — the watcher fallback
+        # path always did this; the hook path (which usually wins the
+        # race) silently dropped it. Done AFTER mood/lang detection so a
+        # workspace called "fix-crash" doesn't push every message into
+        # alert mood, and AFTER the dedup claim so worker+watcher agree
+        # on the hash.
+        speech = self._maybe_prepend_workspace_label(speech)
+
         # DEF-078: Register the finalized speech text with the cross-process
         # echo buffer BEFORE generation. The heyvox daemon's STT filter reads
         # the shared journal to strip speaker-to-mic bleed from transcriptions.
         # This worker runs in its own short-lived process spawned by a Claude
         # Code hook, so the in-process buffer wouldn't reach the STT filter.
+        # Register the LABEL-INCLUDED text so the prepended label doesn't leak
+        # back into STT as a phantom transcription.
         try:
             from heyvox.audio.echo import register_tts_text
             register_tts_text(speech)
@@ -494,6 +509,43 @@ class HeraldWorker:
             log.debug("Could not read voice_override from config: %s", exc)
 
         return voice
+
+    # ------------------------------------------------------------------
+    # Private: workspace announcement
+    # ------------------------------------------------------------------
+
+    def _maybe_prepend_workspace_label(self, speech: str) -> str:
+        """Return ``speech`` with the workspace label prepended, when applicable.
+
+        DEF-111: mirrors the watcher.py behaviour. Returns the input unchanged
+        when there is no workspace, announcing is disabled, the resolver
+        can't produce a label, or the speech is shorter than
+        ``tts.announce_min_chars``.
+        """
+        if not self._workspace:
+            log.info("workspace_label: skipped (no _workspace)")
+            return speech
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+        except Exception as e:
+            log.warning("workspace_label: config load failed (%s)", e)
+            return speech
+        min_chars = getattr(cfg.tts, "announce_min_chars", 0) or 0
+        if min_chars and len(speech) < min_chars:
+            log.info("workspace_label: skipped (len=%d < %d)", len(speech), min_chars)
+            return speech
+        try:
+            from heyvox.herald.workspace_label import get_workspace_label
+            label = get_workspace_label(self._workspace, cfg=cfg)
+        except Exception as e:
+            log.warning("workspace_label: lookup failed (%s)", e)
+            return speech
+        if not label:
+            log.info("workspace_label: empty for ws=%r (announce disabled?)", self._workspace)
+            return speech
+        log.info("workspace_label: prepending %r to ws=%r", label, self._workspace)
+        return f"{label}: {speech}"
 
     # ------------------------------------------------------------------
     # Private: generation dispatch
@@ -1150,11 +1202,12 @@ class HeraldWorker:
     # ------------------------------------------------------------------
 
     def _read_verbosity(self) -> str:
-        """Read verbosity level from shared state file."""
-        try:
-            return Path(VERBOSITY_FILE).read_text().strip() or "full"
-        except FileNotFoundError:
-            return "full"
+        """Read verbosity level from shared state file (thin wrapper).
+
+        Delegates to heyvox.herald.tts_helpers.get_verbosity so worker.py
+        and watcher.py read identical values with identical fallback rules.
+        """
+        return _shared_get_verbosity()
 
     def _read_mode(self) -> str:
         """Read herald mode from shared state file."""

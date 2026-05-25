@@ -41,6 +41,16 @@
   - [x] 13-03-PLAN.md — Integration: wire profiles into main loop, echo suppression gate, auto-calibration
   - [x] 13-04-PLAN.md — CLI: add heyvox calibrate command
 - [ ] Phase 14: Distribution & UX Polish — PyPI, Homebrew, HUD mic display
+  **Goal:** HeyVox installs cleanly via `pip install heyvox` or `brew install heyvox-dev/heyvox/heyvox` on macOS Apple Silicon, ships with a bundled general-purpose "Hey Vox" wake-word model, surfaces the active microphone in the menu bar, and exposes the configured mic-isolation mode in the HUD menu
+  **Requirements:** [SPEC-R1, SPEC-R2, SPEC-R3, SPEC-R4, SPEC-R5, SPEC-R6]
+  **Plans:** 6 plans
+  Plans:
+  - [ ] 14-01-PLAN.md — PyPI publish workflow (OIDC) + pyproject Beta classifier + importlib.metadata version sync [SPEC-R1, R2]
+  - [ ] 14-02-PLAN.md — HUD menu-bar mic display (truncated title + tooltip) + voice-isolation submenu suffix [SPEC-R4, R5]
+  - [ ] 14-03-PLAN.md — Wake-word training run + ship-gate eval script + GH Releases asset upload [SPEC-R6]
+  - [ ] 14-04-PLAN.md — Setup wizard model download + sha256 validation + --redownload-wakeword + co-default lock [SPEC-R6]
+  - [ ] 14-05-PLAN.md — Homebrew tap repo + Formula/heyvox.rb + release runbook docs [SPEC-R3]
+  - [ ] 14-06-PLAN.md — Training pipeline docs (docs/wakeword-training.md) + README install polish [SPEC-R2, R6]
 - [x] Phase 15: Paste Target Lock (2026-04-24) — record-start TargetLock + three-tier resolve ladder + fail-closed policy
   **Goal:** Transcribed speech lands in the exact text field that held the cursor at recording start, even after app/workspace/session change; unreachable target → fail-closed (clipboard + history + toast)
   **Requirements:** [R1, R2, R3, R4, R5, R6, R7, R8]
@@ -73,5 +83,5 @@ Phases TBD — define via `/gsd:new-milestone`
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
 | 12. Paste Injection Reliability | v1.2 | 1/3 | Complete    | 2026-04-13 |
 | 13. Audio Reliability | v1.2 | 3/4 | Complete    | 2026-04-13 |
-| 14. Distribution & UX Polish | v1.2 | 0/? | Planned | — |
+| 14. Distribution & UX Polish | v1.2 | 0/6 | Planned | — |
 | 15. Paste Target Lock | v1.2 | 7/7 | Complete | 2026-04-24 |
