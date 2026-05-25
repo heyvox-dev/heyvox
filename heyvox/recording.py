@@ -693,11 +693,13 @@ class RecordingStateMachine:
                 self._log(
                     f"Recording too quiet ({raw_rms_db:.1f} dBFS < {min_dbfs} dBFS), skipping STT"
                 )
-                # DEF-101: surface silent-skip to user via mic-warn file.
-                # HUD overlay reads this on every menu bar refresh and prepends a
-                # ⚠ banner to the bar title until auto-expiry (MIC_WARN_TTL_SECS).
+                # DEF-101: surface silent-skip to user via HUDSurface banner.
+                # HUD overlay reads HUDSurface.top_active() and prepends a
+                # level-appropriate marker to the bar title until TTL expires.
+                # Patterns P-new + P-detector-without-action.
                 try:
-                    from heyvox.constants import MIC_WARN_FILE
+                    from heyvox.hud.surface import HUDSurface
+                    from heyvox.constants import MIC_WARN_TTL_SECS
                     _mic_name = ""
                     try:
                         from heyvox.constants import ACTIVE_MIC_FILE
@@ -708,9 +710,13 @@ class RecordingStateMachine:
                         f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
                         + (f" — {_mic_name}" if _mic_name else "")
                     )
-                    with open(MIC_WARN_FILE, "w") as _f:
-                        _f.write(_warn)
-                except OSError:
+                    HUDSurface.banner(
+                        level="warn",
+                        source="recording-quiet",
+                        text=_warn,
+                        ttl_secs=MIC_WARN_TTL_SECS,
+                    )
+                except Exception:
                     pass
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
@@ -1128,6 +1134,19 @@ class RecordingStateMachine:
                         f"[PASTE] FAIL_CLOSED reason={outcome.reason.value} "
                         f"message={outcome.message}"
                     )
+                    # Persistent menu-bar surface (toast is transient). The
+                    # reason answers "why did paste fail?" without grepping
+                    # the log. P-detector-without-action.
+                    try:
+                        from heyvox.hud.surface import HUDSurface
+                        HUDSurface.banner(
+                            level="error",
+                            source="paste-fail",
+                            text=f"Paste failed → clipboard ({outcome.reason.value})",
+                            ttl_secs=30,
+                        )
+                    except Exception:
+                        pass
 
             # --- 15-06: post-paste verification (SPEC R7) ---
             # W12 — defensive guard: outcome may be None when recording_target
