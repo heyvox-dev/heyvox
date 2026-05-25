@@ -577,18 +577,30 @@ def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_lo
     if vol is None:
         return
 
-    # DEF-113: macOS reassigns CoreAudio device IDs on every hotplug, so the
-    # pinned dev_id may point at a ghost device. _set_volume_coreaudio returns
-    # False in that case; previously we dropped the return value and logged
-    # "restored ok" anyway, leaving the system at duck-level until the next
-    # cycle reset it. Now we capture the result and fall back to system volume.
+    # DEF-113 / P-hotplug-cache: macOS reassigns CoreAudio device IDs on every
+    # hotplug, so the pinned dev_id may point at a ghost device. Two-layer
+    # defence:
+    #   1. CoreAudioHandle.revalidate() — cheap pre-write probe via
+    #      AudioObjectHasProperty. Catches the common case where the device
+    #      went away while the sidecar lived (seconds).
+    #   2. _set_volume_coreaudio() return value — backstop for the rare race
+    #      where the device survives the probe but dies before the Set call.
+    # Either failure path emits the same warn banner and falls back to
+    # set_system_volume_cached() so the user's media isn't stranded at
+    # duck-level.
+    from heyvox.audio.device_handle import CoreAudioHandle
     ok = True
     fallback = False
+    pre_check = "n/a"
     if dev_id is not None:
-        ok = _set_volume_coreaudio(dev_id, vol)
+        handle = CoreAudioHandle(dev_id=dev_id)
+        if handle.revalidate():
+            pre_check = "alive"
+            ok = _set_volume_coreaudio(handle.id, vol)
+        else:
+            pre_check = "ghost"
+            ok = False
         if not ok:
-            # Pinned device is gone — restore the current default device so
-            # the user's media isn't stranded at duck-level.
             set_system_volume_cached(vol)
             fallback = True
             try:
@@ -605,7 +617,8 @@ def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_lo
         set_system_volume_cached(vol)
     cfg.original_vol_file.unlink(missing_ok=True)
     _herald_log(
-        f"ORCH: restored audio to {vol:.2f} (dev={dev_id}) ok={ok} fallback={fallback}",
+        f"ORCH: restored audio to {vol:.2f} (dev={dev_id}) "
+        f"pre_check={pre_check} ok={ok} fallback={fallback}",
         debug_log,
     )
 
