@@ -237,6 +237,34 @@ class DeviceManager:
         time.sleep(0.5)
 
         self.pa = pyaudio.PyAudio()
+
+        # DEF-104 / P-hotplug-cache: PyAudio's HAL device cache is process-
+        # wide, so a freshly-recreated PyAudio() can still see a stale list
+        # after a USB hotplug. PortAudioHandle.revalidate() checks whether
+        # the previously-known device is still reachable under the *current*
+        # PA enumeration (possibly at a shifted index). Pure diagnostic for
+        # now — find_best_mic below still chooses the new mic — but the
+        # log line surfaces silent HAL cache staleness for forensics.
+        try:
+            from heyvox.audio.device_handle import PortAudioHandle
+            if _prev_dev_name:
+                _diag_handle = PortAudioHandle(
+                    pa=self.pa, idx=self.dev_index, expected_name=_prev_dev_name,
+                )
+                if _diag_handle.revalidate():
+                    if _diag_handle.idx != self.dev_index:
+                        self._log(
+                            f"[reinit] PA index drift for {_prev_dev_name!r}: "
+                            f"{self.dev_index} → {_diag_handle.idx}"
+                        )
+                else:
+                    self._log(
+                        f"[reinit] PA cache: {_prev_dev_name!r} not present "
+                        f"after reinit (HAL cache stale, hotplug, or device gone)"
+                    )
+        except Exception as e:
+            self._log(f"[reinit] PortAudioHandle diag failed: {e}")
+
         dev_index = find_best_mic(
             self.pa,
             mic_priority=mic_priority,
