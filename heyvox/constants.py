@@ -132,12 +132,21 @@ HUD_SOCKET_PATH = f"{_TMP}/heyvox-hud.sock"
 # Written/removed by HUD menu toggle or CLI.
 MIC_MUTE_FLAG = f"{_TMP}/heyvox-mic-mute"
 
-# Mic warning file (DEF-101) — written by recording.py when energy gate
-# rejects audio as too quiet. HUD overlay reads this on every menu bar
+# Mic warning file (DEF-101, legacy) — written by recording.py when energy
+# gate rejects audio as too quiet. HUD overlay reads this on every menu bar
 # refresh and surfaces the warning until auto-expiry.
 # Format: single line plain text. mtime drives expiry.
+#
+# Superseded by HUD_BANNERS_FILE (see below). Retained for backwards-compat:
+# heyvox/hud/surface.py reads this file and synthesises a banner record so
+# existing direct writers keep working until they migrate to HUDSurface.banner.
 MIC_WARN_FILE = f"{_TMP}/heyvox-mic-warn"
 MIC_WARN_TTL_SECS = 60
+
+# HUD banner store — unified surface for silent-state-change detectors.
+# JSON-array file holding banner records keyed by ``source``. See
+# heyvox/hud/surface.py::HUDSurface for the API (banner/clear/read_active).
+HUD_BANNERS_FILE = f"{_TMP}/heyvox-hud-banners.json"
 
 # Active mic name file — written by main.py on startup and device switch.
 # Read by HUD overlay to display the current mic in the menu bar.
@@ -273,6 +282,7 @@ def cleanup_ipc_files(herald_too: bool = True):
                  HEYVOX_HEARTBEAT_FILE, HEYVOX_STATE_FILE,
                  HUD_POSITION_FILE, TTS_STYLE_FILE,
                  TTS_ECHO_JOURNAL,
+                 HUD_BANNERS_FILE,
                  HEYVOX_MEDIA_PAUSED_REC):
         try:
             os.unlink(path)
