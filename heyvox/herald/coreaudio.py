@@ -164,6 +164,36 @@ def _get_default_output_device() -> int | None:
     return int(device_id.value)
 
 
+def _is_coreaudio_device_alive(device_id: int) -> bool:
+    """Return True if ``device_id`` still references a live CoreAudio device.
+
+    macOS reassigns CoreAudio device IDs on every hotplug, so a cached
+    ``device_id`` can silently turn into a ghost. ``AudioObjectHasProperty``
+    against a known device property (``kAudioDevicePropertyMute``) is the
+    cheapest "is this object real" probe — it costs a single CFRefCount
+    operation in the HAL and does not require allocating a property-data
+    buffer.
+
+    Returns False if CoreAudio isn't loaded or the object has no
+    ``kAudioDevicePropertyMute`` property in the output scope — which is the
+    same signal we'd get for a ghost ID (``kAudioHardwareBadObjectError``).
+
+    Used by ``heyvox/audio/device_handle.py`` (DEF-113 pre-write validation).
+    """
+    ca = _load_coreaudio()
+    if ca is None:
+        return False
+    try:
+        addr = AudioObjectPropertyAddress(
+            kAudioDevicePropertyMute,
+            kAudioObjectPropertyScopeOutput,
+            0,
+        )
+        return bool(ca.AudioObjectHasProperty(int(device_id), ctypes.byref(addr)))
+    except Exception:
+        return False
+
+
 def _get_volume_coreaudio(device_id: int) -> float | None:
     """Read master output volume scalar [0.0, 1.0] via CoreAudio.
 
