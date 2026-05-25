@@ -45,6 +45,15 @@ from heyvox.constants import (
     HERALD_GENERATING_WAV_PREFIX,
 )
 
+# Shared TTS helpers — single source of truth for mood detection + verbosity.
+# Both heyvox.herald.worker (hook path) and heyvox.herald.daemon.watcher
+# (polling path) consume from the same module. See DEFECT-LOG P-producer-parity.
+from heyvox.herald.tts_helpers import (
+    MOOD_VOICES,
+    detect_mood,
+    get_verbosity as _shared_get_verbosity,
+)
+
 log = logging.getLogger(__name__)
 
 # File-based log handler — matches herald_log() in config.sh
@@ -60,12 +69,10 @@ _herald_logger.setLevel(logging.INFO)
 # Voice constants
 # ---------------------------------------------------------------------------
 
-MOOD_VOICES: dict[str, str] = {
-    "neutral": "af_sarah",
-    "cheerful": "af_heart",
-    "alert": "af_nova",
-    "thoughtful": "af_sky",
-}
+# MOOD_VOICES lives in heyvox.herald.tts_helpers (imported at the top of this
+# file) so worker.py and watcher.py share one source of truth. Re-exported
+# here as a module attribute so existing callers (and tests) that did
+# `from heyvox.herald.worker import MOOD_VOICES` keep working.
 
 AGENT_VOICE_POOL = [
     "af_alloy", "af_bella", "af_jessica", "af_kore", "af_nicole",
@@ -163,32 +170,10 @@ def normalize_wav_in_place(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def detect_mood(text: str) -> str:
-    """Detect the emotional mood of a TTS text fragment.
-
-    Returns one of: 'alert', 'cheerful', 'thoughtful', 'neutral'.
-    """
-    t = text.lower()
-    alert_words = [
-        "error", "fail", "broke", "crash", "warning", "careful",
-        "danger", "critical", "urgent", "problem", "bug",
-    ]
-    cheerful_words = [
-        "done", "success", "passed", "complete", "fixed", "great",
-        "perfect", "working", "deployed", "shipped", "merged",
-        "awesome", "congrats", "excellent",
-    ]
-    thoughtful_words = [
-        "should we", "want me to", "would you", "what do you",
-        "how about", "shall i", "let me know", "hmm", "consider", "interesting",
-    ]
-    if any(w in t for w in alert_words):
-        return "alert"
-    if any(w in t for w in cheerful_words):
-        return "cheerful"
-    if any(w in t for w in thoughtful_words):
-        return "thoughtful"
-    return "neutral"
+# detect_mood now lives in heyvox.herald.tts_helpers and is imported at the
+# top of this file. The function is re-exported here as a module attribute
+# so existing tests (`from heyvox.herald.worker import detect_mood`) keep
+# working without changes.
 
 
 def detect_language(text: str) -> tuple[str, str | None]:
@@ -1217,11 +1202,12 @@ class HeraldWorker:
     # ------------------------------------------------------------------
 
     def _read_verbosity(self) -> str:
-        """Read verbosity level from shared state file."""
-        try:
-            return Path(VERBOSITY_FILE).read_text().strip() or "full"
-        except FileNotFoundError:
-            return "full"
+        """Read verbosity level from shared state file (thin wrapper).
+
+        Delegates to heyvox.herald.tts_helpers.get_verbosity so worker.py
+        and watcher.py read identical values with identical fallback rules.
+        """
+        return _shared_get_verbosity()
 
     def _read_mode(self) -> str:
         """Read herald mode from shared state file."""

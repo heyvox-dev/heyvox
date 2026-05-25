@@ -180,3 +180,55 @@ class TestConstants:
 
     def test_default_voice_matches_neutral(self):
         assert DEFAULT_VOICE == MOOD_VOICES["neutral"]
+
+
+# ---------------------------------------------------------------------------
+# Drift guard: helpers must remain the only source of truth
+# ---------------------------------------------------------------------------
+
+
+class TestNoDuplicateHelperDefs:
+    """If a producer reintroduces a local copy of detect_mood / verbosity /
+    extract helpers, this guard fails. The P-producer-parity bug is exactly
+    the case where the comment "must match worker.py" failed to enforce
+    drift — only a test does.
+    """
+
+    @pytest.mark.parametrize(
+        "module_path",
+        [
+            "heyvox/herald/worker.py",
+            "heyvox/herald/daemon/watcher.py",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "forbidden_def",
+        [
+            "def detect_mood_voice(",
+            "def _apply_verbosity(",
+            "def _get_verbosity(",
+        ],
+    )
+    def test_producer_does_not_redefine_helper(self, module_path, forbidden_def):
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        target = root / module_path
+        assert target.exists(), f"{target} not found"
+        src = target.read_text()
+        assert forbidden_def not in src, (
+            f"{module_path} reintroduced '{forbidden_def}'. "
+            f"Use heyvox.herald.tts_helpers instead — "
+            f"see DEFECT-LOG pattern P-producer-parity."
+        )
+
+    def test_worker_does_not_redefine_detect_mood(self):
+        """detect_mood lives in tts_helpers; worker re-exports via import."""
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "heyvox/herald/worker.py").read_text()
+        # The function MUST NOT have a fresh `def detect_mood(...)` body.
+        # Import lines like "from ... import detect_mood" are fine.
+        assert "def detect_mood(text:" not in src and "def detect_mood(text)" not in src, (
+            "heyvox/herald/worker.py redefines detect_mood locally. "
+            "Import from heyvox.herald.tts_helpers instead."
+        )

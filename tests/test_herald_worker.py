@@ -317,6 +317,9 @@ class TestVerbosityFiltering:
         """Verbosity=short truncates to first sentence."""
         verbosity_file = str(tmp_path / "heyvox-verbosity")
         Path(verbosity_file).write_text("short")
+        # heyvox.herald.tts_helpers re-resolves the constant on every call,
+        # so patching the source-of-truth in heyvox.constants is enough.
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", verbosity_file)
         monkeypatch.setattr("heyvox.herald.worker.VERBOSITY_FILE", verbosity_file)
 
         # Capture the speech text after truncation by mocking _generate
@@ -337,6 +340,7 @@ class TestVerbosityFiltering:
         """Verbosity=full plays the complete text."""
         verbosity_file = str(tmp_path / "heyvox-verbosity")
         Path(verbosity_file).write_text("full")
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", verbosity_file)
         monkeypatch.setattr("heyvox.herald.worker.VERBOSITY_FILE", verbosity_file)
 
         captured = []
@@ -354,6 +358,7 @@ class TestVerbosityFiltering:
 
     def test_verbosity_missing_defaults_to_full(self, worker, monkeypatch):
         """Missing verbosity file defaults to 'full'."""
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", "/tmp/nonexistent-verbosity-12345")
         monkeypatch.setattr("heyvox.herald.worker.VERBOSITY_FILE", "/tmp/nonexistent-verbosity-12345")
 
         captured = []
