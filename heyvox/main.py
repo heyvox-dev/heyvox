@@ -1422,12 +1422,44 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 _consec_trigger = (
                     _consecutive_hits.get(ww_name, 0) >= active_frames_required
                 )
+                # DEF-117: fast-path stop-wake also requires a recent silent
+                # frame (the natural "...sentence end. [pause] Hey Vox"
+                # pattern). Mid-sentence phoneme FPs at score>0.92 had no
+                # gate before — Whisper Large ground-truth on the 2026-05-25
+                # 09:07:19 sample showed the user saying "...momentan
+                # irrelevant" continuously while the model fired score=0.982.
+                # _recent_silence reuses DEF-096-B's _PRE_SILENCE_DISCOUNT_WINDOW
+                # so threshold-discount (favours post-pause) and fast-stop-gate
+                # (requires post-pause) share one time horizon — no drift.
                 _fast_stop = (
                     _is_rec
                     and triggered
                     and s > _HIGH_CONFIDENCE_FAST_STOP
                     and not _vad_silent
+                    and _recent_silence
                 )
+                # Forensic tag: high-confidence stop-wake that the silence
+                # gate REJECTED. Pairs with the existing NEAR_MISS tag for
+                # idle-state borderline scores; same triage idea.
+                if (
+                    _is_rec
+                    and triggered
+                    and s > _HIGH_CONFIDENCE_FAST_STOP
+                    and not _vad_silent
+                    and not _recent_silence
+                ):
+                    if _last_silent_frame_time > 0.0:
+                        _silent_age = (
+                            f"{_now_for_pre_silence - _last_silent_frame_time:.2f}s ago"
+                        )
+                    else:
+                        _silent_age = "never"
+                    log(
+                        f"[NEAR_MISS_FAST_BLOCKED] [{ww_name}] score={s:.3f} "
+                        f"thr={active_threshold:.2f} "
+                        f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
+                        f"last_silent={_silent_age} window={_PRE_SILENCE_DISCOUNT_WINDOW}s"
+                    )
                 _window_stop = (
                     _is_rec
                     and len(_stop_hit_window.get(ww_name, ()))
@@ -1461,7 +1493,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 f"win={len(_stop_hit_window.get(ww_name, ()))}"
                                 f"/{_STOP_WINDOW_HITS_REQUIRED} "
                                 f"hits={_consecutive_hits.get(ww_name, 0)}"
-                                f"/{active_frames_required}"
+                                f"/{active_frames_required} "
+                                f"pre_silence={_recent_silence}"
                             )
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
