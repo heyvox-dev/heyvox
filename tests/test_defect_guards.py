@@ -709,6 +709,65 @@ def test_def103_three_path_disjunction_in_trigger():
 
 
 # ---------------------------------------------------------------------------
+# DEF-080: herald CLI must be spawned via sys.executable -m, not PATH
+#
+# A stale symlink at ~/.local/bin/herald pointing at a different workspace's
+# bash herald used to spawn duplicate orchestrators (every TTS message
+# played twice). Pinning to sys.executable removes the PATH dependency.
+# ---------------------------------------------------------------------------
+
+
+def test_def080_herald_cmd_is_python_dash_m_list():
+    """HERALD_CMD must be a list starting with sys.executable, not the
+    bare string "herald". A regression to PATH-based lookup would re-expose
+    the duplicate-orchestrator bug."""
+    import sys as _sys
+    from heyvox.audio import tts
+
+    assert isinstance(tts.HERALD_CMD, list), (
+        "HERALD_CMD must be a list (DEF-080). Bare-string PATH lookup is "
+        "vulnerable to stale ~/.local/bin/herald symlinks."
+    )
+    assert len(tts.HERALD_CMD) >= 3, (
+        f"HERALD_CMD must look like [python, -m, heyvox.herald.cli]; "
+        f"got {tts.HERALD_CMD!r}"
+    )
+    assert tts.HERALD_CMD[0] == _sys.executable, (
+        "HERALD_CMD[0] must be sys.executable so the herald CLI runs under "
+        "the same interpreter that imported tts.py (DEF-080)."
+    )
+    assert tts.HERALD_CMD[1] == "-m", (
+        f"HERALD_CMD[1] must be '-m'; got {tts.HERALD_CMD[1]!r}"
+    )
+    assert tts.HERALD_CMD[2] == "heyvox.herald.cli", (
+        f"HERALD_CMD[2] must point at heyvox.herald.cli; "
+        f"got {tts.HERALD_CMD[2]!r}"
+    )
+
+
+def test_def080_herald_dispatch_spawns_via_pinned_argv():
+    """The _herald() dispatcher must unpack HERALD_CMD into the subprocess
+    argv. A regression that uses bare "herald" would silently drop the
+    sys.executable pin."""
+    from unittest.mock import patch, MagicMock
+    from heyvox.audio import tts
+
+    with patch("heyvox.audio.tts.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        tts._herald("speak", "test", input_text="hi")
+
+        assert mock_run.called, "_herald must spawn subprocess.run"
+        called_argv = mock_run.call_args[0][0]
+        # Pinned argv must be the prefix; cmd + args follow.
+        assert called_argv[: len(tts.HERALD_CMD)] == tts.HERALD_CMD, (
+            f"_herald argv {called_argv!r} must start with "
+            f"HERALD_CMD {tts.HERALD_CMD!r}"
+        )
+        assert called_argv[len(tts.HERALD_CMD)] == "speak"
+        assert called_argv[len(tts.HERALD_CMD) + 1] == "test"
+
+
+# ---------------------------------------------------------------------------
 # DEF-117: fast-path stop-wake requires pre-silence gate
 #
 # Mid-sentence phoneme FP at score=0.982 (threshold 0.91) on
