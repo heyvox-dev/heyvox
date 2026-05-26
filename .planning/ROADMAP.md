@@ -87,13 +87,18 @@ landed as an atomic quick task with its own PLAN.md + SUMMARY.md.
 - [x] **260525-svg** — Stop-wake VAD silence gate — fast-path stop-wake
       requires recent silence (closes DEF-117); NEAR_MISS_FAST_BLOCKED
       forensic tag added. Commit `c351f2c55`.
+- [x] **260525-d80** — DEF-080 herald CLI pinned to `sys.executable -m
+      heyvox.herald.cli` — closes the 5-week-old fix that was parked on
+      `heyvox/voice-resume-wip`. Stufe 1 of the WIP triage; isolated
+      1-line change with two defect guards. Commit `40e254046`.
 
-**Defects resolved:** DEF-113 (Herald ghost-device), DEF-117 (mid-sentence
-fast-stop FP). **Patterns mitigated:** P-new + P-detector-without-action
-(HUDSurface), P-hotplug-cache for CoreAudio (DeviceHandle), P-producer-
-parity for Herald (tts_helpers + drift guard), P-stochastic-wake (silence
-gate). **Defects still open:** DEF-104 (PortAudio HAL cache prozessweit —
-diagnostiziert, nicht behoben).
+**Defects resolved:** DEF-080 (herald CLI PATH race), DEF-113 (Herald
+ghost-device), DEF-117 (mid-sentence fast-stop FP). **Patterns mitigated:**
+P-new + P-detector-without-action (HUDSurface), P-hotplug-cache for
+CoreAudio (DeviceHandle), P-producer-parity for Herald (tts_helpers +
+drift guard), P-stochastic-wake (silence gate). **Defects still open:**
+DEF-104 (PortAudio HAL cache prozessweit — diagnostiziert, nicht
+behoben).
 
 ### 📋 v2.0 Cross-Platform & Polish (Planned)
 
@@ -121,3 +126,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | Q. Herald producer parity | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. Banner UX (icon + tooltip) | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. Stop-wake VAD silence gate | v1.3 | 1/1 | Complete | 2026-05-25 |
+| Q. DEF-080 herald CLI pin | v1.3 | 1/1 | Complete | 2026-05-25 |
