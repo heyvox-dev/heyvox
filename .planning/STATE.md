@@ -1,16 +1,18 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.2
-milestone_name: Paste Injection Reliability
-status: executing
-stopped_at: Phase 14 context gathered
-last_updated: "2026-05-11T07:08:17.410Z"
-last_activity: 2026-05-11 -- Phase 14 planning complete
+milestone: v1.3
+milestone_name: Robustness Sweep
+status: shipped
+stopped_at: v1.3 shipped — 5 quick tasks merged + pushed
+last_updated: "2026-05-25T22:00:00.000Z"
+last_activity: 2026-05-25 -- v1.3 Robustness Sweep shipped (HUDSurface, DeviceHandle, Herald dedup, Banner UX, DEF-117 stop-wake gate); DEF-113 + DEF-117 closed; merged + pushed to origin/main
 progress:
   total_phases: 15
   completed_phases: 8
   total_plans: 25
   completed_plans: 43
+  total_quick_tasks: 11
+  completed_quick_tasks: 11
   percent: 100
 ---
 
@@ -92,6 +94,10 @@ None — milestone complete.
 | 260413-rc2 | Phase 5: Simplify abstractions — deduplicate WAV normalization, remove unused echo config | 2026-04-13 | 2792e39 | [260413-rc2-phase-5-simplify-abstractions-adapter-to](./quick/260413-rc2-phase-5-simplify-abstractions-adapter-to/) |
 | 260414-b68 | Phase 3: IPC consolidation — move /tmp paths to user-scoped paths, cleanup function | 2026-04-14 | 314abe2 | [260414-b68-phase-3-ipc-consolidation-move-tmp-paths](./quick/260414-b68-phase-3-ipc-consolidation-move-tmp-paths/) |
 | 260414-cki | Phase 4: Fix dual-write IPC bug — tests import constants, legacy flag refs fixed | 2026-04-14 | 7fdc82f | [260414-cki-phase-4-fix-dual-write-ipc-bug-standalon](./quick/260414-cki-phase-4-fix-dual-write-ipc-bug-standalon/) |
+| 260525-hsb | HUDSurface banner primitive — unified API for silent-state-change detectors (closes DEF-113, addresses patterns P-new + P-detector-without-action) | 2026-05-25 | 356aa3ec6 | [260525-hudsurface-banner](./quick/260525-hudsurface-banner/) |
+| 260525-dvh | DeviceHandle primitive — hotplug-safe wrappers (CoreAudio pre-write validation in Herald + PortAudio drift diagnostic in DeviceManager.reinit); closes P-hotplug-cache for CoreAudio side | 2026-05-25 | 293f1a49b | [260525-devicehandle](./quick/260525-devicehandle/) |
+| 260525-hdd | Herald producer-parity — shared tts_helpers module + WATCHER_FIRED forensic tag + drift-guard tests; mitigates P-producer-parity | 2026-05-25 | f513b27a5 | [260525-herald-dedup](./quick/260525-herald-dedup/) |
+| 260525-svg | Stop-wake VAD silence gate — fast-path stop-wake requires recent silence (closes DEF-117); NEAR_MISS_FAST_BLOCKED forensic tag added | 2026-05-25 | c351f2c55 | [260525-stop-wake-vad-gate](./quick/260525-stop-wake-vad-gate/) |
 
 ## Session Continuity
 
