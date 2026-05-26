@@ -4,6 +4,8 @@
 
 - ✅ **v1.0 MVP** — Phases 1-5 (shipped 2026-03-27)
 - ✅ **v1.1 Architecture Hardening** — Phases 6-9 (shipped 2026-04-11)
+- 🔧 **v1.2 Paste Injection Reliability** — Phases 12-15 (Phase 14 in progress, 3/6 plans)
+- ✅ **v1.3 Robustness Sweep** — 5 defect-driven quick tasks (shipped 2026-05-25)
 - 📋 **v2.0 Cross-Platform & Polish** — TTS server, MediaRemote, custom wake word, Chrome extension, cross-platform client
 
 ## Phases
@@ -64,6 +66,35 @@
   - [x] 15-06-PLAN.md — Post-paste verification (verify_paste + drift detection + retry)
   - [x] 15-07-PLAN.md — heyvox log-health Paste section
 
+### ✅ v1.3 Robustness Sweep (Shipped 2026-05-25)
+
+Defect-driven quick tasks aimed at the recurring patterns from DEFECT-LOG —
+P-new (ux invisibility), P-detector-without-action, P-hotplug-cache,
+P-producer-parity, P-stochastic-wake. No formal phases — each primitive
+landed as an atomic quick task with its own PLAN.md + SUMMARY.md.
+
+- [x] **260525-hsb** — HUDSurface banner primitive — unified API for
+      silent-state-change detectors (5 detector sites migrated/added;
+      closes DEF-113). Commit `356aa3ec6`.
+- [x] **260525-dvh** — DeviceHandle primitive — hotplug-safe wrappers for
+      CoreAudio + PortAudio device IDs (pre-write validation in Herald,
+      diagnostic in DeviceManager.reinit). Commit `293f1a49b`.
+- [x] **260525-hdd** — Herald producer parity — shared `tts_helpers`
+      module + WATCHER_FIRED forensic tag + drift-guard tests.
+      Commit `f513b27a5`.
+- [x] **260525-hsb (banner UX hotfix)** — Banner shows symbol-only in
+      menu bar, full text in tooltip. Commit `d9983c54e`.
+- [x] **260525-svg** — Stop-wake VAD silence gate — fast-path stop-wake
+      requires recent silence (closes DEF-117); NEAR_MISS_FAST_BLOCKED
+      forensic tag added. Commit `c351f2c55`.
+
+**Defects resolved:** DEF-113 (Herald ghost-device), DEF-117 (mid-sentence
+fast-stop FP). **Patterns mitigated:** P-new + P-detector-without-action
+(HUDSurface), P-hotplug-cache for CoreAudio (DeviceHandle), P-producer-
+parity for Herald (tts_helpers + drift guard), P-stochastic-wake (silence
+gate). **Defects still open:** DEF-104 (PortAudio HAL cache prozessweit —
+diagnostiziert, nicht behoben).
+
 ### 📋 v2.0 Cross-Platform & Polish (Planned)
 
 Phases TBD — define via `/gsd:new-milestone`
@@ -83,5 +114,10 @@ Phases TBD — define via `/gsd:new-milestone`
 | 9. Test Suite | v1.1 | 2/2 | Complete | 2026-04-11 |
 | 12. Paste Injection Reliability | v1.2 | 1/3 | Complete    | 2026-04-13 |
 | 13. Audio Reliability | v1.2 | 3/4 | Complete    | 2026-04-13 |
-| 14. Distribution & UX Polish | v1.2 | 0/6 | Planned | — |
+| 14. Distribution & UX Polish | v1.2 | 3/6 | In progress | partial 2026-04-13..05 |
 | 15. Paste Target Lock | v1.2 | 7/7 | Complete | 2026-04-24 |
+| Q. HUDSurface banner primitive | v1.3 | 1/1 | Complete | 2026-05-25 |
+| Q. DeviceHandle primitive | v1.3 | 1/1 | Complete | 2026-05-25 |
+| Q. Herald producer parity | v1.3 | 1/1 | Complete | 2026-05-25 |
+| Q. Banner UX (icon + tooltip) | v1.3 | 1/1 | Complete | 2026-05-25 |
+| Q. Stop-wake VAD silence gate | v1.3 | 1/1 | Complete | 2026-05-25 |
