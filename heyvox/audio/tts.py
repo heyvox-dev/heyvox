@@ -18,13 +18,22 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 from enum import Enum
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
-HERALD_CMD = "herald"
+# DEF-080: Spawn the herald CLI directly via ``python -m heyvox.herald.cli``
+# instead of relying on PATH lookup of a bare ``herald`` binary. A stale
+# symlink at ``~/.local/bin/herald`` pointing at a DIFFERENT workspace's
+# bash herald used to cause TWO orchestrators to spawn — one from the
+# current workspace via this module, one from the stale symlink — and every
+# TTS message played twice. Pinning to ``sys.executable`` ties us to the
+# interpreter that imported this module, so we always run the current
+# workspace's code regardless of what PATH happens to resolve.
+HERALD_CMD: list[str] = [sys.executable, "-m", "heyvox.herald.cli"]
 _SUBPROCESS_TIMEOUT = 5
 
 
@@ -91,24 +100,25 @@ _herald_warned = False
 def _herald(cmd: str, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess:
     """Call herald CLI command. Returns CompletedProcess, never raises."""
     global _herald_warned
+    argv = [*HERALD_CMD, cmd, *args]
     try:
         return subprocess.run(
-            [HERALD_CMD, cmd, *args],
+            argv,
             input=input_text,
             capture_output=True, text=True,
             timeout=_SUBPROCESS_TIMEOUT,
         )
     except FileNotFoundError:
         if not _herald_warned:
-            log.warning(f"Herald not found at {HERALD_CMD}. TTS disabled.")
+            log.warning(f"Herald not found at {argv[0]}. TTS disabled.")
             _herald_warned = True
-        return subprocess.CompletedProcess([HERALD_CMD, cmd], 1, "", "herald not found")
+        return subprocess.CompletedProcess(argv, 1, "", "herald not found")
     except subprocess.TimeoutExpired:
         log.warning(f"Herald command '{cmd}' timed out")
-        return subprocess.CompletedProcess([HERALD_CMD, cmd], 1, "", "timeout")
+        return subprocess.CompletedProcess(argv, 1, "", "timeout")
     except Exception as e:
         log.warning(f"Herald command '{cmd}' failed: {e}")
-        return subprocess.CompletedProcess([HERALD_CMD, cmd], 1, "", str(e))
+        return subprocess.CompletedProcess(argv, 1, "", str(e))
 
 
 # ---------------------------------------------------------------------------

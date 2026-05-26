@@ -4,8 +4,8 @@ milestone: v1.3
 milestone_name: Robustness Sweep
 status: shipped
 stopped_at: v1.3 shipped — 5 quick tasks merged + pushed
-last_updated: "2026-05-25T22:00:00.000Z"
-last_activity: 2026-05-25 -- v1.3 Robustness Sweep shipped (HUDSurface, DeviceHandle, Herald dedup, Banner UX, DEF-117 stop-wake gate); DEF-113 + DEF-117 closed; merged + pushed to origin/main
+last_updated: "2026-05-25T22:30:00.000Z"
+last_activity: 2026-05-25 -- DEF-080 closed via Stufe 1 of voice-resume-wip triage (herald CLI pinned to sys.executable -m); 6 quick tasks in v1.3 sweep
 progress:
   total_phases: 15
   completed_phases: 8
@@ -98,6 +98,7 @@ None — milestone complete.
 | 260525-dvh | DeviceHandle primitive — hotplug-safe wrappers (CoreAudio pre-write validation in Herald + PortAudio drift diagnostic in DeviceManager.reinit); closes P-hotplug-cache for CoreAudio side | 2026-05-25 | 293f1a49b | [260525-devicehandle](./quick/260525-devicehandle/) |
 | 260525-hdd | Herald producer-parity — shared tts_helpers module + WATCHER_FIRED forensic tag + drift-guard tests; mitigates P-producer-parity | 2026-05-25 | f513b27a5 | [260525-herald-dedup](./quick/260525-herald-dedup/) |
 | 260525-svg | Stop-wake VAD silence gate — fast-path stop-wake requires recent silence (closes DEF-117); NEAR_MISS_FAST_BLOCKED forensic tag added | 2026-05-25 | c351f2c55 | [260525-stop-wake-vad-gate](./quick/260525-stop-wake-vad-gate/) |
+| 260525-d80 | DEF-080 herald CLI pinned to `[sys.executable, -m, heyvox.herald.cli]` — closes 5-week-old WIP parked fix; defect-guard tests for the pin + dispatch argv | 2026-05-25 | 40e254046 | [260525-def080-herald-cmd](./quick/260525-def080-herald-cmd/) |
 
 ## Session Continuity
 
