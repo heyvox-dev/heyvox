@@ -708,6 +708,58 @@ def test_def103_three_path_disjunction_in_trigger():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-117: fast-path stop-wake requires pre-silence gate
+#
+# Mid-sentence phoneme FP at score=0.982 (threshold 0.91) on
+# "...momentan irrelevant" fired the fast-path before. Gate added 2026-05-25
+# requires _recent_silence (DEF-096-B's _PRE_SILENCE_DISCOUNT_WINDOW horizon)
+# for fast-path stop-wake to fire.
+# ---------------------------------------------------------------------------
+
+
+def _read_main_src() -> str:
+    import heyvox
+    return open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+
+
+def test_def117_fast_stop_requires_recent_silence():
+    """The _fast_stop predicate must include the _recent_silence term."""
+    src = _read_main_src()
+    # Find the _fast_stop = (...) block
+    m = re.search(r"_fast_stop\s*=\s*\(([^)]+)\)", src)
+    assert m is not None, "Could not find _fast_stop assignment in main.py"
+    block = m.group(1)
+    assert "_recent_silence" in block, (
+        "_fast_stop predicate must include `and _recent_silence` (DEF-117). "
+        "Otherwise mid-sentence high-confidence phoneme bursts trigger a "
+        "false stop. See .planning/quick/260525-stop-wake-vad-gate/."
+    )
+
+
+def test_def117_near_miss_fast_blocked_tag_present():
+    """NEAR_MISS_FAST_BLOCKED log tag must exist so forensic users can see
+    how often the silence gate fires (P-detector-without-action)."""
+    src = _read_main_src()
+    assert "NEAR_MISS_FAST_BLOCKED" in src, (
+        "NEAR_MISS_FAST_BLOCKED log tag missing — DEF-117 forensic visibility "
+        "was wired alongside the gate; do not remove without replacing."
+    )
+
+
+def test_def117_stop_path_log_carries_pre_silence_field():
+    """STOP_PATH log line must surface pre_silence= so a triggered stop's
+    gate state is recoverable from logs."""
+    src = _read_main_src()
+    # Look for the STOP_PATH log block; the literal pre_silence= label must
+    # appear in the same f-string region.
+    m = re.search(r"\[STOP_PATH\][\s\S]{0,500}", src)
+    assert m is not None, "STOP_PATH log block not found in main.py"
+    assert "pre_silence" in m.group(0), (
+        "STOP_PATH log line must include pre_silence= for DEF-117 forensics."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).
