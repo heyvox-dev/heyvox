@@ -497,6 +497,16 @@ def _setup(config: HeyvoxConfig):
                             profile_manager=profile_manager)
     devices.init()
 
+    # DEF-104 diagnostic: USB hotplug watcher polls PA device list every 10s
+    # and logs [USB_HOTPLUG] on changes. Catches the moment of re-enumeration
+    # that strands HeyVox on a stale PA index, instead of finding out minutes
+    # later via the next AUDIO-13 reinit side-effect.
+    try:
+        from heyvox.audio.mic import start_pa_hotplug_watcher
+        start_pa_hotplug_watcher(lambda: devices.pa, interval_secs=10.0)
+    except Exception as e:
+        log(f"PA hotplug watcher init failed (continuing): {e}")
+
     # ECHO-05: Initialize WebRTC AEC if configured and in speaker mode
     _aec_active = False
     if config.echo_suppression.aec_enabled and not devices.headset_mode:

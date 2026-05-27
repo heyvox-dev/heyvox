@@ -8,8 +8,11 @@ Uses CoreAudio to filter out paired-but-disconnected Bluetooth devices.
 
 import ctypes
 import ctypes.util
+import hashlib
+import threading
 import time
 from contextlib import contextmanager
+from typing import Callable
 
 import numpy as np
 import pyaudio
@@ -17,7 +20,7 @@ import pyaudio
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 
 # Re-export for use by hotplug scan in main.py
-__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch"]
+__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch", "start_pa_hotplug_watcher", "stop_pa_hotplug_watcher"]
 
 
 def _log(msg: str) -> None:
@@ -787,3 +790,127 @@ def clear_device_cooldowns() -> None:
     _device_failure_counts.clear()
     if count:
         _log(f"Device cooldowns cleared ({count} device(s) released)")
+
+
+# ---------------------------------------------------------------------------
+# USB hotplug watcher — DEF-104 diagnostic
+# ---------------------------------------------------------------------------
+#
+# Background thread that polls the PortAudio device list and logs a
+# [USB_HOTPLUG] tag whenever the (index, name, max_input_channels) tuple-set
+# changes. Catches the moment of USB re-enumeration that strands HeyVox on a
+# stale PA index (G435 0→1 drift in DEF-104). Without this watcher, the drift
+# is only logged as a side-effect during the next AUDIO-13 reinit — minutes
+# after the actual hotplug event.
+#
+# Cost: one short PA enumeration every interval (~5–20 ms). Safe to run while
+# the DeviceManager owns its own PA instance — we use a getter callback rather
+# than a captured reference so the watcher always queries the *current* PA
+# (DeviceManager rebuilds its PA on reinit; a captured ref would go stale).
+
+_pa_hotplug_thread: threading.Thread | None = None
+_pa_hotplug_stop = threading.Event()
+
+
+def _enumerate_pa_signature(pa: pyaudio.PyAudio) -> list[tuple[int, str, int]]:
+    """Return [(index, name, max_input_channels), ...] for all PA devices.
+
+    Used by the hotplug watcher and only logs structure, not levels, so it's
+    safe to call as often as needed.
+    """
+    out: list[tuple[int, str, int]] = []
+    try:
+        n = pa.get_device_count()
+    except Exception:
+        return out
+    for i in range(n):
+        try:
+            d = pa.get_device_info_by_index(i)
+            out.append((
+                i,
+                str(d.get("name", "")),
+                int(d.get("maxInputChannels", 0)),
+            ))
+        except Exception:
+            continue
+    return out
+
+
+def _hash_pa_signature(sig: list[tuple[int, str, int]]) -> str:
+    """Short stable hash of the device signature for change detection."""
+    s = "|".join(f"{i}:{n}:{c}" for i, n, c in sig)
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
+
+
+def _pa_hotplug_loop(get_pa: Callable[[], pyaudio.PyAudio | None], interval_secs: float) -> None:
+    """Poll PA device list; log [USB_HOTPLUG] on every change."""
+    last_sig: list[tuple[int, str, int]] = []
+    last_hash = ""
+    started = False
+    while not _pa_hotplug_stop.is_set():
+        try:
+            pa = get_pa()
+            if pa is None:
+                # DeviceManager rebuilding — skip this tick, try again later
+                if _pa_hotplug_stop.wait(interval_secs):
+                    break
+                continue
+            cur_sig = _enumerate_pa_signature(pa)
+            cur_hash = _hash_pa_signature(cur_sig)
+            if not started:
+                _log(
+                    f"[USB_HOTPLUG] watcher started: {len(cur_sig)} devices, "
+                    f"hash={cur_hash}"
+                )
+                started = True
+                last_sig, last_hash = cur_sig, cur_hash
+            elif cur_hash != last_hash:
+                old_set = {(i, n, c) for i, n, c in last_sig}
+                new_set = {(i, n, c) for i, n, c in cur_sig}
+                added = sorted(new_set - old_set)
+                removed = sorted(old_set - new_set)
+                _log(
+                    f"[USB_HOTPLUG] device list changed: "
+                    f"{last_hash} -> {cur_hash} "
+                    f"(+{len(added)}/-{len(removed)}) "
+                    f"added={added!r} removed={removed!r}"
+                )
+                last_sig, last_hash = cur_sig, cur_hash
+        except Exception as e:
+            _log(f"[USB_HOTPLUG] watcher error (continuing): {e}")
+        if _pa_hotplug_stop.wait(interval_secs):
+            break
+
+
+def start_pa_hotplug_watcher(
+    get_pa: Callable[[], pyaudio.PyAudio | None],
+    interval_secs: float = 10.0,
+) -> None:
+    """Start the USB hotplug watcher thread (idempotent).
+
+    Args:
+        get_pa: Callable returning the current PortAudio instance (or None
+            during a transient rebuild). Use a closure over DeviceManager
+            rather than capturing a reference — DeviceManager rebuilds its
+            PA on reinit and stale refs would silently report old state.
+        interval_secs: Poll interval. 10s is a reasonable default — fine-grained
+            enough to bracket a slow speaker, cheap enough at ~5–20 ms per poll.
+
+    Requirement: DEF-104 diagnostic instrumentation.
+    """
+    global _pa_hotplug_thread
+    if _pa_hotplug_thread is not None and _pa_hotplug_thread.is_alive():
+        return
+    _pa_hotplug_stop.clear()
+    _pa_hotplug_thread = threading.Thread(
+        target=_pa_hotplug_loop,
+        args=(get_pa, interval_secs),
+        name="pa-hotplug-watcher",
+        daemon=True,
+    )
+    _pa_hotplug_thread.start()
+
+
+def stop_pa_hotplug_watcher() -> None:
+    """Signal the watcher to exit. No-op if not started."""
+    _pa_hotplug_stop.set()
