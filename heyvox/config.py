@@ -325,6 +325,14 @@ class AppProfileConfig(BaseModel):
     # Requirement: PASTE-15-R7
     ax_settle_before_verify: float = 0.1
 
+    # Multi-monitor fix: when `focused_was_text_field=False` at capture (because
+    # the mouse-target app was visible on another monitor but not the OS-level
+    # frontmost — Chrome on monitor 1, Slack on monitor 2 etc.) AND this profile
+    # has no focus_shortcut, try NSRunningApplication.activate() + re-query AX
+    # before fail-closed. Useful for apps that auto-focus their composer on
+    # activation (Slack) but lack a deterministic focus keystroke.
+    activate_on_mismatch: bool = False
+
 
 # Built-in profiles for common apps. Users can override or add more via config.
 _DEFAULT_APP_PROFILES: list[dict] = [
@@ -375,6 +383,21 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "enter_count": 1,
         "is_electron": False,
         "supports_ax_verify": False,
+    },
+    {
+        # Slack has no clean focus shortcut for the composer (Cmd+K opens the
+        # quick switcher, not the composer). It auto-focuses the active
+        # channel's composer when the app becomes frontmost, so the
+        # activate_on_mismatch path is the recovery route for the multi-monitor
+        # case where Slack is visible on another monitor but Chrome (etc.) is
+        # the OS-level frontmost.
+        "name": "Slack",
+        "focus_shortcut": "",
+        "enter_count": 1,
+        "is_electron": True,
+        "settle_delay": 0.3,
+        "enter_delay": 0.15,
+        "activate_on_mismatch": True,
     },
 ]
 

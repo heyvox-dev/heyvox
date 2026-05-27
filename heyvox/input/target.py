@@ -716,6 +716,76 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
             )
 
 
+def _try_activate_and_recapture(lock) -> bool:
+    """Multi-monitor fix: when the mouse-target app was not OS-frontmost at
+    capture (e.g. Slack visible on monitor 2 while Chrome is system-frontmost
+    on monitor 1), AXFocusedUIElement returns nothing because keyboard focus
+    belongs to a different process. Activate the target via
+    NSRunningApplication and re-query the focused element. Returns True if a
+    text-role is now focused.
+
+    Mutates `lock.focused_was_text_field` and `lock.leaf_role` on success so
+    downstream tiers see the recovered state. Best-effort; any exception falls
+    through to fail-closed.
+    """
+    try:
+        import AppKit
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+        )
+    except ImportError:
+        return False
+
+    pid = getattr(lock, "app_pid", 0)
+    if not pid:
+        return False
+
+    try:
+        running = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(
+            pid
+        )
+        if running is None:
+            return False
+        # NSApplicationActivateIgnoringOtherApps = 1 << 1
+        running.activateWithOptions_(1 << 1)
+        # Electron/Tauri apps need ~150ms for AX state to settle after activate
+        _time.sleep(0.15)
+
+        ax_app = AXUIElementCreateApplication(pid)
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, "AXFocusedUIElement", None
+        )
+        if err != 0 or focused is None:
+            _log(
+                f"[activate-recapture] AXFocusedUIElement still empty after "
+                f"activate (app={lock.app_name})"
+            )
+            return False
+        err, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
+        if err != 0 or not role:
+            return False
+        role_str = str(role)
+        if role_str not in _TEXT_ROLES:
+            _log(
+                f"[activate-recapture] new focused role {role_str!r} is not "
+                f"a text field (app={lock.app_name})"
+            )
+            return False
+        _log(
+            f"[activate-recapture] success: app={lock.app_name} "
+            f"new_focused_role={role_str!r}"
+        )
+        # Mutate lock so caller's downstream tiers see the recovery.
+        # TargetLock is a frozen dataclass — use object.__setattr__ to bypass.
+        object.__setattr__(lock, "focused_was_text_field", True)
+        object.__setattr__(lock, "leaf_role", role_str)
+        return True
+    except Exception as e:
+        _log(f"[activate-recapture] exception: {e}")
+        return False
+
+
 def resolve_lock(lock, config=None) -> PasteOutcome:
     """Three-tier ladder: exact lock -> profile shortcut -> fail-closed (SPEC R4).
 
@@ -739,6 +809,21 @@ def resolve_lock(lock, config=None) -> PasteOutcome:
     # shortcut. Tier 1 is skipped because the cached role-path is empty by
     # construction in this branch.
     if not lock.focused_was_text_field:
+        # Multi-monitor recovery: if profile opts in via activate_on_mismatch
+        # AND the app isn't currently frontmost, activate it and re-query AX.
+        # If a text field is now focused, fall through to Tier 2 (app_fast_paste
+        # will handle the actual paste).
+        if profile and getattr(profile, "activate_on_mismatch", False):
+            if _try_activate_and_recapture(lock):
+                elapsed = int((_time.time() - _t0) * 1000)
+                _log(
+                    f"[PASTE] tier_used=2 (activate-recovered) "
+                    f"reason=n/a elapsed_ms={elapsed}"
+                )
+                return PasteOutcome(
+                    ok=True, element=None, tier_used=2, elapsed_ms=elapsed,
+                )
+
         if not (profile and profile.focus_shortcut):
             msg = _REASON_MESSAGES[FailReason.NO_TEXT_FIELD_AT_START].format(
                 app_name=lock.app_name or "app"
