@@ -54,7 +54,15 @@ from heyvox.herald.tts_helpers import (
     get_verbosity as _shared_get_verbosity,
 )
 
-log = logging.getLogger(__name__)
+# DEF-120 root cause: when this module runs as `python -m heyvox.herald.worker`
+# (the hook entry point), Python sets __name__ == "__main__" and
+# getLogger(__name__) returns a logger called "__main__" — disconnected from
+# the heyvox.herald handler chain below. Every log.info / log.warning /
+# log.debug from the worker then vanishes silently. Pin the logger name
+# explicitly so both `import heyvox.herald.worker` and the `-m` entry point
+# share the same handler. The user-facing symptom for years: zero worker
+# trace in herald-debug.log; only orchestrator (ORCH:) lines visible.
+log = logging.getLogger("heyvox.herald.worker")
 
 # File-based log handler — matches herald_log() in config.sh
 # DEF-064: force INFO level so voice-selection lines reach the log file.
@@ -343,14 +351,33 @@ class HeraldWorker:
         # Extract <tts>...</tts> blocks (multiline, last match wins)
         texts = self._extract_tts_blocks(raw_text)
         if not texts:
-            log.debug("No TTS blocks found in response")
+            # DEF-120 / P-detector-without-action: was log.debug, but the
+            # logger is INFO-level so silent skips left zero trace in
+            # herald-debug.log. Low-volume (≤1 per Stop event), promote to
+            # INFO with forensic context so "why didn't HeyVox speak?" is
+            # answerable from the log alone.
+            log.info(
+                "WORKER: no <tts> block in response "
+                "(raw_len=%d hook=%s ws=%r)",
+                len(raw_text), hook_type, self._workspace,
+            )
             return True
 
         speech = texts[-1].strip()
 
         # Validate content
         if not speech or speech == "SKIP" or len(speech) < 5:
-            log.debug("TTS block empty or SKIP — skipping")
+            if not speech:
+                _reason = "empty"
+            elif speech == "SKIP":
+                _reason = "SKIP-sentinel"
+            else:
+                _reason = f"too-short(len={len(speech)})"
+            # DEF-120: see above.
+            log.info(
+                "WORKER: <tts> block rejected (reason=%s hook=%s ws=%r)",
+                _reason, hook_type, self._workspace,
+            )
             return True
 
         # Apply mode filter (notify: truncate to first sentence ≤ 60 chars)
@@ -362,7 +389,11 @@ class HeraldWorker:
         # Apply verbosity filtering
         verbosity = self._read_verbosity()
         if verbosity == "skip":
-            log.debug("Verbosity=skip — not generating TTS")
+            # DEF-120: see above.
+            log.info(
+                "WORKER: verbosity=skip — not generating (hook=%s ws=%r)",
+                hook_type, self._workspace,
+            )
             return True
         elif verbosity == "short":
             m = re.search(r"[.!?]", speech)
