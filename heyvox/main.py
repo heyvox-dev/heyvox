@@ -1470,11 +1470,44 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
                         f"last_silent={_silent_age} window={_PRE_SILENCE_DISCOUNT_WINDOW}s"
                     )
+                # DEF-118: extend DEF-117's silence-gate to the window-path.
+                # 2026-05-27 08:01:40 false stop fired with win=2/2 hits=2/2
+                # pre_silence=False on "Ich denke der Grund ist ein..." — two
+                # consecutive high-score frames in continuous German speech
+                # without any pause. Window was deliberately left ungated in
+                # DEF-117 on the assumption "sustained hits ... naturally
+                # more resistant to single-burst FPs"; field evidence on
+                # German speech-flow showed two-frame bursts occur there too.
+                # Shares _PRE_SILENCE_DISCOUNT_WINDOW with DEF-096-B and
+                # DEF-117 so all three knobs use the same time horizon.
                 _window_stop = (
                     _is_rec
                     and len(_stop_hit_window.get(ww_name, ()))
                     >= _STOP_WINDOW_HITS_REQUIRED
+                    and _recent_silence
                 )
+                # DEF-118 forensic: window-path that would have fired but
+                # the silence gate rejected it. Pattern P-detector-without-action.
+                if (
+                    _is_rec
+                    and len(_stop_hit_window.get(ww_name, ()))
+                    >= _STOP_WINDOW_HITS_REQUIRED
+                    and not _recent_silence
+                ):
+                    if _last_silent_frame_time > 0.0:
+                        _silent_age = (
+                            f"{_now_for_pre_silence - _last_silent_frame_time:.2f}s ago"
+                        )
+                    else:
+                        _silent_age = "never"
+                    log(
+                        f"[NEAR_MISS_WINDOW_BLOCKED] [{ww_name}] score={s:.3f} "
+                        f"thr={active_threshold:.2f} "
+                        f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
+                        f"win={len(_stop_hit_window.get(ww_name, ()))}"
+                        f"/{_STOP_WINDOW_HITS_REQUIRED} "
+                        f"last_silent={_silent_age} window={_PRE_SILENCE_DISCOUNT_WINDOW}s"
+                    )
 
                 if _consec_trigger or _fast_stop or _window_stop:
                     now = time.time()
