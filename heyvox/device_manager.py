@@ -1002,6 +1002,50 @@ class DeviceManager:
                     )
                     device_change_cue(_cur_out_name, "output")
                     self._hud_send({"type": "state", "text": f"Speaker: {_cur_out_name}"})
+                    # DEF-127: When the system default output switches to a BT
+                    # headset that doesn't yet show as an input device (A2DP-only
+                    # mode), auto-trigger the HFP probe — same mechanism the
+                    # manual HUD-menu pin uses. Previously the user had to click
+                    # the headset by hand even though the OS already knew which
+                    # device they wanted. The trigger fires only when:
+                    #   1. New output isn't already the active input
+                    #   2. New output isn't a built-in device (speakers don't
+                    #      have mics)
+                    #   3. No PyAudio device with this name has input channels
+                    #      yet (A2DP-only signal — BT profile hasn't switched)
+                    #   4. No probe already running for some other target
+                    try:
+                        from heyvox.audio.mic import is_builtin_mic as _is_builtin
+                        if (
+                            _cur_out_name.lower() != (self.dev_name or "").lower()
+                            and not _is_builtin(_cur_out_name)
+                            and not self._bt_hfp_target
+                        ):
+                            _has_input = False
+                            for _i in range(self.pa.get_device_count()):
+                                _info = self.pa.get_device_info_by_index(_i)
+                                if (
+                                    _info['name'].lower() == _cur_out_name.lower()
+                                    and _info['maxInputChannels'] > 0
+                                ):
+                                    _has_input = True
+                                    break
+                            if not _has_input:
+                                self._log(
+                                    f"[DEF-127] Output '{_cur_out_name}' has no "
+                                    f"input enumeration yet (likely A2DP-only), "
+                                    f"auto-triggering HFP probe — no manual "
+                                    f"HUD-menu click needed"
+                                )
+                                self._bt_trigger_hfp_switch(
+                                    _cur_out_name, sample_rate, chunk_size,
+                                )
+                                self._bt_hfp_target = _cur_out_name
+                                self._bt_hfp_trigger_time = time.time()
+                                self._bt_hfp_attempts = 0
+                                self._bt_hfp_pin_mode = False
+                    except Exception as _auto_hfp_err:
+                        self._log(f"[DEF-127] Auto-HFP-probe error: {_auto_hfp_err}")
                 self._last_output_device = _cur_out_name
             except Exception:
                 pass
