@@ -928,6 +928,29 @@ def test_def124_hfp_path_uses_expected_reinit():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-127: auto-HFP-probe when output device changes to a BT headset
+# ---------------------------------------------------------------------------
+
+
+def test_def127_output_change_auto_triggers_hfp_probe():
+    """The output-device-change branch in scan() must call _bt_trigger_hfp_switch
+    when the new output looks like an A2DP-only BT device."""
+    src = _read_device_manager_src()
+    assert "DEF-127" in src, (
+        "DEF-127 marker missing from device_manager.py — auto-HFP-probe on "
+        "output change was removed. Without it, the user has to manually "
+        "click the headset in the HUD menu every time they plug a new BT mic."
+    )
+    # The auto path must set _bt_hfp_pin_mode = False (auto-switch, not pin).
+    m = re.search(r"DEF-127[\s\S]{0,2000}?_bt_hfp_pin_mode\s*=\s*False", src)
+    assert m is not None, (
+        "DEF-127 auto-probe path must set _bt_hfp_pin_mode = False so the "
+        "switch is a passive auto-detect, not a user pin (which has stronger "
+        "stick semantics)."
+    )
+
+
 def test_def120_worker_logger_name_pinned():
     """Worker logger must be pinned to 'heyvox.herald.worker' — not getLogger(__name__).
 
