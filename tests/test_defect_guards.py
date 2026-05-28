@@ -854,6 +854,80 @@ def test_def118_near_miss_window_blocked_tag_present():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-124: mic-zombie banner UX hardening
+#
+# Three coupled fixes to device_manager.reinit():
+#   1. Banner text varies by mic type — built-in mics don't have a mute button,
+#      so "check mute" is misleading; point at Permission/exclusive-hold/HAL.
+#   2. After a successful recovery onto a different device, the warn banner
+#      is stale and must be cleared explicitly.
+#   3. HFP probe-fallback reinit is an *expected* cache flush, not an
+#      unexpected zombie — banner + error toast suppressed via expected=True.
+# ---------------------------------------------------------------------------
+
+
+def _read_device_manager_src() -> str:
+    import heyvox
+    return open(os.path.join(os.path.dirname(heyvox.__file__), "device_manager.py")).read()
+
+
+def test_def124_reinit_has_expected_kwarg():
+    """reinit() must accept an expected= kwarg so callers can suppress
+    user-visible banners when the reinit is a planned cache flush."""
+    src = _read_device_manager_src()
+    m = re.search(r"def reinit\(self,([^)]+)\)", src)
+    assert m is not None, "Could not find reinit signature in device_manager.py"
+    sig = m.group(1)
+    assert "expected" in sig, (
+        "reinit() must accept an `expected` kwarg (DEF-124). Without it, the "
+        "HFP-probe-fallback reinit can't suppress the misleading "
+        "'Mic zombie: reinitializing' toast and 'Mic silent' banner."
+    )
+
+
+def test_def124_reinit_banner_uses_builtin_specific_text():
+    """The mic-silent banner text must branch on is_builtin_mic — built-in
+    mics get a Permission/exclusive-hold hint, not the misleading 'check mute'."""
+    src = _read_device_manager_src()
+    assert "is_builtin_mic" in src, (
+        "device_manager.py must call is_builtin_mic() to differentiate the "
+        "mic-silent banner hint (DEF-124). Built-in mics have no mute button "
+        "so 'check mute' is misleading."
+    )
+    assert "Microphone permission" in src, (
+        "Built-in-mic hint must mention 'Microphone permission' as one of "
+        "the actual causes (DEF-124)."
+    )
+
+
+def test_def124_reinit_clears_banner_after_recovery():
+    """When reinit recovers onto a different device, the stale mic-silent
+    banner must be cleared explicitly (HUDSurface.clear)."""
+    src = _read_device_manager_src()
+    assert 'HUDSurface.clear("mic-zombie")' in src, (
+        'device_manager.py must call HUDSurface.clear("mic-zombie") in the '
+        "recovery-success branch (DEF-124). Without it, the warn banner "
+        "lingers in the menu bar for the full TTL even though the mic is "
+        "live again."
+    )
+
+
+def test_def124_hfp_path_uses_expected_reinit():
+    """The BT HFP probe-fallback must call reinit with expected=True so the
+    user-visible banners stay quiet when the user is the one who triggered
+    the flush."""
+    src = _read_device_manager_src()
+    # Look for any reinit() call carrying expected=True; the HFP path is
+    # the canonical caller introduced by DEF-124.
+    assert re.search(r"reinit\([^)]*expected\s*=\s*True", src), (
+        "BT HFP probe-fallback (or any expected-reinit caller) must invoke "
+        "reinit(expected=True) (DEF-124). Otherwise the misleading "
+        "'Mic silent — check mute (MacBook Pro Microphone)' banner fires "
+        "right when the user has actively clicked a different headset."
+    )
+
+
 def test_def120_worker_logger_name_pinned():
     """Worker logger must be pinned to 'heyvox.herald.worker' — not getLogger(__name__).
 
