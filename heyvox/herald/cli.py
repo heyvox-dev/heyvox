@@ -7,7 +7,11 @@ import os
 import sys
 import logging
 
-log = logging.getLogger(__name__)
+# DEF-120: pin logger name so `python -m heyvox.herald.cli` doesn't end up
+# with a "__main__" logger disconnected from the heyvox.herald handler chain.
+# cli.py currently doesn't call `log.*` directly, but several functions
+# imported into it (start_orchestrator etc.) might in the future.
+log = logging.getLogger("heyvox.herald.cli")
 
 
 def dispatch(args: list[str]) -> int:
