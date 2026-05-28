@@ -951,6 +951,26 @@ def test_def127_output_change_auto_triggers_hfp_probe():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-128: hush-noop info banner removed from menu bar
+# ---------------------------------------------------------------------------
+
+
+def test_def128_hush_noop_banner_not_emitted():
+    """heyvox/audio/media.py must NOT call HUDSurface.banner(source="hush-noop").
+    The signal is recoverable from the [media] log without the menu bar cost."""
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "audio", "media.py")).read()
+    assert not re.search(
+        r'HUDSurface\.banner\([^)]*source\s*=\s*["\']hush-noop["\']',
+        src,
+    ), (
+        "heyvox/audio/media.py must not call HUDSurface.banner(source='hush-noop') "
+        "(DEF-128). That banner fired on every TTS event with no browser media — "
+        "non-actionable noise in the menu bar."
+    )
+
+
 def test_def120_worker_logger_name_pinned():
     """Worker logger must be pinned to 'heyvox.herald.worker' — not getLogger(__name__).
 
