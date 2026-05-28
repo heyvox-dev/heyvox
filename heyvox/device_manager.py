@@ -179,7 +179,7 @@ class DeviceManager:
     # Reinit
     # -------------------------------------------------------------------------
 
-    def reinit(self, require_audio: bool = False) -> bool:
+    def reinit(self, require_audio: bool = False, expected: bool = False) -> bool:
         """Reinitialize the audio stack after a zombie stream is detected.
 
         Closes the existing stream and PyAudio instance, sleeps briefly, then
@@ -188,6 +188,17 @@ class DeviceManager:
 
         IMPORTANT: The caller must ensure ``not ctx.is_recording and not ctx.busy``
         before calling this method.
+
+        Args:
+            require_audio: If True, prefer devices that actually produce audio.
+            expected: DEF-124. True when the caller knows the reinit is the
+                deliberate consequence of an in-progress user action (e.g. the
+                BT HFP probe-fallback after the user clicked a new headset in
+                the HUD menu). Suppresses the "Mic zombie: reinitializing"
+                error toast and the mic-silent warn banner — those signals
+                exist to surface *unexpected* dead-mic events to the user,
+                and firing them during an expected cache flush misleads the
+                user into thinking their current built-in mic just died.
 
         Returns:
             True if recovery succeeded, False if no mic could be found.
@@ -201,7 +212,8 @@ class DeviceManager:
             print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
         except (BrokenPipeError, OSError):
             pass
-        self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
+        if not expected:
+            self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
         self._mic_pinned = False
 
         # Remember the failing device so we can detect "same device re-selected"
@@ -216,17 +228,35 @@ class DeviceManager:
         # mute (G435 mute button, Jabra hardware gate, etc.) — only the user
         # can. Patterns P-new + P-detector-without-action: silent state changes
         # need a visible signal. Banner auto-expires after MIC_WARN_TTL_SECS.
-        try:
-            from heyvox.hud.surface import HUDSurface
-            from heyvox.constants import MIC_WARN_TTL_SECS
-            HUDSurface.banner(
-                level="warn",
-                source="mic-zombie",
-                text=f"Mic silent — check mute ({self.dev_name[:30]})",
-                ttl_secs=MIC_WARN_TTL_SECS,
-            )
-        except Exception:
-            pass
+        #
+        # DEF-124: skip the banner when this reinit is an *expected* HFP-probe
+        # cache flush (user just clicked a new headset). Also, tailor the hint
+        # to the mic type — "check mute" makes sense for headsets with a mute
+        # button (G435, Jabra) but is misleading for built-in mics where no
+        # such button exists. For built-ins, point the user at the likely
+        # actual causes: macOS Microphone permission, another app holding the
+        # device exclusively, or a USB/HAL glitch (DEF-104).
+        if not expected:
+            try:
+                from heyvox.hud.surface import HUDSurface
+                from heyvox.constants import MIC_WARN_TTL_SECS
+                from heyvox.audio.mic import is_builtin_mic
+                if is_builtin_mic(self.dev_name):
+                    _hint_text = (
+                        f"Mic silent — check Microphone permission or "
+                        f"another app holding the device "
+                        f"({self.dev_name[:30]})"
+                    )
+                else:
+                    _hint_text = f"Mic silent — check mute ({self.dev_name[:30]})"
+                HUDSurface.banner(
+                    level="warn",
+                    source="mic-zombie",
+                    text=_hint_text,
+                    ttl_secs=MIC_WARN_TTL_SECS,
+                )
+            except Exception:
+                pass
 
         try:
             self.stream.stop_stream()
@@ -326,6 +356,17 @@ class DeviceManager:
             try:
                 print(f"[mic] Zombie reinit recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
             except (BrokenPipeError, OSError):
+                pass
+            # DEF-124: recovery succeeded onto a different device, so the
+            # mic-silent warn banner (written upstream in this same reinit)
+            # is now stale. Clear it explicitly instead of letting it linger
+            # for the remainder of MIC_WARN_TTL_SECS — leaving "Mic silent"
+            # in the menu bar after the mic actually became live again was
+            # the second of the three DEF-124 UX defects.
+            try:
+                from heyvox.hud.surface import HUDSurface
+                HUDSurface.clear("mic-zombie")
+            except Exception:
                 pass
 
         self.stream = open_mic_stream(
@@ -664,7 +705,13 @@ class DeviceManager:
             self._bt_hfp_pin_mode = False
             # scan() guards on (not is_recording and not busy), so reinit()
             # is safe here without additional checks.
-            if self.reinit(require_audio=True):
+            # DEF-124: pass expected=True — this reinit is the *intentional*
+            # PortAudio HAL cache flush triggered by the user's HUD-menu
+            # headset switch, not an unexpected zombie. Suppresses the
+            # "Mic silent — check mute (MacBook Pro Microphone)" warn banner
+            # and the "Mic zombie: reinitializing" error toast, both of
+            # which misled the user during the 2026-05-28 G435 plug-in case.
+            if self.reinit(require_audio=True, expected=True):
                 # After reinit the device list is fresh; if the BT input
                 # landed, self.dev_name will now be the target and we're
                 # done. Otherwise emit the original give-up log.
