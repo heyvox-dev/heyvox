@@ -819,6 +819,176 @@ def test_def117_stop_path_log_carries_pre_silence_field():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-118: window-path stop-wake requires pre-silence gate
+#
+# Mid-sentence FP at score=0.997 win=2/2 hits=2/2 pre_silence=False fired
+# the window-path on 2026-05-27 08:01:40 ("Ich denke der Grund ist ein...").
+# DEF-117 had gated fast-path only; this extends the same gate to window-path
+# because two-frame bursts in continuous German speech reach win=2/2 too.
+# ---------------------------------------------------------------------------
+
+
+def test_def118_window_stop_requires_recent_silence():
+    """The _window_stop predicate must include the _recent_silence term."""
+    src = _read_main_src()
+    # _window_stop spans multiple lines and contains a nested ().
+    # Match from `_window_stop = (` to the next line that is whitespace + `)`.
+    m = re.search(r"_window_stop\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _window_stop assignment in main.py"
+    block = m.group(1)
+    assert "_recent_silence" in block, (
+        "_window_stop predicate must include `and _recent_silence` (DEF-118). "
+        "Otherwise two consecutive high-score phoneme bursts in continuous "
+        "speech trigger a false stop via the window path."
+    )
+
+
+def test_def118_near_miss_window_blocked_tag_present():
+    """NEAR_MISS_WINDOW_BLOCKED log tag must exist so forensic users can see
+    how often the silence gate fires on the window path (P-detector-without-action)."""
+    src = _read_main_src()
+    assert "NEAR_MISS_WINDOW_BLOCKED" in src, (
+        "NEAR_MISS_WINDOW_BLOCKED log tag missing — DEF-118 forensic visibility "
+        "was wired alongside the gate; do not remove without replacing."
+    )
+
+
+def test_def120_worker_logger_name_pinned():
+    """Worker logger must be pinned to 'heyvox.herald.worker' — not getLogger(__name__).
+
+    Reason: the hook shim runs `python3 -m heyvox.herald.worker`, which sets
+    __name__ == "__main__". getLogger(__name__) would then orphan the logger
+    from the heyvox.herald handler chain — every log call silently writes
+    nowhere. This was DEF-120's root cause.
+    """
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "herald", "worker.py")).read()
+    assert 'getLogger("heyvox.herald.worker")' in src, (
+        "DEF-120: worker.py must pin its logger name explicitly so the "
+        "`python -m heyvox.herald.worker` entry path stays connected to the "
+        "heyvox.herald file handler. Replacing with getLogger(__name__) "
+        "silently breaks all hook-driven worker logging."
+    )
+    # Strip comment-only lines before grepping so the DEF-120 explanatory
+    # comment (which DOES reference getLogger(__name__) as the anti-pattern)
+    # doesn't false-positive against the actual binding.
+    code_lines = [
+        ln for ln in src.splitlines()
+        if not ln.lstrip().startswith("#")
+    ]
+    code_src = "\n".join(code_lines)
+    assert "getLogger(__name__)" not in code_src, (
+        "DEF-120: worker.py has an actual getLogger(__name__) binding (not "
+        "just a comment) — under the `python -m` entry point that resolves "
+        "to 'logging.getLogger(\"__main__\")', orphaned from the heyvox.herald "
+        "handler chain."
+    )
+
+
+def test_def120_worker_silent_skips_log_at_info():
+    """The three worker early-exit branches must log at INFO with forensic context.
+
+    Reason: silent DEBUG-level returns make "why didn't HeyVox speak?"
+    unanswerable from herald-debug.log. DEF-120 promoted these to INFO with
+    raw_len + hook + ws so the next missing-TTS is one grep away.
+    """
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "herald", "worker.py")).read()
+    for marker in (
+        'WORKER: no <tts> block in response',
+        'WORKER: <tts> block rejected',
+        'WORKER: verbosity=skip',
+    ):
+        assert marker in src, (
+            f"DEF-120: forensic breadcrumb {marker!r} missing — silent-skip "
+            "branches must emit one INFO line so logs answer 'did the hook "
+            "fire and skip, or did it not fire at all?'"
+        )
+
+
+def test_def120_worker_logger_writes_to_herald_debug_log_under_dash_m():
+    """End-to-end: `python -m heyvox.herald.worker` with no TTS block must
+    leave a 'WORKER: no <tts> block' line in herald-debug.log.
+
+    This is the integration test that import-only unit tests miss — it
+    catches the __name__=='__main__' logger orphan that DEF-120 was about.
+    """
+    from heyvox.constants import HERALD_DEBUG_LOG
+    # Capture log size before
+    try:
+        before_size = os.path.getsize(HERALD_DEBUG_LOG)
+    except OSError:
+        before_size = 0
+    # Invoke worker as -m with no TTS block
+    result = subprocess.run(
+        [sys.executable, "-m", "heyvox.herald.worker"],
+        input="probe response with no tts block — def120 guard",
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, (
+        f"worker exit={result.returncode} stderr={result.stderr[:200]!r}"
+    )
+    # Read what was appended
+    try:
+        with open(HERALD_DEBUG_LOG) as f:
+            f.seek(before_size)
+            appended = f.read()
+    except OSError as e:
+        pytest.fail(f"could not read {HERALD_DEBUG_LOG}: {e}")
+    assert "WORKER: no <tts> block" in appended, (
+        "DEF-120: running worker as `python -m` with no TTS block did not "
+        "leave the forensic breadcrumb in herald-debug.log. Logger pin is "
+        "broken, the silent-skip INFO promotion regressed, or the file path "
+        f"differs from HERALD_DEBUG_LOG={HERALD_DEBUG_LOG!r}. "
+        f"Appended chunk: {appended[:300]!r}"
+    )
+
+
+def test_def121_hooks_route_through_find_heyvox_python():
+    """All hook shims must route through heyvox_run_worker / find_heyvox_python.
+
+    Reason: Conductor / Claude Code may prepend project-local virtualenvs
+    (Poetry, conda, venv) to PATH that don't have heyvox installed. Bare
+    `python3 -m heyvox.herald.worker` then hits ModuleNotFoundError under
+    the hook's /dev/null redirect — silent failure, accumulating TMPFILEs,
+    no TTS for that workspace.
+    """
+    import heyvox
+    hooks_dir = os.path.join(os.path.dirname(heyvox.__file__), "herald", "hooks")
+    _lib = open(os.path.join(hooks_dir, "_lib.sh")).read()
+    assert "find_heyvox_python()" in _lib, (
+        "DEF-121: _lib.sh must define find_heyvox_python()."
+    )
+    assert "heyvox_run_worker()" in _lib, (
+        "DEF-121: _lib.sh must define heyvox_run_worker() so hook shims "
+        "share one place that resolves the interpreter."
+    )
+    # Every async-spawning hook shim must NOT use bare `python3 -m heyvox`.
+    # on-ambient is sync (exec) and is allowed to use find_heyvox_python directly.
+    for sh in ("on-response.sh", "on-notify.sh",
+               "on-session-start.sh", "on-session-end.sh"):
+        body = open(os.path.join(hooks_dir, sh)).read()
+        assert "heyvox_run_worker " in body, (
+            f"DEF-121: {sh} must call heyvox_run_worker — bare "
+            f"`python3 -m heyvox.herald.worker` hits ModuleNotFoundError "
+            f"in project-virtualenv workspaces."
+        )
+        assert "python3 -m heyvox.herald.worker" not in body, (
+            f"DEF-121: {sh} still has a bare `python3 -m heyvox.herald.worker` "
+            f"call — that resolves against the inherited PATH, including "
+            f"project virtualenvs that don't have heyvox installed. Route "
+            f"through heyvox_run_worker instead."
+        )
+    # on-ambient uses exec, so it's allowed to invoke its python directly,
+    # but must still go through find_heyvox_python.
+    amb = open(os.path.join(hooks_dir, "on-ambient.sh")).read()
+    assert "find_heyvox_python" in amb, (
+        "DEF-121: on-ambient.sh must resolve python via find_heyvox_python "
+        "before exec, not use bare `python3`."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).
