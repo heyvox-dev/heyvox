@@ -31,12 +31,26 @@ import time
 
 
 def _log(msg: str) -> None:
-    """Write to main vox log file (same as main.py's log())."""
+    """Write to main vox log file (same as main.py's log()).
+
+    DEF-126: prefer the config-resolved log_file path. main.py uses
+    `load_config().log_file` (e.g. /tmp/heyvox.log on this host), but this
+    module used to fall back to LOG_FILE_DEFAULT which resolves to
+    $TMPDIR/heyvox.log — so every [media] line landed in a parallel file and
+    was invisible to anyone tailing the main log. Pattern P-log-path-split.
+    """
     from heyvox.constants import LOG_FILE_DEFAULT
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [media] {msg}\n"
+    path = os.environ.get("HEYVOX_LOG_FILE")
+    if not path:
+        try:
+            from heyvox.config import load_config
+            path = load_config().log_file or LOG_FILE_DEFAULT
+        except Exception:
+            path = LOG_FILE_DEFAULT
     try:
-        with open(os.environ.get("HEYVOX_LOG_FILE", LOG_FILE_DEFAULT), "a") as f:
+        with open(path, "a") as f:
             f.write(line)
     except OSError:
         pass
