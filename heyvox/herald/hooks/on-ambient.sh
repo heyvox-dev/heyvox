@@ -7,4 +7,7 @@ export HERALD_HOOK_TYPE="ambient"
 . "$(dirname "$0")/_lib.sh"
 set_heyvox_pythonpath
 
-exec python3 -m heyvox.herald.worker "$@"
+# DEF-121: prefer a python with heyvox importable; on-ambient is synchronous
+# (exec replaces the shell, no background spawn), so we resolve and exec.
+HEYVOX_PY=$(find_heyvox_python || echo python3)
+exec "$HEYVOX_PY" -m heyvox.herald.worker "$@"
