@@ -10,6 +10,9 @@
  *   { action: "pause-media" }  → number (count of elements paused)
  *   { action: "resume-media", rewindSecs?: number, fadeInMs?: number }
  *       → number (count of elements resumed)
+ *   { action: "play-if-paused" }  → { played, failed, alreadyPlaying, total }
+ *       (DEF-119: unconditional play() on any paused media; used after a
+ *        tab-mute resume to recover players that MediaSession-paused on mute)
  */
 
 (() => {
@@ -102,7 +105,11 @@
   /**
    * Pauses all currently playing media elements and records them so we can
    * resume them later.
-   * @returns {number} Number of elements paused
+   * @returns {{count: number, total: number, skipped: object[], host: string, frame: string}}
+   *   Full diagnostic — background.js reads .count for the success check and
+   *   forwards the rest into the native host log so we don't need to crack
+   *   open the page DevTools console to debug why a YouTube pause fell back
+   *   to tab-mute.
    */
   function pauseAllMedia() {
     const elements = getAllMediaElements();
@@ -143,7 +150,16 @@
       skipReasons,
     );
 
-    return count;
+    // DEF-125 diagnostic: include host + frame so the background script can
+    // log which frame's content script responded (with all_frames:true the
+    // top frame and any iframes race, only the first reply wins).
+    return {
+      count,
+      total: elements.length,
+      skipped: skipReasons,
+      host: location.hostname || '',
+      frame: window === window.top ? 'top' : 'iframe',
+    };
   }
 
   /**
@@ -266,8 +282,71 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Message listener
+  // DEF-119 — Recover from tab-mute pause that triggered MediaSession-pause
   // ---------------------------------------------------------------------------
+
+  /**
+   * Calls play() on every paused media element on the page (incl. Shadow DOM).
+   * Unlike resumeAllMedia(), this is not restricted to elements pausedByHush —
+   * YouTube and similar players pause themselves when the tab is muted via
+   * chrome.tabs.update({ muted: true }), so on resume we must restart them
+   * without having tracked them on the pause side.
+   * @returns {Promise<object>} diagnostic
+   */
+  async function playIfPaused() {
+    const elements = getAllMediaElements();
+    const snapshots = [];
+    const promises = [];
+    let attempted = 0;
+    let alreadyPlaying = 0;
+
+    for (const el of elements) {
+      if (!el.paused) {
+        alreadyPlaying += 1;
+        continue;
+      }
+      if (el.ended) continue;
+      attempted += 1;
+      const snap = {
+        tag: el.tagName,
+        currentTime: el.currentTime,
+        duration: el.duration,
+        readyState: el.readyState,
+        muted: el.muted,
+      };
+      snapshots.push(snap);
+      try {
+        const p = el.play();
+        if (p instanceof Promise) {
+          promises.push(
+            p.then(() => ({ ok: true })).catch((err) => ({
+              ok: false,
+              error: `${err?.name || 'Error'}: ${err?.message || String(err)}`,
+            }))
+          );
+        } else {
+          promises.push(Promise.resolve({ ok: true }));
+        }
+      } catch (err) {
+        promises.push(
+          Promise.resolve({
+            ok: false,
+            error: `${err?.name || 'Error'}: ${err?.message || String(err)}`,
+          })
+        );
+      }
+    }
+    const results = await Promise.all(promises);
+    const played = results.filter((r) => r.ok).length;
+    return {
+      total: elements.length,
+      attempted,
+      played,
+      failed: results.length - played,
+      alreadyPlaying,
+      snapshot: snapshots,
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // Text injection
@@ -348,8 +427,11 @@
         return false;
 
       case 'pause-media': {
-        const paused = pauseAllMedia();
-        sendResponse(paused);
+        // DEF-125: now returns {count, total, skipped, host, frame} so the
+        // background script can forward the diagnostic into hush.log. The
+        // .count field preserves the historical "truthy = success" contract.
+        const result = pauseAllMedia();
+        sendResponse(result);
         return false;
       }
 
@@ -357,6 +439,12 @@
         const rewind = message.rewindSecs || 0;
         const fade = message.fadeInMs || 0;
         resumeAllMedia(rewind, fade).then((diag) => sendResponse(diag));
+        return true; // async response
+      }
+
+      case 'play-if-paused': {
+        // DEF-119: post-unmute recovery for tab-mute pauses.
+        playIfPaused().then((diag) => sendResponse(diag));
         return true; // async response
       }
 
