@@ -899,6 +899,60 @@ def _make_menu_action_class():
             import webbrowser
             webbrowser.open("https://heyvox.dev")
 
+        def telemetryToggle_(self, sender):
+            """Flip telemetry on or off and persist to config.
+
+            Also starts or stops the background sender thread in the running
+            daemon so the change takes effect immediately, not just on restart.
+            """
+            try:
+                from heyvox.telemetry.consent import is_enabled, enable, disable
+                from heyvox.telemetry.sender import (
+                    start_background as _tm_start,
+                    stop_background as _tm_stop,
+                )
+                if is_enabled():
+                    disable()
+                    _tm_stop(timeout=1.0)
+                else:
+                    enable()
+                    _tm_start()
+            except Exception as exc:
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Telemetry toggle failed")
+                    a.setInformativeText_(str(exc))
+                    a.runModal()
+                except Exception:
+                    pass
+
+        def telemetryShowSent_(self, sender):
+            """Open the telemetry documentation in the system browser."""
+            import webbrowser
+            # docs/telemetry.md ships on the heyvox.dev landing site too.
+            webbrowser.open("https://heyvox.dev/telemetry.html")
+
+        def telemetryResetId_(self, sender):
+            """Generate a fresh anonymous ID and show it in an alert."""
+            try:
+                from heyvox.telemetry.consent import reset_anon_id
+                new_id = reset_anon_id()
+                from AppKit import NSAlert
+                a = NSAlert.alloc().init()
+                a.setMessageText_("New anonymous ID")
+                a.setInformativeText_(new_id)
+                a.runModal()
+            except Exception as exc:
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Reset failed")
+                    a.setInformativeText_(str(exc))
+                    a.runModal()
+                except Exception:
+                    pass
+
         def reportIssue_(self, sender):
             """Open the Report Issue dialog → build bundle → open GitHub Issue."""
             try:
@@ -1667,6 +1721,49 @@ def _build_transcript_menu(handler):
     report_item.setEnabled_(True)
     _styled(report_item)
     settings_sub.addItem_(report_item)
+
+    # "Telemetry" submenu — opt-in anonymous usage signals.
+    try:
+        from heyvox.telemetry.consent import is_enabled as _tm_is_enabled
+        _tm_on = _tm_is_enabled()
+    except Exception:
+        _tm_on = False
+
+    tm_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"Telemetry: {'On' if _tm_on else 'Off'}", None, "",
+    )
+    _styled(tm_parent)
+    tm_sub = NSMenu.alloc().init()
+
+    tm_toggle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Disable telemetry" if _tm_on else "Enable telemetry",
+        "telemetryToggle:", "",
+    )
+    tm_toggle.setTarget_(handler)
+    tm_toggle.setEnabled_(True)
+    _styled(tm_toggle)
+    tm_sub.addItem_(tm_toggle)
+
+    tm_sub.addItem_(NSMenuItem.separatorItem())
+
+    tm_what = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "What's being sent…", "telemetryShowSent:", "",
+    )
+    tm_what.setTarget_(handler)
+    tm_what.setEnabled_(True)
+    _styled(tm_what)
+    tm_sub.addItem_(tm_what)
+
+    tm_reset = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Reset anonymous ID", "telemetryResetId:", "",
+    )
+    tm_reset.setTarget_(handler)
+    tm_reset.setEnabled_(True)
+    _styled(tm_reset)
+    tm_sub.addItem_(tm_reset)
+
+    tm_parent.setSubmenu_(tm_sub)
+    settings_sub.addItem_(tm_parent)
 
     # DEF-100: drain held TTS messages from cross-workspace hold queue.
     # One tap drains one held WAV regardless of which workspace it belongs to.
