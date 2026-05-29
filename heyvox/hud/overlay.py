@@ -899,6 +899,53 @@ def _make_menu_action_class():
             import webbrowser
             webbrowser.open("https://heyvox.dev")
 
+        def reportIssue_(self, sender):
+            """Open the Report Issue dialog → build bundle → open GitHub Issue."""
+            try:
+                from heyvox.reporting.dialog import prompt_for_report
+                from heyvox.reporting.bundle import build_bundle, summarize_bundle
+                from heyvox.reporting.text_report import run_bugreport
+                from heyvox.reporting.issue import (
+                    build_issue_url,
+                    open_in_browser,
+                    reveal_in_finder,
+                )
+            except Exception as exc:
+                # Surface the failure to the user via a fallback alert.
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Report Issue unavailable")
+                    a.setInformativeText_(f"Could not load reporting module: {exc}")
+                    a.runModal()
+                except Exception:
+                    pass
+                return
+
+            opts = prompt_for_report()
+            if opts is None:
+                return  # Cancelled
+
+            try:
+                zip_path = build_bundle(opts)
+            except Exception as exc:
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Bundle build failed")
+                    a.setInformativeText_(str(exc))
+                    a.runModal()
+                except Exception:
+                    pass
+                return
+
+            body = run_bugreport(opts.comment)
+            first_line = (opts.comment.splitlines() or [""])[0]
+            title = "[Bug] " + (first_line[:80] if first_line else "")
+            url = build_issue_url(title, body, bundle_path=zip_path)
+            open_in_browser(url)
+            reveal_in_finder(zip_path)
+
         def toggleOverlay_(self, sender):
             """Toggle the floating pill overlay on/off at runtime. Persists to config."""
             global _MENU_BAR_ONLY
@@ -1611,6 +1658,15 @@ def _build_transcript_menu(handler):
     log_item.setEnabled_(True)
     _styled(log_item)
     settings_sub.addItem_(log_item)
+
+    # "Report Issue…" — bundles logs + diagnostics, opens pre-filled GitHub Issue.
+    report_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Report Issue…", "reportIssue:", "",
+    )
+    report_item.setTarget_(handler)
+    report_item.setEnabled_(True)
+    _styled(report_item)
+    settings_sub.addItem_(report_item)
 
     # DEF-100: drain held TTS messages from cross-workspace hold queue.
     # One tap drains one held WAV regardless of which workspace it belongs to.
