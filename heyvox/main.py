@@ -1602,6 +1602,19 @@ def main() -> None:
     ensure_run_dirs()
     config = load_config()
 
+    # Telemetry: only start the background thread when the user has opted in.
+    # No-op when telemetry.enabled is False — the thread checks the flag each
+    # cycle, so a runtime toggle takes effect within one batch interval.
+    telemetry_started = False
+    try:
+        if config.telemetry.enabled:
+            from heyvox.telemetry.sender import start_background as _tm_start
+            _tm_start()
+            telemetry_started = True
+            log("Telemetry thread started")
+    except Exception as exc:
+        log(f"Telemetry init failed (continuing): {exc}")
+
     ctx, devices, recording, model, use_separate_words, hud_send, aec_active, profile_manager = _setup(config)
 
     from heyvox.audio.tts import shutdown as _shutdown_tts
@@ -1611,6 +1624,12 @@ def main() -> None:
                   profile_manager=profile_manager)
     finally:
         log("Cleaning up...")
+        if telemetry_started:
+            try:
+                from heyvox.telemetry.sender import stop_background as _tm_stop
+                _tm_stop(timeout=2.0)
+            except Exception:
+                pass
         cleanup_ipc_files(herald_too=False)
         if ctx.hud_client:
             ctx.hud_client.close()

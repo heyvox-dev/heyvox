@@ -776,6 +776,65 @@ def _cmd_bugreport(args):
         print(report)
 
 
+def _cmd_telemetry(args):
+    """Inspect or toggle anonymous telemetry.
+
+    Subcommands: status (default), enable, disable, preview, reset-id.
+    """
+    from heyvox.telemetry import consent
+    from heyvox.telemetry import events as evmod
+    from heyvox.telemetry import sender
+
+    action = getattr(args, "telemetry_action", None) or "status"
+
+    if action == "enable":
+        consent.enable()
+        print(f"Telemetry enabled. Anonymous ID: {consent.get_anon_id()}")
+        print("Run `heyvox telemetry preview` to see what gets sent.")
+        return
+
+    if action == "disable":
+        consent.disable()
+        print("Telemetry disabled.")
+        return
+
+    if action == "reset-id":
+        new_id = consent.reset_anon_id()
+        print(f"New anonymous ID: {new_id}")
+        return
+
+    if action == "preview":
+        print(evmod.preview())
+        return
+
+    # status (default)
+    from pathlib import Path
+    from heyvox.constants import (
+        TELEMETRY_QUEUE_DIR,
+        TELEMETRY_LAST_BATCH_FILE,
+    )
+
+    print(f"Telemetry enabled : {consent.is_enabled()}")
+    aid = consent.get_anon_id(create_if_missing=False)
+    print(f"Anonymous ID      : {aid or '(not yet generated)'}")
+    try:
+        from heyvox.config import load_config
+        cfg = load_config().telemetry
+        print(f"Endpoint          : {cfg.endpoint}")
+        print(f"Batch interval    : {cfg.batch_secs}s")
+    except Exception as exc:
+        print(f"Config read failed: {exc}")
+    queued = list(Path(TELEMETRY_QUEUE_DIR).glob("batch-*.json")) if Path(TELEMETRY_QUEUE_DIR).exists() else []
+    print(f"Queued batches    : {len(queued)}")
+    last = Path(TELEMETRY_LAST_BATCH_FILE)
+    if last.exists():
+        import time as _t
+        age = int(_t.time() - last.stat().st_mtime)
+        print(f"Last attempt      : {age}s ago")
+    else:
+        print("Last attempt      : never")
+
+
 def _cmd_register(args):
     """Register (or re-register) HeyVox MCP server with AI coding agents."""
     from heyvox.setup.wizard import _detect_mcp_agents, _register_mcp_agent
@@ -1198,6 +1257,20 @@ def main():
     )
     sub_bugreport.set_defaults(func=_cmd_bugreport)
 
+
+    # telemetry — opt-in anonymous telemetry
+    sub_telemetry = subparsers.add_parser(
+        "telemetry",
+        help="Inspect or toggle anonymous telemetry (opt-in)",
+    )
+    sub_telemetry.add_argument(
+        "telemetry_action",
+        nargs="?",
+        default="status",
+        choices=["status", "enable", "disable", "preview", "reset-id"],
+        help="Action: status (default), enable, disable, preview, reset-id",
+    )
+    sub_telemetry.set_defaults(func=_cmd_telemetry)
 
     # register — register MCP server with AI agents
     sub_register = subparsers.add_parser("register", help="Register HeyVox MCP server with AI coding agents")

@@ -252,6 +252,19 @@ HUSH_LOG = f"{_TMP}/hush.log"
 
 HEYVOX_STATE_FILE = f"{_TMP}/heyvox-state.json"
 
+# ---------------------------------------------------------------------------
+# Telemetry (opt-in) — persistent, lives under the config dir not /tmp/.
+# Must survive reboots so queued events can retry. Sender writes batches as
+# JSON files into the queue dir; each successful upload deletes the file.
+# ---------------------------------------------------------------------------
+
+_HOME = os.path.expanduser("~")
+TELEMETRY_DIR = f"{_HOME}/.config/heyvox/telemetry"
+TELEMETRY_ID_FILE = f"{TELEMETRY_DIR}/anon-id"
+TELEMETRY_QUEUE_DIR = f"{TELEMETRY_DIR}/queue"
+TELEMETRY_LAST_BATCH_FILE = f"{TELEMETRY_DIR}/last-batch"
+TELEMETRY_COUNTER_SNAPSHOT = f"{TELEMETRY_DIR}/counter-snapshot.json"
+
 
 # ---------------------------------------------------------------------------
 # IPC lifecycle helpers

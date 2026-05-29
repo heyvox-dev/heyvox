@@ -497,6 +497,34 @@ class MicProfileEntryConfig(BaseModel):
 # Root config model
 # ---------------------------------------------------------------------------
 
+class TelemetryConfig(BaseModel):
+    """Anonymous telemetry — opt-in, default OFF.
+
+    What's sent (only when enabled):
+    * App version, macOS version, Mac model.
+    * Counter deltas: USER_EFFORT, NEAR_MISS, WAKE_VAD_DROP, MIC_ZOMBIE,
+      KOKORO_RESTART (numbers only, no log content).
+    * Anonymous random UUID stored at ``~/.config/heyvox/telemetry-id``.
+
+    What is NOT sent:
+    * Audio samples, transcripts, file paths, config contents, workspace names.
+
+    See ``docs/telemetry.md`` for the full field list.
+    """
+    # Master switch. Default off; flipped on via setup wizard or HUD menu.
+    enabled: bool = False
+
+    # POST endpoint for batched events. Server may not exist yet; the sender
+    # tolerates connection failures and keeps queued events on disk.
+    endpoint: str = "https://heyvox.dev/telemetry/v1/events"
+
+    # Batch cadence — minimum seconds between upload attempts.
+    batch_secs: int = 3600
+
+    # Hard ceiling on a single batch payload to avoid runaway growth.
+    max_batch_kb: int = 100
+
+
 class HeyvoxConfig(BaseModel):
     """Root configuration model for the heyvox voice layer.
 
@@ -555,6 +583,9 @@ class HeyvoxConfig(BaseModel):
 
     log_file: str = LOG_FILE_DEFAULT
     log_max_bytes: int = 1_000_000
+
+    # Anonymous telemetry — opt-in (see TelemetryConfig docstring)
+    telemetry: TelemetryConfig = TelemetryConfig()
 
     @field_validator("target_mode")
     @classmethod
