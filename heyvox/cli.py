@@ -722,9 +722,48 @@ def _cmd_doctor(args):
 
 
 def _cmd_bugreport(args):
-    """Generate a structured bug report for GitHub Issues."""
-    from heyvox.doctor import run_bugreport
-    report = run_bugreport()
+    """Generate a structured bug report for GitHub Issues.
+
+    Two modes:
+    * default — Markdown text summary to clipboard (paste into issue body).
+    * ``--bundle`` — full zip with logs + config + diagnostics in
+      ``~/Downloads/``; optionally opens a pre-filled GitHub Issue.
+    """
+    from heyvox.reporting.text_report import run_bugreport
+    from heyvox.reporting.bundle import (
+        BundleOptions,
+        build_bundle,
+        summarize_bundle,
+    )
+    from heyvox.reporting.issue import (
+        build_issue_url,
+        open_in_browser,
+        reveal_in_finder,
+    )
+
+    comment = getattr(args, "comment", "") or ""
+
+    if getattr(args, "bundle", False):
+        opts = BundleOptions(
+            comment=comment,
+            include_transcripts=getattr(args, "include_transcripts", False),
+        )
+        zip_path = build_bundle(opts)
+        print(f"Bundle written: {zip_path}")
+        print(summarize_bundle(zip_path))
+
+        if getattr(args, "open_issue", False):
+            body = run_bugreport(comment)
+            title = "[Bug] " + (comment.splitlines()[0][:80] if comment else "")
+            url = build_issue_url(title, body, bundle_path=zip_path)
+            open_in_browser(url)
+            reveal_in_finder(zip_path)
+            print("Opened GitHub Issue in your browser and revealed the bundle in Finder.")
+            print("Drag the .zip into the issue comment box before submitting.")
+        return
+
+    # Default: text report → clipboard
+    report = run_bugreport(comment)
     if getattr(args, "clipboard", True):
         try:
             import subprocess
@@ -1133,7 +1172,29 @@ def main():
         dest="clipboard",
         action="store_false",
         default=True,
-        help="Print to stdout instead of copying to clipboard",
+        help="Print to stdout instead of copying to clipboard (text mode only)",
+    )
+    sub_bugreport.add_argument(
+        "--bundle",
+        action="store_true",
+        help="Build a full zip bundle (logs + config + diagnostics) in ~/Downloads/",
+    )
+    sub_bugreport.add_argument(
+        "--open-issue",
+        dest="open_issue",
+        action="store_true",
+        help="With --bundle: also open a pre-filled GitHub Issue in your browser",
+    )
+    sub_bugreport.add_argument(
+        "--include-transcripts",
+        dest="include_transcripts",
+        action="store_true",
+        help="With --bundle: also include the last 20 transcripts (private text)",
+    )
+    sub_bugreport.add_argument(
+        "--comment", "-m",
+        default="",
+        help="Short description of the problem (included in the report body)",
     )
     sub_bugreport.set_defaults(func=_cmd_bugreport)
 
