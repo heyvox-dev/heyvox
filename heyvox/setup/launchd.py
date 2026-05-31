@@ -214,34 +214,31 @@ def get_status() -> dict:
     if result.returncode != 0:
         return {"loaded": False, "running": False, "pid": None, "exit_code": None}
 
-    # Output format: PID\tExitCode\tLabel
-    # "-" in PID column means not running
-    lines = result.stdout.strip().splitlines()
-    if not lines:
-        return {"loaded": False, "running": False, "pid": None, "exit_code": None}
+    # `launchctl list <label>` returns a property-list dict, NOT the
+    # tab-separated `PID\tExitCode\tLabel` rows of the bare `launchctl list`:
+    #   {
+    #       "PID" = 14091;
+    #       "LastExitStatus" = 0;
+    #       ...
+    #   };
+    # The "PID" key is present only while a process is alive; a loaded-but-
+    # stopped job has "LastExitStatus" but no "PID". (DEF: status always
+    # reported "Stopped" because the old tab-split parser hit the closing
+    # "};" line, found <3 columns, and bailed to running=False.)
+    import re
 
-    # Skip header line if present
-    data_line = lines[-1]
-    parts = data_line.split("\t")
-    if len(parts) < 3:
-        return {"loaded": True, "running": False, "pid": None, "exit_code": None}
-
-    pid_str, exit_str, _label = parts[0], parts[1], parts[2]
-
+    out = result.stdout
     pid = None
     running = False
-    if pid_str != "-":
-        try:
-            pid = int(pid_str)
-            running = True
-        except ValueError:
-            pass
+    m = re.search(r'"PID"\s*=\s*(\d+)', out)
+    if m:
+        pid = int(m.group(1))
+        running = True
 
     exit_code = None
-    try:
-        exit_code = int(exit_str)
-    except ValueError:
-        pass
+    m = re.search(r'"LastExitStatus"\s*=\s*(-?\d+)', out)
+    if m:
+        exit_code = int(m.group(1))
 
     return {
         "loaded": True,

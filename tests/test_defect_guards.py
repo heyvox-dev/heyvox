@@ -1136,3 +1136,75 @@ def test_shellcheck_all_scripts():
     assert not failures, (
         f"ShellCheck errors in {len(failures)} file(s):\n" + "\n\n".join(failures)
     )
+
+
+# Real `launchctl list com.heyvox.listener` output (label-mode): a property-list
+# dict, NOT the tab-separated PID\tExit\tLabel rows of bare `launchctl list`.
+_LAUNCHCTL_RUNNING = """{
+\t"StandardOutPath" = "/tmp/heyvox.log";
+\t"Label" = "com.heyvox.listener";
+\t"OnDemand" = false;
+\t"LastExitStatus" = 0;
+\t"PID" = 14091;
+\t"Program" = "/Users/work/.pyenv/versions/3.12.12/bin/python";
+};
+"""
+
+# Loaded-but-stopped: dict has LastExitStatus but no "PID" key.
+_LAUNCHCTL_STOPPED = """{
+\t"StandardOutPath" = "/tmp/heyvox.log";
+\t"Label" = "com.heyvox.listener";
+\t"OnDemand" = false;
+\t"LastExitStatus" = 0;
+\t"Program" = "/Users/work/.pyenv/versions/3.12.12/bin/python";
+};
+"""
+
+
+def test_def130_status_parses_running_plist_dict():
+    """get_status() must read launchctl's label-mode plist-dict output.
+
+    DEF-130: get_status() ran `launchctl list <label>` (which returns a
+    plist dict) but parsed it as the tab-separated `PID\\tExit\\tLabel` rows
+    of the bare `launchctl list`. The closing "};" line had <3 tab fields,
+    so it always returned running=False — `heyvox status` reported "Stopped"
+    while the daemon was alive. Feed the real dict format and assert it's
+    read as running.
+    """
+    from unittest.mock import patch, MagicMock
+    from heyvox.setup import launchd
+
+    with patch("heyvox.setup.launchd.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_LAUNCHCTL_RUNNING)
+        status = launchd.get_status()
+
+    assert status["running"] is True, (
+        "DEF-130: a live daemon (PID present in launchctl plist dict) must "
+        f"parse as running, got {status!r}"
+    )
+    assert status["pid"] == 14091, (
+        f"DEF-130: must extract PID 14091 from the plist dict, got {status['pid']!r}"
+    )
+    assert status["loaded"] is True
+    assert status["exit_code"] == 0
+
+
+def test_def130_status_parses_stopped_plist_dict():
+    """A loaded-but-stopped job has LastExitStatus but no PID key.
+
+    DEF-130: must report running=False without a "PID" key, and still
+    surface the last exit code.
+    """
+    from unittest.mock import patch, MagicMock
+    from heyvox.setup import launchd
+
+    with patch("heyvox.setup.launchd.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_LAUNCHCTL_STOPPED)
+        status = launchd.get_status()
+
+    assert status["running"] is False, (
+        f"DEF-130: no PID key means not running, got {status!r}"
+    )
+    assert status["pid"] is None
+    assert status["loaded"] is True
+    assert status["exit_code"] == 0
