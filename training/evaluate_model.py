@@ -101,7 +101,11 @@ def evaluate(
         print("ERROR: openwakeword required. Install with: pip install openwakeword", file=sys.stderr)
         sys.exit(2)
 
-    model = Model(wakeword_models=[model_path])
+    # openwakeword defaults to inference_framework="tflite"; an .onnx model
+    # then raises "tflite ... but onnx models were provided". Pick the framework
+    # from the extension, mirroring heyvox/audio/wakeword.py's runtime loader.
+    framework = "onnx" if str(model_path).endswith(".onnx") else "tflite"
+    model = Model(wakeword_models=[model_path], inference_framework=framework)
     wake_name = Path(model_path).stem  # "hey_vox.onnx" -> "hey_vox"
 
     # True-positive rate: fraction of positive clips that triggered at threshold
