@@ -35,6 +35,8 @@ PILL_MARGIN_RIGHT = 16  # Default distance from right edge of screen
 ANIM_DURATION = 0.2
 from heyvox.constants import HUD_POSITION_FILE as POSITION_FILE  # Persists user-dragged position
 _MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
+_LAST_STATE = "idle"    # DEF-135: last state applied; lets the overlay-mode toggle re-apply it
+_REAPPLY_STATE = None   # DEF-135: set by main() — re-applies _LAST_STATE to pill + menu bar
 
 _MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.png")
 
@@ -371,6 +373,12 @@ def _apply_state(
     """
     from AppKit import NSAnimationContext, NSColor, NSScreen
 
+    # DEF-135: remember the last applied state so a runtime overlay-mode toggle
+    # can re-apply it through this same path instead of force-showing a blank,
+    # un-painted window.
+    global _LAST_STATE
+    _LAST_STATE = state_str
+
     # Update menu bar status icon + label
     _STATUS_LABELS = {
         "idle":       ("\U0001f399", ""),                # 🎙 (icon only)
@@ -663,7 +671,12 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                 pass  # v1: ignore; future: show badge count
 
             elif msg_type == "error":
-                print(f"[HUD] Error from client: {msg_dict.get('message', '')}", file=sys.stderr)
+                # DEF-136: senders (device_manager, recording) put the text in
+                # 'text'; the old code read 'message' and logged an empty string
+                # on every mic-error event (46 blank lines observed). Read 'text'
+                # first, 'message' as fallback.
+                _err = msg_dict.get("text") or msg_dict.get("message") or ""
+                print(f"[HUD] Error from client: {_err}", file=sys.stderr)
 
     return _Dispatcher
 
@@ -1004,20 +1017,13 @@ def _make_menu_action_class():
             """Toggle the floating pill overlay on/off at runtime. Persists to config."""
             global _MENU_BAR_ONLY
             _MENU_BAR_ONLY = not _MENU_BAR_ONLY
-            if _MENU_BAR_ONLY:
-                sender.setState_(0)  # NSOffState — no checkmark
-                # Hide the pill window
-                from AppKit import NSApplication
-                for w in NSApplication.sharedApplication().windows():
-                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
-                        w.orderOut_(None)
-            else:
-                sender.setState_(1)  # NSOnState — checkmark
-                # Immediately show the pill window
-                from AppKit import NSApplication
-                for w in NSApplication.sharedApplication().windows():
-                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
-                        w.orderFrontRegardless()
+            sender.setState_(0 if _MENU_BAR_ONLY else 1)  # checkmark when pill shown
+            # DEF-135: re-apply the current state through the canonical path so
+            # the window is hidden (menu-bar-only) or shown *and painted* (pill).
+            # The old code force-showed an un-painted window, surfacing an empty
+            # frosted box until the next state message arrived.
+            if _REAPPLY_STATE is not None:
+                _REAPPLY_STATE()
             # Persist to config so it survives restarts
             try:
                 from heyvox.config import update_config
@@ -1998,6 +2004,16 @@ def main(menu_bar_only: bool = False):
     from AppKit import NSStatusBar, NSVariableStatusItemLength
     status_bar = NSStatusBar.systemStatusBar()
     status_item = status_bar.statusItemWithLength_(NSVariableStatusItemLength)
+    # DEF-134: persist the menu bar item's position across launches. Without an
+    # autosave name macOS re-places the item arbitrarily on every start — so it
+    # randomly landed in front (visible) or in the notch/clutter zone (hidden),
+    # which read as "the recording indicator doesn't show up". With it, the
+    # user's ⌘-drag position sticks. (Does not override notch clipping on a
+    # full menu bar — that's a macOS limit, not ours.)
+    try:
+        status_item.setAutosaveName_("com.heyvox.menubar")
+    except Exception:
+        pass
     status_button = status_item.button()
 
     # State icons for menu bar — using Unicode text rendered as the icon
@@ -2057,6 +2073,14 @@ def main(menu_bar_only: bool = False):
         status_item=status_item, update_status_menu=_update_status_menu,
     )
     dispatcher = DispatcherClass.alloc().init()
+
+    # DEF-135: expose a hook so the menu-bar overlay toggle can re-apply the
+    # current state through the canonical dispatcher path. The menu action runs
+    # on the main thread, so applyMessage_ can be called directly here.
+    global _REAPPLY_STATE
+    def _reapply_current_state():
+        dispatcher.applyMessage_({"type": "state", "state": _LAST_STATE})
+    _REAPPLY_STATE = _reapply_current_state
 
     # ---- HUD IPC server ----
     def on_message(msg: dict) -> None:
