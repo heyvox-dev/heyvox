@@ -114,7 +114,7 @@ behoben).
   **Context:** Spike 001 (`.planning/spikes/001-auto-glossary-extraction/`)
   **Plans:** 4 plans (3 waves)
   Plans:
-  - [ ] 16-01-PLAN.md — Wave 0 test scaffolding: promote spike fixtures + deterministic scorer eval + pipeline test stubs + test_config extensions
+  - [x] 16-01-PLAN.md — Wave 0 test scaffolding: promote spike fixtures + deterministic scorer eval + pipeline test stubs + test_config extensions
   - [ ] 16-02-PLAN.md — Consumer wiring: STTLocalConfig.initial_prompt + VocabLearnerConfig + stt.py module-global thread + main.py call site
   - [ ] 16-03-PLAN.md — Learner pipeline (vocab_learner.py): GlossaryItem + wake/gibberish guardrails + Haiku extraction (CLI + API) + idempotent merge + 223-token cap + fail-closed learn_vocab
   - [ ] 16-04-PLAN.md — CLI surface: heyvox learn-vocab subcommand + config write + run summary + Open Question 2 insert test + anthropic optional extra
@@ -146,4 +146,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | Q. Banner UX (icon + tooltip) | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. Stop-wake VAD silence gate | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. DEF-080 herald CLI pin | v1.3 | 1/1 | Complete | 2026-05-25 |
-| 16. STT Auto-Glossary | v1.4 | 0/4 | Planned | — |
+| 16. STT Auto-Glossary | v1.4 | 1/4 | In Progress|  |
