@@ -38,6 +38,7 @@ _mlx_unload_secs: float = 600.0  # 10 minutes idle → unload (short timeouts ca
 _mlx_unloader: threading.Timer | None = None
 _mlx_transcribing: bool = False  # Guard: prevents unload during active transcription
 _log_fn: Callable[[str], None] | None = None
+_mlx_initial_prompt: str = ""   # Phase 16: glossary bias for the first decode window
 
 
 def _log(msg: str) -> None:
@@ -132,6 +133,7 @@ def init_local_stt(
     language: str = "",
     threads: int = 4,
     log_fn: Callable[[str], None] | None = None,
+    initial_prompt: str = "",
 ) -> None:
     """Initialize local STT engine.
 
@@ -145,14 +147,18 @@ def init_local_stt(
         language: Language code (e.g. "en") or "" for auto-detect.
         threads: CPU thread count for sherpa backend.
         log_fn: Optional callable(str) for log messages. Defaults to print.
+        initial_prompt: Rendered glossary string for MLX Whisper biasing (Phase 16).
     """
-    global _recognizer, _mlx_model_id, _mlx_language, _log_fn
+    global _recognizer, _mlx_model_id, _mlx_language, _log_fn, _mlx_initial_prompt
     _log_fn = log_fn
 
     if engine == "mlx":
         _mlx_model_id = mlx_model
         _mlx_language = language
-        _log(f"Local STT configured (MLX Metal GPU, lazy load, lang={'auto' if not language else language})")
+        _mlx_initial_prompt = initial_prompt
+        _log(f"Local STT configured (MLX Metal GPU, lazy load, "
+             f"lang={'auto' if not language else language}, "
+             f"glossary={'on' if initial_prompt else 'off'})")
     else:
         try:
             import sherpa_onnx
@@ -251,6 +257,11 @@ def transcribe_audio(
         kwargs["condition_on_previous_text"] = False
         kwargs["compression_ratio_threshold"] = 2.2
         kwargs["logprob_threshold"] = -0.8
+        # Phase 16: bias the first decode window toward the learned glossary. Engine-gated —
+        # sherpa-onnx has no initial_prompt equivalent (Pitfall 5). With
+        # condition_on_previous_text=False (above) this only affects the first 30s window — by design.
+        if _mlx_initial_prompt and engine == "mlx":
+            kwargs["initial_prompt"] = _mlx_initial_prompt
 
         # Run transcription with timeout to prevent hangs.
         # Use context manager so the executor waits for completion on success,
