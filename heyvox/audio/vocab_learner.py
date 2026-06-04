@@ -187,6 +187,71 @@ def build_initial_prompt(items: list[dict], max_terms: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic eval scorer (shared by tests + `learn-vocab --eval`)
+# ---------------------------------------------------------------------------
+# Single source of truth: tests/test_autoglossary_eval.py imports these so the
+# `--eval` CLI harness and the CI eval use identical scoring logic. Pure set
+# arithmetic — NO subprocess / LLM (guarded by test_eval_does_not_shell_out).
+
+_EVAL_WAKE_RIGHT: frozenset[str] = frozenset({"heyvox", "hey vox", "vox", "hey-vox"})
+_EVAL_WAKE_WRONG = re.compile(
+    r"\b(hey|hay|hai|high|hem|hand|a|ah|hoi)[ ,!-]*"
+    r"(vox|box|wox|wux|wops|wax|walk|works|folks|john|jarvis|travis|chav\w*|"
+    r"charlie|charvis|charmis|chuck|ciao|job|avis|hr\w*|child)\b",
+    re.I,
+)
+
+
+def classify_eval(wrong: str, right: str, canonical: dict[str, str]) -> str:
+    """Classify one glossary entry for eval scoring.
+
+    Returns ``"wakeword"`` (a wake form leaked in — always a miss),
+    ``"content-hit"`` (``right`` is a known canonical correction), or
+    ``"other-FP"`` (a correction not in the ground-truth canonical set).
+    ``canonical`` maps lowercased canonical spelling -> canonical spelling.
+    """
+    r, w = right.strip().lower(), wrong.strip().lower()
+    if r in _EVAL_WAKE_RIGHT or _EVAL_WAKE_WRONG.search(w) or _EVAL_WAKE_WRONG.search(r):
+        return "wakeword"
+    if r in canonical:
+        return "content-hit"
+    return "other-FP"
+
+
+def score_glossary(glossary: list[dict], ground_truth: dict) -> dict:
+    """Deterministically score *glossary* against *ground_truth*'s canonical set.
+
+    Pure set arithmetic — no live model or shell call. Returns recall,
+    precision, the bucket counts (content / fp / wake), and the set of
+    canonical terms hit.
+    """
+    canonical = {c.lower(): c for c in ground_truth.get("canonical_set", [])}
+    buckets: dict[str, list] = {"content-hit": [], "wakeword": [], "other-FP": []}
+    canon_hit: set[str] = set()
+    for it in glossary:
+        wrong, right = str(it.get("wrong", "")), str(it.get("right", ""))
+        if not wrong or not right:
+            continue
+        cat = classify_eval(wrong, right, canonical)
+        buckets[cat].append((wrong, right))
+        if cat == "content-hit":
+            canon_hit.add(canonical[right.strip().lower()])
+    n_content = len(buckets["content-hit"])
+    n_fp = len(buckets["other-FP"])
+    total_canon = len(canonical)
+    recall = len(canon_hit) / total_canon if total_canon else 0.0
+    precision = n_content / (n_content + n_fp) if (n_content + n_fp) else 0.0
+    return {
+        "recall": recall,
+        "precision": precision,
+        "wake": len(buckets["wakeword"]),
+        "content": n_content,
+        "fp": n_fp,
+        "canon_hit": canon_hit,
+    }
+
+
+# ---------------------------------------------------------------------------
 # LLM extraction — primary (subscription CLI) path
 # ---------------------------------------------------------------------------
 
@@ -197,15 +262,28 @@ SYSTEM = (
 
 
 def _parse_json_array(text: str) -> list[dict]:
-    """Strip markdown fences / prose and parse the FIRST JSON array.
+    """Strip markdown fences / prose and parse the first JSON *array* in *text*.
 
     Even with the JSON-only system prompt, Haiku wraps output in ```json … ```.
     Observed in the spike and verified at runtime on this machine.
+
+    Uses an incremental decoder rather than a greedy ``\\[.*\\]`` regex: the
+    greedy form spans from the first ``[`` to the LAST ``]``, so any bracketed
+    prose before/after the real array (e.g. "see [1]") corrupted the match.
+    We instead try ``raw_decode`` at each ``[`` until one yields a JSON list,
+    which also ignores trailing prose after a valid array.
     """
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        raise ValueError(f"no JSON array in CLI output: {text[:200]!r}")
-    return json.loads(m.group(0))
+    decoder = json.JSONDecoder()
+    idx = text.find("[")
+    while idx != -1:
+        try:
+            value, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, list):
+            return value
+        idx = text.find("[", idx + 1)
+    raise ValueError(f"no JSON array in CLI output: {text[:200]!r}")
 
 
 def extract_batch(batch_text: str, model: str = "claude-haiku-4-5") -> list[dict]:
@@ -556,15 +634,47 @@ def learn_vocab(
     token_count = len(tok.encode(prompt_str)) if prompt_str else 0
 
     # -------------------------------------------------------------------------
+    # Optional eval (--eval): score the promoted glossary against the bundled
+    # ground-truth fixture. Meaningful when learning from the frozen eval/spike
+    # corpus; in a from-source checkout the fixture lives under tests/fixtures.
+    # Never crashes the run — failures are reported, not raised.
+    # -------------------------------------------------------------------------
+    eval_result: dict | None = None
+    if run_eval:
+        gt_path = (
+            Path(__file__).resolve().parents[2]
+            / "tests" / "fixtures" / "autoglossary" / "ground_truth.json"
+        )
+        if gt_path.exists():
+            try:
+                gt = json.loads(gt_path.read_text(encoding="utf-8"))
+                es = score_glossary(kept, gt)
+                eval_result = {
+                    "recall": round(es["recall"], 3),
+                    "precision": round(es["precision"], 3),
+                    "content": es["content"],
+                    "fp": es["fp"],
+                    "wake": es["wake"],
+                }
+            except Exception as e:
+                log.warning("learn_vocab: eval scoring failed: %s", e)
+                eval_result = {"error": str(e)}
+        else:
+            eval_result = {"available": False, "reason": f"ground_truth fixture not found at {gt_path}"}
+
+    # -------------------------------------------------------------------------
     # Persist results (unless dry_run)
     # -------------------------------------------------------------------------
     if not dry_run:
         save_store(store, store_path)
+        # Diagnostic artifact ONLY — NOT read at runtime. STT biasing reads
+        # config.stt.local.initial_prompt (written by `heyvox learn-vocab`).
+        # This file lets the user inspect the rendered prompt (`cat stt_initial_prompt.txt`).
         try:
             _PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
             _PROMPT_FILE.write_text(prompt_str, encoding="utf-8")
         except Exception as e:
-            log.warning("learn_vocab: could not write prompt file: %s", e)
+            log.warning("learn_vocab: could not write diagnostic prompt file: %s", e)
 
     log.info(
         "learn_vocab: extracted=%d dropped=%d skipped_batches=%d "
@@ -580,4 +690,5 @@ def learn_vocab(
         "promoted": len(kept),
         "token_count": token_count,
         "prompt": prompt_str,
+        "eval": eval_result,
     }

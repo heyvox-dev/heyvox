@@ -747,37 +747,55 @@ _config_lock = threading.Lock()
 
 
 def _yaml_escape(value: str) -> str:
-    """Escape a string value for safe YAML embedding."""
-    # Quote if it contains YAML-special characters
-    if any(c in value for c in (':', '#', '{', '}', '[', ']', ',', '&', '*',
-                                  '?', '|', '-', '<', '>', '=', '!', '%', '@',
-                                  '`', '"', "'")):
-        # Use double quotes with backslash escaping
-        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    """Escape a string value for safe YAML embedding (double-quoted scalar).
+
+    Control characters (newline, tab, CR) MUST be backslash-escaped: a literal
+    newline inside a double-quoted scalar spans multiple lines and YAML folds it
+    back to a single space on reload, silently corrupting the stored value.
+    """
+    specials = (':', '#', '{', '}', '[', ']', ',', '&', '*', '?', '|', '-',
+                '<', '>', '=', '!', '%', '@', '`', '"', "'", '\n', '\r', '\t')
+    if any(c in value for c in specials):
+        # Use double quotes with backslash escaping (backslash first, then quote,
+        # then control chars — so each replacement targets the original text).
+        escaped = (value.replace('\\', '\\\\')
+                        .replace('"', '\\"')
+                        .replace('\n', '\\n')
+                        .replace('\r', '\\r')
+                        .replace('\t', '\\t'))
+        return f'"{escaped}"'
     if not value or value != value.strip():
         return f'"{value}"'
     return value
 
 
-def update_config(**kwargs) -> None:
+def update_config(**kwargs) -> bool:
     """Update specific keys in the config file, preserving comments and structure.
 
     Thread-safe (uses _config_lock). Writes atomically via temp file + rename.
     Uses simple line-based replacement for top-level keys. For nested keys,
     use dot notation (e.g., ``tts.verbosity="short"``).
 
-    Only writes keys that are already present in the file. Appends new
-    top-level keys at the end if not found.
+    Top-level keys are appended at the end if not present. A nested key is
+    inserted into its enclosing section, but if an INTERMEDIATE section is
+    missing (e.g. ``stt.local`` when the file has no ``stt:`` block) the write
+    is skipped — the line-based editor will not synthesize section headers.
+
+    Returns True only if EVERY requested key was applied; False if any key was
+    skipped (e.g. missing intermediate section, or no/blank config file). Callers
+    that need accurate user feedback MUST check the return value rather than
+    assume success.
     """
     with _config_lock:
         if not CONFIG_FILE.exists():
-            return
+            return False
 
         content = CONFIG_FILE.read_text()
         if not content.strip():
-            return  # Don't clobber an empty/blank config with partial updates
+            return False  # Don't clobber an empty/blank config with partial updates
 
         lines = content.splitlines(keepends=True)
+        applied_all = True
 
         for key, value in kwargs.items():
             # Convert Python values to YAML scalars
@@ -888,6 +906,7 @@ def update_config(**kwargs) -> None:
 
                     if not is_leaf:
                         if section_start_idx < 0:
+                            applied_all = False  # missing intermediate section — key skipped
                             break  # Section not found at all — give up
                         # Narrow search window to the contents of this section.
                         search_start = section_start_idx + 1
@@ -919,6 +938,8 @@ def update_config(**kwargs) -> None:
             except OSError:
                 pass
             CONFIG_FILE.write_text(new_content)
+
+        return applied_all
 
 
 # ---------------------------------------------------------------------------
