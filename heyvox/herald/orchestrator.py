@@ -378,6 +378,28 @@ def _hammerspoon_running() -> bool:
         return False
 
 
+def _afplay_ceiling(wav_file) -> float:
+    """Hard upper bound (seconds) for a single afplay run: clip duration + slack.
+
+    afplay plays in real time, so a healthy run takes ~the clip's duration. This
+    sizes a kill-ceiling to the actual clip (read from the WAV header) plus generous
+    slack for afplay/CoreAudio startup latency, with a floor for very short cues and
+    an absolute cap as a backstop when the header is unreadable. Guards against a
+    stalled afplay (wedged CoreAudio, unreadable mount) — the recording watchdog
+    only fires when a recording starts, not when playback itself hangs.
+    """
+    FLOOR = 15.0      # short clips still tolerate startup + CoreAudio latency
+    ABS_CAP = 300.0   # no TTS clip runs this long; absolute backstop
+    try:
+        import wave
+        with wave.open(str(wav_file), "rb") as w:
+            rate = w.getframerate() or 1
+            duration = w.getnframes() / float(rate)
+        return min(max(duration + 10.0, FLOOR), ABS_CAP)
+    except Exception:
+        return ABS_CAP
+
+
 def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
     """Send a Hammerspoon notification for a held workspace message."""
     held = list(cfg.hold_dir.glob("*.wav"))
@@ -909,7 +931,23 @@ def _play_wav(
     watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
     watchdog_thread.start()
 
-    play_exit = proc.wait()
+    # Hard ceiling so a stalled afplay can't block the orchestrator loop forever.
+    # The recording watchdog above only kills on recording-start; this catches a
+    # wedged playback (DEF-140 follow-up: the orchestrator's afplay proc.wait()).
+    play_ceiling = _afplay_ceiling(wav_file)
+    try:
+        play_exit = proc.wait(timeout=play_ceiling)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            play_exit = proc.wait(timeout=2.0)
+        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+            play_exit = -1
+        _violation_check(f"orchestrator:afplay-stall-kill:{basename}", cfg)
+        _herald_log(
+            f"ORCH: killed stalled afplay after {play_ceiling:.0f}s ceiling for {basename}",
+            debug_log,
+        )
     watchdog_stop.set()
     watchdog_thread.join(timeout=0.5)
     cfg.playing_pid_file.unlink(missing_ok=True)

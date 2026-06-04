@@ -805,3 +805,38 @@ class TestMediaPauseResume:
         with unittest.mock.patch("heyvox.audio.media.resume_media") as mock_resume:
             _media_resume(cfg)
             mock_resume.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _afplay_ceiling — DEF-140 follow-up: bound a stalled afplay run by clip duration
+# ---------------------------------------------------------------------------
+
+
+def test_afplay_ceiling_short_clip_uses_floor(tmp_path):
+    """A sub-second cue clamps up to the 15s floor (tolerates startup latency)."""
+    from heyvox.herald.orchestrator import _afplay_ceiling
+    wav = tmp_path / "cue.wav"
+    _make_wav(wav, num_frames=1000)  # ~0.045s at 22050 Hz
+    assert _afplay_ceiling(wav) == 15.0
+
+
+def test_afplay_ceiling_scales_with_duration(tmp_path):
+    """A multi-second clip gets duration + 10s of slack, above the floor."""
+    from heyvox.herald.orchestrator import _afplay_ceiling
+    wav = tmp_path / "speech.wav"
+    _make_wav(wav, num_frames=220500)  # 10.0s at 22050 Hz
+    assert _afplay_ceiling(wav) == pytest.approx(20.0, abs=0.1)
+
+
+def test_afplay_ceiling_missing_file_falls_back_to_cap(tmp_path):
+    """A missing WAV falls back to the absolute backstop, never 0 (which would kill instantly)."""
+    from heyvox.herald.orchestrator import _afplay_ceiling
+    assert _afplay_ceiling(tmp_path / "nope.wav") == 300.0
+
+
+def test_afplay_ceiling_corrupt_file_falls_back_to_cap(tmp_path):
+    """A non-WAV file falls back to the cap rather than raising."""
+    from heyvox.herald.orchestrator import _afplay_ceiling
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not a wav at all")
+    assert _afplay_ceiling(bad) == 300.0
