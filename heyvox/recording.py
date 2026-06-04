@@ -746,6 +746,11 @@ class RecordingStateMachine:
             except (BrokenPipeError, OSError):
                 pass
             t0 = time.time()
+            # Capture warm/cold BEFORE transcribe: warm=False means this STT pays
+            # the cold model-load cost (force-unload under RAM pressure or 10min idle).
+            # Tagging it makes model-swap + cold-reload latency regressions greppable.
+            from heyvox.audio.stt import model_loaded as _mlx_model_loaded
+            _stt_was_warm = _mlx_model_loaded()
             text = transcribe_audio(
                 audio_chunks,
                 engine=self.config.stt.local.engine,
@@ -774,8 +779,16 @@ class RecordingStateMachine:
             except (ImportError, Exception) as e:
                 self._log(f"Post-STT memory check error: {e}")
             _t_stt_done = time.time()
+            # Short model id for log tagging: mlx-community/whisper-large-v3-turbo → large-v3-turbo
+            _stt_model_short = (
+                self.config.stt.local.mlx_model.split("/")[-1]
+                .replace("whisper-", "").replace("-mlx", "")
+            )
             if stop_time:
-                self._log(f"[TIMING] stop→STT done: {_t_stt_done - stop_time:.2f}s (STT={elapsed:.1f}s)")
+                self._log(
+                    f"[TIMING] stop→STT done: {_t_stt_done - stop_time:.2f}s "
+                    f"(STT={elapsed:.1f}s model={_stt_model_short} warm={_stt_was_warm})"
+                )
             self._log(
                 f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}"
             )
@@ -784,6 +797,8 @@ class RecordingStateMachine:
             _save_debug_audio("_stt_result", [], self.config.audio.sample_rate, {
                 "stt_raw": text[:200],
                 "stt_engine": self.config.stt.local.engine,
+                "stt_model": _stt_model_short,
+                "stt_warm": _stt_was_warm,
                 "stt_time_s": round(elapsed, 2),
             }, log_fn=self._log)
 

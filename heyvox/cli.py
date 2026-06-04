@@ -521,11 +521,18 @@ def _cmd_log_health(args):
     stt_finals = [ln for ln in stt_lines_all if '"label": "_final"' in ln or '"label":"_final"' in ln]
     stt_durations: list[float] = []
     stt_times: list[float] = []
+    stt_models: dict[str, int] = {}
+    stt_cold = 0
     for ln in stt_lines_all:
         if '"label": "_stt_result"' in ln or '"label":"_stt_result"' in ln:
             d = re.search(r'"stt_time_s":\s*([\d.]+)', ln)
             if d:
                 stt_times.append(float(d.group(1)))
+            m = re.search(r'"stt_model":\s*"([^"]+)"', ln)
+            if m:
+                stt_models[m.group(1)] = stt_models.get(m.group(1), 0) + 1
+            if re.search(r'"stt_warm":\s*false', ln):
+                stt_cold += 1
         d = re.search(r'"duration_s":\s*([\d.]+)', ln)
         if d:
             stt_durations.append(float(d.group(1)))
@@ -538,6 +545,15 @@ def _cmd_log_health(args):
         stt_p50 = stt_times[len(stt_times) // 2]
         stt_p99 = stt_times[min(len(stt_times) - 1, int(len(stt_times) * 0.99))]
         _say(f"  STT time p50/p99:      {stt_p50:.2f}s / {stt_p99:.2f}s")
+    if stt_models:
+        models_str = ", ".join(
+            f"{k}×{v}" for k, v in sorted(stt_models.items(), key=lambda kv: -kv[1])
+        )
+        _say(f"  STT model(s):          {models_str}")
+        if len(stt_models) > 1:
+            _say("  WARN: multiple STT models in window — a model swap shifts p50/p99 (see DEF-137)")
+    if stt_times:
+        _say(f"  Cold loads (warm=false): {stt_cold}  (each pays full model-load latency)")
     if stt_durations:
         stt_durations.sort()
         p50 = stt_durations[len(stt_durations) // 2]
@@ -684,6 +700,8 @@ def _cmd_log_health(args):
                 "finals": len(stt_finals),
                 "stt_time_p50": stt_p50,
                 "stt_time_p99": stt_p99,
+                "models": stt_models,
+                "cold_loads": stt_cold,
             },
             "herald": {
                 "lines": len(herald_lines),
