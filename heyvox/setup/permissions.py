@@ -30,7 +30,7 @@ def check_accessibility() -> bool:
         True if the current process is trusted for accessibility.
     """
     try:
-        import ApplicationServices  # noqa: lazy PyObjC import
+        import ApplicationServices  # lazy PyObjC import
         return bool(ApplicationServices.AXIsProcessTrusted())
     except ImportError:
         # PyObjC not available — assume granted (non-macOS or test env)
@@ -49,7 +49,7 @@ def check_microphone() -> bool:
         True if microphone access is available.
     """
     try:
-        import pyaudio  # noqa: lazy import
+        import pyaudio  # lazy import
         pa = pyaudio.PyAudio()
         try:
             # Find default input device

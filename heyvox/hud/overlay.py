@@ -154,65 +154,6 @@ def _save_position(x, y):
 # Custom NSView subclasses (defined inside main() to ensure AppKit is loaded)
 # ---------------------------------------------------------------------------
 
-def _make_comm_badge_view_class():
-    """Create an NSView subclass that draws the TNG Starfleet communicator badge."""
-    from AppKit import NSView, NSColor, NSBezierPath, NSFont, NSFontAttributeName, \
-        NSForegroundColorAttributeName, NSParagraphStyleAttributeName
-    from Foundation import NSMakeRect, NSDictionary, NSAttributedString
-    import AppKit
-
-    class CommBadgeView(NSView):
-        def drawRect_(self, rect):
-            w = rect.size.width
-            h = rect.size.height
-            cx = w / 2 - 10  # shift badge left to make room for "Vox"
-            cy = h / 2
-
-            # -- Background oval --
-            oval_w = 26
-            oval_h = 22
-            oval_rect = NSMakeRect(cx - oval_w/2, cy - oval_h/2, oval_w, oval_h)
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.45, 0.35, 0.05, 0.5).set()
-            NSBezierPath.bezierPathWithOvalInRect_(oval_rect).fill()
-
-            # -- "V" chevron (our brand mark) --
-            v = NSBezierPath.bezierPath()
-            v.setLineWidth_(2.5)
-            # Left arm of V
-            v.moveToPoint_((cx - 7, cy + 8))
-            v.lineToPoint_((cx, cy - 5))
-            # Right arm of V
-            v.lineToPoint_((cx + 7, cy + 8))
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.78, 0.15, 1.0).set()
-            v.stroke()
-
-            # -- Small sound wave arcs (right side of V) --
-            for i, radius in enumerate([4, 7]):
-                arc = NSBezierPath.bezierPath()
-                arc.setLineWidth_(1.5)
-                # Quarter arc from ~30° to ~-30° (rightward sound waves)
-                arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-                    (cx + 3, cy + 1), radius, 40, -40, True
-                )
-                alpha = 0.7 - i * 0.25
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.78, 0.15, alpha).set()
-                arc.stroke()
-
-            # -- "ox" text to complete "Vox" --
-            font = NSFont.boldSystemFontOfSize_(12)
-            style = AppKit.NSMutableParagraphStyle.alloc().init()
-            style.setAlignment_(AppKit.NSTextAlignmentLeft)
-            attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-                [font, NSColor.whiteColor(), style],
-                [NSFontAttributeName, NSForegroundColorAttributeName,
-                 NSParagraphStyleAttributeName],
-            )
-            text = NSAttributedString.alloc().initWithString_attributes_("ox", attrs)
-            text.drawAtPoint_((cx + oval_w/2 + 2, cy - 8))
-
-    return CommBadgeView
-
-
 def _make_waveform_view_class():
     from AppKit import NSView, NSColor, NSBezierPath
 
@@ -901,12 +842,12 @@ def _make_menu_action_class():
 
         def openConfig_(self, sender):
             import subprocess
-            cfg = os.path.expanduser("~/.config/heyvox/config.yaml")
-            if os.path.exists(cfg):
-                try:
-                    subprocess.run(["open", cfg])
-                except Exception:
-                    pass
+            try:
+                from heyvox.config import CONFIG_FILE
+                if CONFIG_FILE.exists():
+                    subprocess.run(["open", str(CONFIG_FILE)])
+            except Exception:
+                pass
 
         def openHelp_(self, sender):
             import webbrowser
@@ -970,7 +911,7 @@ def _make_menu_action_class():
             """Open the Report Issue dialog → build bundle → open GitHub Issue."""
             try:
                 from heyvox.reporting.dialog import prompt_for_report
-                from heyvox.reporting.bundle import build_bundle, summarize_bundle
+                from heyvox.reporting.bundle import build_bundle
                 from heyvox.reporting.text_report import run_bugreport
                 from heyvox.reporting.issue import (
                     build_issue_url,
