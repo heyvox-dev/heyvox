@@ -794,11 +794,11 @@ def update_config(**kwargs) -> None:
             else:
                 yaml_val = str(value)
 
-            parts = key.split(".", 1)
-            found = False
+            key_parts = key.split(".")
 
-            if len(parts) == 1:
+            if len(key_parts) == 1:
                 # Top-level key
+                found = False
                 for i, line in enumerate(lines):
                     stripped = line.lstrip()
                     if stripped.startswith(f"{key}:") and not stripped.startswith("#"):
@@ -809,37 +809,97 @@ def update_config(**kwargs) -> None:
                 if not found:
                     lines.append(f"{key}: {yaml_val}\n")
             else:
-                # Nested key (e.g., tts.verbosity)
-                section, subkey = parts
-                in_section = False
-                section_start_idx = -1
-                section_last_idx = -1
-                section_indent = ""
-                for i, line in enumerate(lines):
-                    stripped = line.lstrip()
-                    if stripped.startswith(f"{section}:"):
-                        in_section = True
-                        section_start_idx = i
-                        continue
-                    if in_section:
-                        if stripped and not stripped.startswith("#") and not line[0].isspace():
-                            in_section = False  # Left the section
-                            continue
-                        # Track last indented (section-member) line for insertion point
-                        if line.strip() and line[0].isspace():
-                            section_last_idx = i
-                            if not section_indent:
-                                section_indent = line[:len(line) - len(stripped)]
-                        if stripped.startswith(f"{subkey}:"):
-                            indent = line[:len(line) - len(stripped)]
-                            lines[i] = f"{indent}{subkey}: {yaml_val}\n"
-                            found = True
-                            break
-                if not found and section_start_idx >= 0:
-                    # Section exists but subkey missing — insert inside the section.
-                    insert_idx = (section_last_idx + 1) if section_last_idx >= 0 else (section_start_idx + 1)
-                    indent = section_indent or "  "
-                    lines.insert(insert_idx, f"{indent}{subkey}: {yaml_val}\n")
+                # Nested key with arbitrary depth (e.g., tts.verbosity or stt.local.initial_prompt).
+                # Walk down the key_parts hierarchy, each section narrowing the search window.
+                # search_start / search_end track the current section's line range.
+                search_start = 0
+                search_end = len(lines)
+                # current_min_indent: the indent level we require the SECTION header to have.
+                # Top-level sections start at column 0 (indent=""), then 2-space children, etc.
+                section_indent_required: str | None = None
+
+                found = False
+                for depth, part in enumerate(key_parts):
+                    is_leaf = (depth == len(key_parts) - 1)
+                    in_section = False
+                    section_start_idx = -1
+                    section_last_idx = -1
+                    next_section_indent = ""
+
+                    for i in range(search_start, search_end):
+                        line = lines[i]
+                        stripped = line.lstrip()
+                        current_indent = line[:len(line) - len(stripped)]
+
+                        if is_leaf:
+                            # We're inside the parent section; look for the leaf key.
+                            if not in_section:
+                                # Not yet entered the section — skip until we are inside it.
+                                # (search_start was set to point inside the section by previous
+                                # depth iterations; in_section will be True from the first line
+                                # that is indented relative to the section header)
+                                if stripped and not stripped.startswith("#") and not line[0].isspace():
+                                    break  # Left the enclosing section
+                                if line.strip():
+                                    in_section = True
+                                    section_last_idx = i
+                                    if not next_section_indent:
+                                        next_section_indent = current_indent
+                                    if stripped.startswith(f"{part}:"):
+                                        lines[i] = f"{current_indent}{part}: {yaml_val}\n"
+                                        found = True
+                                        break
+                                continue
+                            # Already in the section
+                            if stripped and not stripped.startswith("#") and not line[0].isspace():
+                                break  # Left the enclosing section
+                            if line.strip() and line[0].isspace():
+                                section_last_idx = i
+                                if not next_section_indent:
+                                    next_section_indent = current_indent
+                                if stripped.startswith(f"{part}:"):
+                                    lines[i] = f"{current_indent}{part}: {yaml_val}\n"
+                                    found = True
+                                    break
+                        else:
+                            # Intermediate depth — find the section header for this part.
+                            if section_indent_required is None:
+                                # Top-level section: header must be at column 0
+                                header_match = (not line[0].isspace()
+                                                if line.strip() else False)
+                            else:
+                                header_match = (current_indent == section_indent_required
+                                                if line.strip() else False)
+
+                            if header_match and stripped.startswith(f"{part}:") and not stripped.startswith("#"):
+                                section_start_idx = i
+                                in_section = True
+                                continue
+
+                            if in_section:
+                                if stripped and not stripped.startswith("#") and not line[0].isspace():
+                                    # Returned to top-level — section ended
+                                    search_end = i
+                                    break
+                                if line.strip() and line[0].isspace():
+                                    section_last_idx = i
+                                    if not next_section_indent:
+                                        next_section_indent = current_indent
+
+                    if not is_leaf:
+                        if section_start_idx < 0:
+                            break  # Section not found at all — give up
+                        # Narrow search window to the contents of this section.
+                        search_start = section_start_idx + 1
+                        # search_end already narrowed above when we left the section
+                        section_indent_required = next_section_indent or None
+                    else:
+                        if not found:
+                            # Leaf key missing — insert inside the enclosing section.
+                            insert_after = section_last_idx if section_last_idx >= 0 else search_start - 1
+                            insert_idx = insert_after + 1
+                            insert_indent = next_section_indent or section_indent_required or "    "
+                            lines.insert(insert_idx, f"{insert_indent}{part}: {yaml_val}\n")
 
         # Atomic write: temp file + rename prevents partial writes on crash
         new_content = "".join(lines)
