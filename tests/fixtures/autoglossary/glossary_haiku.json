@@ -1,0 +1,448 @@
+{
+  "model": "claude-haiku-4-5 (Max subscription, 6 agents)",
+  "n_raw_items": 96,
+  "n_unique": 63,
+  "glossary": [
+    {
+      "wrong": "box",
+      "right": "Vox",
+      "kind": "private",
+      "count": 5,
+      "avg_conf": 0.84
+    },
+    {
+      "wrong": "zero",
+      "right": "Xero",
+      "kind": "public",
+      "count": 4,
+      "avg_conf": 0.91
+    },
+    {
+      "wrong": "Harold",
+      "right": "Herald",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.95
+    },
+    {
+      "wrong": "Contactor",
+      "right": "Conductor",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.94
+    },
+    {
+      "wrong": "Heybox",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.93
+    },
+    {
+      "wrong": "Haybox",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.92
+    },
+    {
+      "wrong": "Wox",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "Haywax",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.89
+    },
+    {
+      "wrong": "Wux",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.88
+    },
+    {
+      "wrong": "TicTic",
+      "right": "TickTick",
+      "kind": "public",
+      "count": 2,
+      "avg_conf": 0.88
+    },
+    {
+      "wrong": "Haywalk",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.87
+    },
+    {
+      "wrong": "Chavis",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.86
+    },
+    {
+      "wrong": "HEMBOX",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.86
+    },
+    {
+      "wrong": "walk",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.85
+    },
+    {
+      "wrong": "works",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.82
+    },
+    {
+      "wrong": "Wops",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.82
+    },
+    {
+      "wrong": "folks",
+      "right": "Vox",
+      "kind": "private",
+      "count": 2,
+      "avg_conf": 0.7
+    },
+    {
+      "wrong": "weak word",
+      "right": "wake word",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.98
+    },
+    {
+      "wrong": "Kontaktor",
+      "right": "Conductor",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.95
+    },
+    {
+      "wrong": "Wender",
+      "right": "Vendor",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.95
+    },
+    {
+      "wrong": "Hey Jarvis",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.92
+    },
+    {
+      "wrong": "hay box",
+      "right": "hey Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.92
+    },
+    {
+      "wrong": "Rocklink",
+      "right": "Rocketlink",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.92
+    },
+    {
+      "wrong": "Mermet",
+      "right": "Mermaid",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.92
+    },
+    {
+      "wrong": "Heavybox",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.92
+    },
+    {
+      "wrong": "hay box",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "APox",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "Franz Invoys",
+      "right": "franz-invoice",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "Quartzprojekten",
+      "right": "Quartz",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "Engrid",
+      "right": "nGrid",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "Hey, Wax",
+      "right": "Hey Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.9
+    },
+    {
+      "wrong": "Cloud MD",
+      "right": "CLAUDE.md",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.88
+    },
+    {
+      "wrong": "Charvis",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.88
+    },
+    {
+      "wrong": "Drum Lab",
+      "right": "Mermaid",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.88
+    },
+    {
+      "wrong": "High Wax",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.88
+    },
+    {
+      "wrong": "HRVS",
+      "right": "Herald",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.85
+    },
+    {
+      "wrong": "A box",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.85
+    },
+    {
+      "wrong": "CROAD",
+      "right": "Conductor",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.85
+    },
+    {
+      "wrong": "Gemini-Tab-Finanz",
+      "right": "Geminicap",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.85
+    },
+    {
+      "wrong": "Rettetifizierung",
+      "right": "Authentifizierung",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.85
+    },
+    {
+      "wrong": "personal plot conflict",
+      "right": "personal project",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.82
+    },
+    {
+      "wrong": "Chavez",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.8
+    },
+    {
+      "wrong": "Travis",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.8
+    },
+    {
+      "wrong": "Charmis",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.8
+    },
+    {
+      "wrong": "Rocketlink Haybox",
+      "right": "Rocketlink",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.8
+    },
+    {
+      "wrong": "Charlie",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "HRVS",
+      "right": "Hush",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "Chuck",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "handbox",
+      "right": "HeyVox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "walks",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "war",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "Gentscribe",
+      "right": "Gentranscribe",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.75
+    },
+    {
+      "wrong": "ciao",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.7
+    },
+    {
+      "wrong": "Java",
+      "right": "Qwen",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.7
+    },
+    {
+      "wrong": "what",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.7
+    },
+    {
+      "wrong": "rocket technologies",
+      "right": "Rocketlink",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.7
+    },
+    {
+      "wrong": "Leap Hair",
+      "right": "LilyPad",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.65
+    },
+    {
+      "wrong": "John",
+      "right": "Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.65
+    },
+    {
+      "wrong": "H-R-S",
+      "right": "Huh",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.6
+    },
+    {
+      "wrong": "HR",
+      "right": "Huh",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.6
+    },
+    {
+      "wrong": "Here, what",
+      "right": "Here Vox",
+      "kind": "private",
+      "count": 1,
+      "avg_conf": 0.6
+    },
+    {
+      "wrong": "t-tiers",
+      "right": "TTS",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.6
+    },
+    {
+      "wrong": "Iva",
+      "right": "output",
+      "kind": "tech",
+      "count": 1,
+      "avg_conf": 0.5
+    }
+  ]
+}
