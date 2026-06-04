@@ -443,6 +443,7 @@ def _setup(config: HeyvoxConfig):
             language=config.stt.local.language,
             threads=config.stt.local.threads,
             log_fn=log,
+            initial_prompt=config.stt.local.initial_prompt,   # Phase 16
         )
 
     # Build adapter and create RecordingStateMachine
