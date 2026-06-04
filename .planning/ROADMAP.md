@@ -103,7 +103,7 @@ behoben).
 
 ### 🎯 v1.4 STT Accuracy (Planned)
 
-- [ ] **Phase 16: STT Auto-Glossary** — Learn a vocabulary glossary of
+- [x] **Phase 16: STT Auto-Glossary** — Learn a vocabulary glossary of (completed 2026-06-04)
       recurring proper-noun / tech-term STT mis-transcriptions from the real
       dictation history (Claude Haiku via Max subscription, no API key) and
       feed the top-N into Whisper's `initial_prompt`. Off-hot-path, opt-in,
@@ -117,7 +117,7 @@ behoben).
   - [x] 16-01-PLAN.md — Wave 0 test scaffolding: promote spike fixtures + deterministic scorer eval + pipeline test stubs + test_config extensions
   - [x] 16-02-PLAN.md — Consumer wiring: STTLocalConfig.initial_prompt + VocabLearnerConfig + stt.py module-global thread + main.py call site
   - [x] 16-03-PLAN.md — Learner pipeline (vocab_learner.py): GlossaryItem + wake/gibberish guardrails + Haiku extraction (CLI + API) + idempotent merge + 223-token cap + fail-closed learn_vocab
-  - [ ] 16-04-PLAN.md — CLI surface: heyvox learn-vocab subcommand + config write + run summary + Open Question 2 insert test + anthropic optional extra
+  - [x] 16-04-PLAN.md — CLI surface: heyvox learn-vocab subcommand + config write + run summary + Open Question 2 insert test + anthropic optional extra
 
 ### 📋 v2.0 Cross-Platform & Polish (Planned)
 
@@ -146,4 +146,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | Q. Banner UX (icon + tooltip) | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. Stop-wake VAD silence gate | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. DEF-080 herald CLI pin | v1.3 | 1/1 | Complete | 2026-05-25 |
-| 16. STT Auto-Glossary | v1.4 | 3/4 | In Progress|  |
+| 16. STT Auto-Glossary | v1.4 | 4/4 | Complete   | 2026-06-04 |
