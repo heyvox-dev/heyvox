@@ -255,3 +255,58 @@ def test_update_config_inserts_initial_prompt_fresh(tmp_path, monkeypatch):
     lines = [ln for ln in text.splitlines() if "initial_prompt:" in ln]
     assert lines, "initial_prompt not written"
     assert lines[0].startswith("    "), f"initial_prompt not nested under stt.local: {lines[0]!r}"
+
+
+# ---------------------------------------------------------------------------
+# Code-review regression guards (Phase 16 review — WR-02, WR-04)
+# ---------------------------------------------------------------------------
+
+def test_parse_json_array_ignores_bracket_prose():
+    """WR-02: the parser must not be fooled by bracketed prose around the real
+    array. The old greedy r'\\[.*\\]' spanned first-'[' to last-']', so leading
+    '[note]' or trailing 'see [1]' corrupted the match."""
+    from heyvox.audio.vocab_learner import _parse_json_array
+
+    text = (
+        "Here is the result [note: 2 items found]:\n"
+        "```json\n"
+        '[{"wrong":"Cloud","right":"Claude","kind":"public","confidence":0.9}]\n'
+        "```\n"
+        "(done — see [1])"
+    )
+    items = _parse_json_array(text)
+    assert items == [{"wrong": "Cloud", "right": "Claude", "kind": "public", "confidence": 0.9}]
+
+
+def test_parse_json_array_raises_when_no_array():
+    """WR-02: still raises ValueError (caught by the retry loop) when no JSON array exists."""
+    from heyvox.audio.vocab_learner import _parse_json_array
+
+    with pytest.raises(ValueError):
+        _parse_json_array("no array here, just prose")
+
+
+def test_update_config_returns_false_on_missing_section(tmp_path, monkeypatch):
+    """WR-04: writing a nested key whose intermediate section is absent must NOT
+    silently succeed — update_config returns False so the CLI can warn instead of
+    printing a misleading success line."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("wake_words:\n  start: hey_vox\n")  # no stt: section at all
+    monkeypatch.setattr("heyvox.config.CONFIG_FILE", cfg_file)
+    from heyvox.config import update_config
+
+    result = update_config(**{"stt.local.initial_prompt": "Claude"})
+    assert result is False
+    assert "initial_prompt" not in cfg_file.read_text()
+
+
+def test_update_config_returns_true_on_success(tmp_path, monkeypatch):
+    """WR-04: a write into an existing section returns True."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("stt:\n  local:\n    engine: mlx\n")
+    monkeypatch.setattr("heyvox.config.CONFIG_FILE", cfg_file)
+    from heyvox.config import update_config
+
+    result = update_config(**{"stt.local.initial_prompt": "Claude"})
+    assert result is True
+    assert "initial_prompt:" in cfg_file.read_text()

@@ -282,3 +282,26 @@ class TestAppProfileNewFields:
         assert p.supports_ax_verify is True
         assert p.has_session_detection is False
         assert abs(p.ax_settle_before_verify - 0.1) < 1e-6
+
+
+class TestYamlEscapeRoundTrip:
+    """WR-03: _yaml_escape must escape control chars so values survive a YAML reload.
+
+    A literal newline in a double-quoted scalar previously spanned multiple lines
+    and YAML folded it back to a single space — silent value corruption."""
+
+    def test_newline_and_tab_value_round_trips(self):
+        import yaml
+
+        from heyvox.config import _yaml_escape
+
+        value = "line one\nline two\twith tab"
+        escaped = _yaml_escape(value)
+        loaded = yaml.safe_load(f"key: {escaped}\n")
+        assert loaded["key"] == value
+
+    def test_plain_value_unquoted(self):
+        from heyvox.config import _yaml_escape
+
+        # No special chars → returned bare (unchanged behavior).
+        assert _yaml_escape("ClaudeXeroHerald") == "ClaudeXeroHerald"

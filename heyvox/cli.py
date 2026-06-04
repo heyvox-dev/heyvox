@@ -1099,6 +1099,18 @@ def _cmd_learn_vocab(args):
     if summary.get("token_count", 0) >= 220:
         print("WARNING: glossary hit the token cap — lower-frequency terms were dropped.")
 
+    # --eval: report deterministic recall/precision of the promoted glossary against
+    # the bundled ground-truth fixture (key present only when --eval was passed).
+    ev = summary.get("eval")
+    if ev is not None:
+        if ev.get("available") is False:
+            print(f"[eval] reference fixture unavailable — eval skipped ({ev.get('reason', '')}).")
+        elif "error" in ev:
+            print(f"[eval] scoring failed: {ev['error']}")
+        else:
+            print(f"[eval] vs ground_truth: recall={ev['recall']:.2f} precision={ev['precision']:.2f} "
+                  f"(content={ev['content']}, fp={ev['fp']}, wake={ev['wake']}).")
+
     rendered = summary.get("prompt", "")
     if getattr(args, "dry_run", False):
         print(f"\n[dry-run] would write initial_prompt:\n  {rendered!r}")
@@ -1106,8 +1118,15 @@ def _cmd_learn_vocab(args):
 
     # Persist the rendered glossary where init_local_stt reads it. update_config takes
     # **kwargs; the dotted key has dots so splat it from a dict (NOT a positional arg).
-    update_config(**{"stt.local.initial_prompt": rendered})
-    print("Wrote stt.local.initial_prompt to config.yaml. Restart heyvox to apply.")
+    # It returns False if the write was skipped (e.g. config.yaml lacks an stt.local
+    # section), so only claim success when it actually wrote (WR-04).
+    wrote = update_config(**{"stt.local.initial_prompt": rendered})
+    if wrote:
+        print("Wrote stt.local.initial_prompt to config.yaml. Restart heyvox to apply.")
+    else:
+        print("WARNING: could not write stt.local.initial_prompt — config.yaml is missing the "
+              "'stt:' / 'local:' section.")
+        print("  Add a 'local:' block under 'stt:' and re-run, or STT biasing stays off.")
 
 
 def main():
