@@ -229,3 +229,29 @@ def test_cli_learn_vocab_registered():
     from heyvox import cli
     assert hasattr(cli, "_cmd_learn_vocab"), \
         "_cmd_learn_vocab handler must be defined in heyvox.cli"
+
+
+# ---------------------------------------------------------------------------
+# Config-insertion test (plan 04 — Open Question 2 / Pitfall 2)
+# ---------------------------------------------------------------------------
+
+def test_update_config_inserts_initial_prompt_fresh(tmp_path, monkeypatch):
+    """Open Question 2 / Pitfall 2: writing stt.local.initial_prompt into a config that lacks
+    the key must INSERT it inside the existing stt.local: block, not append at top level."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "stt:\n"
+        "  backend: local\n"
+        "  local:\n"
+        "    engine: mlx\n"
+        "    language: \"\"\n"
+    )
+    monkeypatch.setattr("heyvox.config.CONFIG_FILE", cfg_file)
+    from heyvox.config import update_config
+    update_config(**{"stt.local.initial_prompt": "Claude Xero Herald"})
+    text = cfg_file.read_text()
+    # The key must be indented under stt.local (>=4 spaces), never at column 0.
+    assert "initial_prompt: Claude Xero Herald" in text or 'initial_prompt: "Claude Xero Herald"' in text
+    lines = [ln for ln in text.splitlines() if "initial_prompt:" in ln]
+    assert lines, "initial_prompt not written"
+    assert lines[0].startswith("    "), f"initial_prompt not nested under stt.local: {lines[0]!r}"

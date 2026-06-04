@@ -57,6 +57,9 @@ tts = [
 aec = [
     "livekit>=1.0.0",
 ]
+learn-vocab = [
+    "anthropic>=0.84,<1",
+]
 chrome = [
     "websockets>=13.0",
 ]
