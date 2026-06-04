@@ -1061,6 +1061,49 @@ def _cmd_calibrate(args):
         pa.terminate()
 
 
+def _cmd_learn_vocab(args):
+    """Run the offline vocabulary learner (STT initial_prompt biasing, Phase 16).
+
+    Loads the user's dictation history, sends batches to Claude Haiku for
+    extraction, validates and merges into a cumulative store, and writes the
+    top-N terms (within the 223-token Whisper cap) to stt_initial_prompt.txt.
+
+    The config flag `vocab_learner.enabled` must be True for any extraction
+    to run — the learner is privacy fail-closed.
+    """
+    from heyvox.config import load_config
+    from heyvox.audio.vocab_learner import learn_vocab
+
+    cfg = load_config()
+    vocab_cfg = cfg.vocab_learner
+
+    summary = learn_vocab(
+        cfg=vocab_cfg,
+        dry_run=getattr(args, "dry_run", False),
+        run_eval=getattr(args, "eval", False),
+        model_override=getattr(args, "model", None),
+        reset=getattr(args, "reset", False),
+    )
+
+    if not summary.get("enabled"):
+        print(
+            "Vocabulary learner is disabled.\n"
+            "Set `vocab_learner.enabled: true` in your config to enable extraction."
+        )
+        return
+
+    print(
+        f"Vocabulary learner run complete.\n"
+        f"  Extracted:       {summary.get('extracted', 0)} items\n"
+        f"  Dropped:         {summary.get('dropped', 0)} malformed\n"
+        f"  Skipped batches: {summary.get('skipped_batches', 0)}\n"
+        f"  Promoted:        {summary.get('promoted', 0)} (freq+conf gate)\n"
+        f"  Token count:     {summary.get('token_count', 0)} / 223\n"
+    )
+    if summary.get("prompt"):
+        print(f"  initial_prompt:  {summary['prompt']}")
+
+
 def main():
     from heyvox import __version__
 
@@ -1299,6 +1342,34 @@ def main():
         help="Filter by agent name (e.g. 'cursor'). Registers all detected if omitted.",
     )
     sub_register.set_defaults(func=_cmd_register)
+
+    # learn-vocab — batch vocabulary extractor for STT initial_prompt (Phase 16)
+    sub_learn_vocab = subparsers.add_parser(
+        "learn-vocab",
+        help="Learn vocabulary glossary from dictation history (STT biasing, Phase 16)",
+    )
+    sub_learn_vocab.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run extraction but do not write the store or initial_prompt file",
+    )
+    sub_learn_vocab.add_argument(
+        "--reset",
+        action="store_true",
+        help="Start with an empty store (discards accumulated vocabulary)",
+    )
+    sub_learn_vocab.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run the post-extraction evaluation harness",
+    )
+    sub_learn_vocab.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help="Override the extraction model (e.g. claude-opus-4-8)",
+    )
+    sub_learn_vocab.set_defaults(func=_cmd_learn_vocab)
 
     # calibrate -- calibrate mic noise floor and silence threshold (AUDIO-01, D-04)
     sub_calibrate = subparsers.add_parser(
