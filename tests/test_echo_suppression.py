@@ -199,6 +199,30 @@ class TestIsGarbled:
         text = "please check the deployment status"
         assert is_garbled(text, stt_secs=0.5, audio_secs=5.0) is False
 
+    def test_def133_short_garbage_from_long_audio_caught(self):
+        """DEF-133: the 2026-06-02 'k nud' incident — 11.3 s of audio decoded in
+        3.5 s (ratio 0.31) to just 5 chars. Short enough to keep the repetition
+        and unique-ratio checks quiet, and under the 0.6/≥5 s catastrophic-ratio
+        guard — yet a near-zero text yield off a multi-second recording with an
+        elevated decode time is a decode collapse. Must now be caught."""
+        assert is_garbled("k nud", stt_secs=3.5, audio_secs=11.3) is True
+
+    def test_def133_fast_short_reply_in_long_recording_not_caught(self):
+        """DEF-133 boundary: a legitimate short reply decodes FAST even inside a
+        long (mostly-silent) recording, so low yield alone must NOT discard it —
+        the elevated-decode-time gate is what separates a collapse from a
+        genuinely terse answer."""
+        assert is_garbled("ja, mach das", stt_secs=0.4, audio_secs=11.0) is False
+
+    def test_def133_does_not_regress_def093_clean_slow(self):
+        """DEF-133 must not re-open DEF-093: a slow decode that still produced a
+        full clean sentence (high yield) stays accepted despite ratio > 0.25."""
+        text = (
+            "Gerade im Personal-Titul-Tracker hat das Senden wieder nicht "
+            "funktioniert und muss sich den Vox bis neue Kontakte starten"
+        )
+        assert is_garbled(text, stt_secs=5.33, audio_secs=13.84) is False
+
     def test_not_garbled_long_sentence_with_natural_repetition(self):
         """Real speech with some repetition ('the') must not trigger the
         run-length or tail-window checks."""
@@ -207,6 +231,24 @@ class TestIsGarbled:
             "to make sure everything is working correctly"
         )
         assert is_garbled(text) is False
+
+    def test_def137_turbo_silence_hallucination_german(self):
+        """DEF-137: the 2026-06-02 model-swap incident. Switching the live STT
+        model from whisper-small to large-v3-turbo for German dictation fixed
+        the hallucination on real speech, but turbo emits 'Vielen Dank.' from
+        NON-speech audio (silence/BT-HFP line noise) where small returned "".
+        It's fast (ratio ~0.1) and short+coherent, so the DEF-093 ratio guard
+        and the DEF-133 yield gate both stay quiet — only a full-string match
+        catches it. Observed verbatim on four 8 s empty triggers."""
+        assert is_garbled("Vielen Dank.", stt_secs=0.8, audio_secs=8.0) is True
+        assert is_garbled("vielen dank", stt_secs=0.8, audio_secs=6.08) is True
+        assert is_garbled("Thank you.", stt_secs=0.8, audio_secs=8.0) is True
+
+    def test_def137_phrase_inside_real_sentence_not_caught(self):
+        """DEF-137 boundary: the stoplist is an EXACT full-string match, so the
+        same words inside a genuine sentence must pass — losing a real dictation
+        would be worse than the occasional silence artifact slipping through."""
+        assert is_garbled("Vielen Dank für die schnelle Hilfe, mach weiter.") is False
 
 
 class TestEchoTextBuffer:

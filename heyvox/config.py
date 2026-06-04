@@ -407,6 +407,21 @@ class PushToTalkConfig(BaseModel):
     enabled: bool = True
     key: str = "fn"
 
+    # Double-tap → hands-free (continuous) recording.
+    # A quick double-tap of the PTT key starts a recording that runs until
+    # silence / stop wake word / Escape — exactly like a wake-word trigger,
+    # but with NO spoken wake word (so no start/end audio trim). A single tap
+    # while it runs toggles it off. A plain hold remains classic push-to-talk.
+    double_tap_handsfree: bool = True
+    # Max press duration (seconds) that still counts as a "tap" rather than a
+    # hold. Also the delay before a held key is promoted to push-to-talk — kept
+    # short so the latency is imperceptible; the idle pre-roll buffer back-fills
+    # any speech spoken during this window so no words are lost.
+    tap_max_secs: float = 0.2
+    # Max gap (seconds) between the two taps for them to register as a
+    # double-tap. Longer than this and the first tap is treated as a no-op.
+    double_tap_secs: float = 0.35
+
 
 class AudioConfig(BaseModel):
     """Audio stream parameters (must match openwakeword requirements)."""
@@ -894,6 +909,12 @@ transcription_prefix: ""   # Prepend this text to every transcription
 push_to_talk:
   enabled: true
   key: fn                  # Supported: fn, right_cmd, right_alt, right_ctrl, right_shift
+  double_tap_handsfree: true  # Double-tap the PTT key → hands-free recording
+                              # (runs until silence/stop-word/Escape, like wake word).
+                              # A single tap while it runs toggles it off.
+                              # A plain hold stays classic push-to-talk.
+  tap_max_secs: 0.2        # Max press to count as a "tap" (also hold-detect delay)
+  double_tap_secs: 0.35    # Max gap between the two taps
 
 # ---------------------------------------------------------------------------
 # Speech-to-text (STT)

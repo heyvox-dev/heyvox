@@ -1208,3 +1208,81 @@ def test_def130_status_parses_stopped_plist_dict():
     assert status["pid"] is None
     assert status["loaded"] is True
     assert status["exit_code"] == 0
+
+
+# ---------------------------------------------------------------------------
+# DEF-132: a freshly-(re)selected mic must not inherit the dead-air debt that
+# accrued during the slow reinit/HFP switch. reinit()/handle_io_error() reset
+# the AUDIO-13 timers but not ctx.last_read_time, so the main-loop no-data
+# stall guard evicted a just-switched Bluetooth headset within the same second
+# and bounced back to the built-in mic. Fix: _arm_post_switch_grace() resets
+# last_read_time + arms a longer first-packet window (mic_just_switched).
+# ---------------------------------------------------------------------------
+
+
+def test_def132_appcontext_has_switch_grace_fields():
+    """DEF-132: AppContext must declare the read-stall clock and grace flag."""
+    from heyvox.app_context import AppContext
+    fields = AppContext.__dataclass_fields__
+    assert "last_read_time" in fields, "DEF-132: last_read_time must be declared"
+    assert "mic_just_switched" in fields, "DEF-132: mic_just_switched must be declared"
+    ctx = AppContext()
+    assert ctx.mic_just_switched is False, "DEF-132: grace flag must default off"
+    assert ctx.last_read_time == 0.0
+
+
+def test_def132_recovery_paths_reset_stall_clock():
+    """DEF-132: both slow recovery tails must reset the main-loop read-stall
+    clock, or a freshly-switched BT headset is evicted before its first PCM
+    packet and bounces straight back to the built-in mic."""
+    src = _read_device_manager_src()
+    assert "def _arm_post_switch_grace" in src, (
+        "DEF-132: the _arm_post_switch_grace() helper must exist"
+    )
+    assert "self.ctx.last_read_time = time.monotonic()" in src, (
+        "DEF-132: the grace helper must reset ctx.last_read_time to monotonic()"
+    )
+    assert src.count("self._arm_post_switch_grace()") >= 2, (
+        "DEF-132: reinit() AND handle_io_error() must both call "
+        "_arm_post_switch_grace() — dropping one re-opens the bounce bug"
+    )
+
+
+def test_def132_main_loop_honors_switch_grace():
+    """DEF-132: the no-data stall guard must extend its window after a switch
+    and revert once data flows, else it never returns to the 5s guard."""
+    src = _read_main_src()
+    assert "_POST_SWITCH_STALL_SECS" in src, (
+        "DEF-132: the post-switch stall-grace constant must exist"
+    )
+    assert "ctx.mic_just_switched" in src, (
+        "DEF-132: the stall guard must branch on ctx.mic_just_switched"
+    )
+    assert "ctx.mic_just_switched = False" in src, (
+        "DEF-132: the grace flag must be cleared on the first successful read, "
+        "else the extended window never reverts to the normal 5s guard"
+    )
+
+
+def test_def132_arm_post_switch_grace_runtime():
+    """DEF-132: _arm_post_switch_grace() must reset the clock and arm the flag."""
+    pytest.importorskip("pyaudio")
+    import time as _t
+    from heyvox.app_context import AppContext
+    from heyvox.device_manager import DeviceManager
+    ctx = AppContext()
+    ctx.last_read_time = 0.0
+    ctx.mic_just_switched = False
+    dm = DeviceManager(
+        ctx=ctx, config=None,
+        log_fn=lambda *a, **k: None, hud_send=lambda *a, **k: None,
+    )
+    before = _t.monotonic()
+    dm._arm_post_switch_grace()
+    assert ctx.mic_just_switched is True, (
+        "DEF-132: a mic (re)selection must arm the first-packet grace flag"
+    )
+    assert ctx.last_read_time >= before, (
+        "DEF-132: last_read_time must be reset to ~now (monotonic) so the "
+        "freshly-switched device isn't evicted on carried-over dead-air debt"
+    )

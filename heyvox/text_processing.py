@@ -56,6 +56,26 @@ _WAKE_WORD_PHRASES: dict[str, list[str]] = {
 _INTRA_TOKEN_REPEAT = re.compile(r"(.{2,3})\1{3,}")
 
 
+# DEF-137: Known full-string "silence hallucinations". whisper-large-v3 / turbo
+# emit a small fixed set of credit-roll / filler phrases from NON-speech audio
+# (silence, breath, Bluetooth-HFP line noise) where whisper-small returned "".
+# The time-based guards below were tuned for small (~10-25x realtime); turbo
+# hallucinates these FAST (ratio ~0.1) and short+coherent, so neither the
+# repetition checks nor the DEF-133 yield gate fire. Matched as the ENTIRE
+# normalised output (lower-cased, surrounding punctuation stripped) so the same
+# words inside a real sentence ("vielen Dank, weiter geht's") are unaffected.
+_SILENCE_HALLUCINATIONS = {
+    # German (large-v3 / turbo)
+    "vielen dank",
+    "untertitel der amara.org-community",
+    "untertitelung des zdf für funk, 2017",
+    # English
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+}
+
+
 def is_garbled(
     text: str,
     *,
@@ -166,6 +186,12 @@ def is_garbled(
         if re.match(pattern, cleaned):
             return True
 
+    # DEF-137: full-string silence hallucination (see _SILENCE_HALLUCINATIONS).
+    # Time-independent — catches the turbo/large-v3 case the time-based guards
+    # below miss because turbo emits these fast (low ratio) rather than thrashing.
+    if cleaned.lower().strip(" .,!?") in _SILENCE_HALLUCINATIONS:
+        return True
+
     # DEF-083 / DEF-093: Catastrophic STT ratio guard. MLX whisper-small on
     # Apple Silicon runs ~10-25x realtime when warm. A ratio > 0.6 on ≥ 5 s
     # audio means temperature fallback exhausted multiple passes without
@@ -190,6 +216,30 @@ def is_garbled(
         stt_secs is not None and audio_secs is not None
         and stt_secs >= 5.0 and audio_secs >= 5.0
         and stt_secs / audio_secs > 0.6
+    ):
+        return True
+
+    # DEF-133: "struggled and gave up" — Whisper spent many multiples of its
+    # healthy decode time yet returned almost no text from several seconds of
+    # audio. This is the shape the text checks and the catastrophic-ratio guard
+    # both miss: a *short* output ("k nud", 2 words) keeps the unique-ratio and
+    # repetition checks quiet, and a sub-5 s / sub-0.6 inference time slips
+    # under the catastrophic-ratio guard (observed 2026-06-02: 11.3 s audio →
+    # 3.5 s STT → "k nud", ratio 0.31, injected as-is).
+    #
+    # The differentiator from the DEF-093 slow-but-CLEAN case is text *yield*
+    # (chars per second of audio), NOT the time ratio alone — DEF-093's false
+    # positive was a full German sentence (high yield) that merely decoded slow.
+    # Warm whisper-small runs ~10-25x realtime (ratio ~0.04-0.10); a ratio
+    # > 0.25 means it thrashed, and < 1 char/s of audio means it produced
+    # essentially nothing. Both together = a decode collapse that bailed early.
+    # A legitimate short reply ("ja, mach das") is safe: it decodes fast (low
+    # ratio), so the ratio gate excludes it even though its yield is low.
+    if (
+        stt_secs is not None and audio_secs is not None
+        and audio_secs >= 4.0
+        and stt_secs / audio_secs > 0.25
+        and len(cleaned) / audio_secs < 1.0
     ):
         return True
 
