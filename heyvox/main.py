@@ -1047,6 +1047,28 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         except Exception as _ram_exc:
                             log(f"RAM-pressure check error: {_ram_exc}")
 
+                    # Volume-zero guard: warn whenever system output is near zero
+                    # so the user sees it in the menu bar / overlay before TTS arrives.
+                    # Skip while TTS is actively ducking (3% is intentional, not broken).
+                    # TTL 20s (slightly > 15s interval) so the banner persists
+                    # between ticks but auto-expires if the daemon dies.
+                    if not os.path.exists(TTS_PLAYING_FLAG):
+                        try:
+                            from heyvox.herald.coreaudio import get_system_volume_cached
+                            from heyvox.hud.surface import HUDSurface as _HUDSurface
+                            _vol = get_system_volume_cached(ttl=1.0)
+                            if _vol <= 0.05:
+                                _HUDSurface.banner(
+                                    "warn", "vol-zero",
+                                    f"Volume {int(round(_vol * 100))}% — TTS muted",
+                                    ttl_secs=20.0,
+                                )
+                                log(f"[VOL-ZERO] vol={_vol:.2f} — TTS will be inaudible")
+                            else:
+                                _HUDSurface.clear("vol-zero")
+                        except Exception:
+                            pass
+
             # Overlay health: relaunch if dead, kill duplicates
             _now_scan = time.time()
             if not _is_rec and not _is_busy and _now_scan - devices._last_device_scan >= devices._DEVICE_SCAN_INTERVAL:
