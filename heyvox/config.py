@@ -525,6 +525,28 @@ class TelemetryConfig(BaseModel):
     max_batch_kb: int = 100
 
 
+class MemoryConfig(BaseModel):
+    """System RAM-pressure monitoring → menu-bar banner.
+
+    Distinct from the self-RSS watchdog in main.py (which restarts heyvox when
+    its OWN process balloons). This watches the WHOLE machine and only shows a
+    banner: system RAM pressure is what forces MLX Whisper to cold-reload
+    (force-unload at RSS>1500MB under swap), which silently slows STT. Surfaced
+    via HUDSurface — ⚠️ at warn, ❌ at critical, full text on hover. Read-only,
+    no restart side-effect. See heyvox/ram_pressure.py.
+    """
+    # Master switch. Default ON — it is read-only monitoring, no side-effects.
+    monitor_system_ram: bool = True
+
+    # Free system RAM (MB) below which a ⚠️ warn banner shows. Also fires on the
+    # macOS pressure level (kern.memorystatus_vm_pressure_level >= 2) regardless.
+    system_ram_warn_mb: int = 2048
+
+    # Free system RAM (MB) below which a ❌ critical banner shows (or pressure
+    # level >= 4).
+    system_ram_critical_mb: int = 1024
+
+
 class HeyvoxConfig(BaseModel):
     """Root configuration model for the heyvox voice layer.
 
@@ -586,6 +608,9 @@ class HeyvoxConfig(BaseModel):
 
     # Anonymous telemetry — opt-in (see TelemetryConfig docstring)
     telemetry: TelemetryConfig = TelemetryConfig()
+
+    # System RAM-pressure monitoring → menu-bar banner (see MemoryConfig)
+    memory: MemoryConfig = MemoryConfig()
 
     @field_validator("target_mode")
     @classmethod
