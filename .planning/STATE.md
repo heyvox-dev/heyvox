@@ -4,8 +4,8 @@ milestone: v1.2
 milestone_name: Paste Injection Reliability
 status: executing
 stopped_at: Phase 14 context gathered
-last_updated: "2026-06-04T15:10:25.996Z"
-last_activity: 2026-06-04 -- Phase 16 planning complete
+last_updated: "2026-06-04T15:51:56.104Z"
+last_activity: 2026-06-04 -- Phase 16 execution started
 progress:
   total_phases: 16
   completed_phases: 8
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 15 complete — Paste Target Lock shipped
+**Current focus:** Phase 16 — stt-auto-glossary
 
 ## Current Position
 
-Phase: 15
-Plan: All 7 plans complete
-Status: Ready to execute
-Last activity: 2026-06-04 -- Phase 16 planning complete
+Phase: 16 (stt-auto-glossary) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase 16
+Last activity: 2026-06-04 -- Phase 16 execution started
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
 
