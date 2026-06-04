@@ -371,8 +371,10 @@ def _hammerspoon_running() -> bool:
         return subprocess.call(
             ["pgrep", "-q", "Hammerspoon"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=1.0,  # DEF-090 twin: bare pgrep can stall under fork-storm and block the TTS path
         ) == 0
     except (OSError, subprocess.SubprocessError):
+        # subprocess.TimeoutExpired is a SubprocessError subclass — fail closed (treat as not running)
         return False
 
 
