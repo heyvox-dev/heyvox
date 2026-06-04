@@ -43,24 +43,25 @@ def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
         yield
         return
 
-    _saved_vol = None
+    _was_muted = None
     try:
-        from heyvox.herald.coreaudio import get_system_volume, set_system_volume_cached
-        _saved_vol = get_system_volume()
-        _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' saved_vol={_saved_vol:.2f} → 0.0")
-        set_system_volume_cached(0.0)
+        from heyvox.herald.coreaudio import is_system_muted, set_system_muted
+        _was_muted = is_system_muted()
+        if not _was_muted:
+            _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' muting output")
+            set_system_muted(True)
     except Exception:
         pass
 
     try:
         yield
     finally:
-        if _saved_vol is not None:
+        if _was_muted is False:
             time.sleep(settle_secs)
             try:
-                from heyvox.herald.coreaudio import set_system_volume_cached
-                set_system_volume_cached(_saved_vol)
-                _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' restored → {_saved_vol:.2f}")
+                from heyvox.herald.coreaudio import set_system_muted
+                set_system_muted(False)
+                _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' unmuted")
             except Exception:
                 pass
 
@@ -474,17 +475,21 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         result = {"level": 0, "err": None, "stream": None}
         done = threading.Event()
 
-        # Save system volume up front so the outer thread can restore it even
-        # if we abandon the probe worker mid-mute.
-        saved_vol = None
+        # Mute output while probing to hide the A2DP→HFP pop. Use the OS mute
+        # flag rather than setting volume=0 so Bluetooth headsets in HFP mode
+        # do not receive a volume=0 HFP command (which the G435 and similar
+        # headsets remember and later re-report, causing macOS to reset the
+        # system volume to 0).
+        _probe_was_muted = None
         if not is_builtin_mic(name):
             try:
-                from heyvox.herald.coreaudio import get_system_volume, set_system_volume_cached
-                saved_vol = get_system_volume()
-                _log(f"[VOL] probe_level mute: device='{name}' saved_vol={saved_vol:.2f} → 0.0")
-                set_system_volume_cached(0.0)
+                from heyvox.herald.coreaudio import is_system_muted, set_system_muted
+                _probe_was_muted = is_system_muted()
+                if not _probe_was_muted:
+                    _log(f"[VOL] probe_level mute: device='{name}' muting output")
+                    set_system_muted(True)
             except Exception:
-                saved_vol = None
+                _probe_was_muted = None
 
         def _probe() -> None:
             try:
@@ -534,12 +539,12 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                     s.close()
                 except Exception:
                     pass
-            if saved_vol is not None:
+            if _probe_was_muted is False:
                 time.sleep(0.8)
                 try:
-                    from heyvox.herald.coreaudio import set_system_volume_cached
-                    set_system_volume_cached(saved_vol)
-                    _log(f"[VOL] probe_level restore: device='{name}' → {saved_vol:.2f}")
+                    from heyvox.herald.coreaudio import set_system_muted
+                    set_system_muted(False)
+                    _log(f"[VOL] probe_level unmute: device='{name}'")
                 except Exception:
                     pass
 
