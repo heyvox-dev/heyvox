@@ -45,9 +45,10 @@ def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
 
     _saved_vol = None
     try:
-        from heyvox.herald.coreaudio import get_system_volume, set_system_volume
+        from heyvox.herald.coreaudio import get_system_volume, set_system_volume_cached
         _saved_vol = get_system_volume()
-        set_system_volume(0.0)
+        _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' saved_vol={_saved_vol:.2f} → 0.0")
+        set_system_volume_cached(0.0)
     except Exception:
         pass
 
@@ -57,8 +58,9 @@ def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
         if _saved_vol is not None:
             time.sleep(settle_secs)
             try:
-                from heyvox.herald.coreaudio import set_system_volume
-                set_system_volume(_saved_vol)
+                from heyvox.herald.coreaudio import set_system_volume_cached
+                set_system_volume_cached(_saved_vol)
+                _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' restored → {_saved_vol:.2f}")
             except Exception:
                 pass
 
@@ -477,9 +479,10 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         saved_vol = None
         if not is_builtin_mic(name):
             try:
-                from heyvox.herald.coreaudio import get_system_volume, set_system_volume
+                from heyvox.herald.coreaudio import get_system_volume, set_system_volume_cached
                 saved_vol = get_system_volume()
-                set_system_volume(0.0)
+                _log(f"[VOL] probe_level mute: device='{name}' saved_vol={saved_vol:.2f} → 0.0")
+                set_system_volume_cached(0.0)
             except Exception:
                 saved_vol = None
 
@@ -534,8 +537,9 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             if saved_vol is not None:
                 time.sleep(0.8)
                 try:
-                    from heyvox.herald.coreaudio import set_system_volume
-                    set_system_volume(saved_vol)
+                    from heyvox.herald.coreaudio import set_system_volume_cached
+                    set_system_volume_cached(saved_vol)
+                    _log(f"[VOL] probe_level restore: device='{name}' → {saved_vol:.2f}")
                 except Exception:
                     pass
 
