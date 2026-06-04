@@ -175,6 +175,25 @@ class DeviceManager:
         except OSError:
             pass
 
+    def _arm_post_switch_grace(self) -> None:
+        """Reset the main-loop read-stall clock after a mic (re)selection.
+
+        DEF-132. main.py's no-data stall guard evicts the active device after
+        ~5 s of ``stream.get_read_available() < 1``. A reinit / IO-recovery
+        switch runs a slow PA-terminate → 0.5 s sleep → find_best_mic → open
+        sequence — and for Bluetooth an A2DP→HFP renegotiation — during which
+        no read happens. Without resetting the clock here, the freshly-selected
+        device inherits that dead-air debt and the guard evicts it before its
+        first PCM packet, bouncing a just-chosen BT headset straight back to the
+        built-in mic. Reset the clock and flag the switch so the guard grants a
+        longer first-packet window (main.py clears the flag on the first read).
+
+        Uses time.monotonic() to match main.py's ``_stall`` computation; the
+        AUDIO-13 timers next to the call sites stay on time.time() by design.
+        """
+        self.ctx.last_read_time = time.monotonic()
+        self.ctx.mic_just_switched = True
+
     # -------------------------------------------------------------------------
     # Reinit
     # -------------------------------------------------------------------------
@@ -383,6 +402,7 @@ class DeviceManager:
         self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
         self.ctx.dead_mic_zero_chunks = 0
         self.ctx.dead_mic_low_chunks = 0
+        self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
         return True
 
     # -------------------------------------------------------------------------
@@ -539,6 +559,7 @@ class DeviceManager:
         self._write_active_mic(self.dev_name)
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+        self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
         return True
 
     # -------------------------------------------------------------------------

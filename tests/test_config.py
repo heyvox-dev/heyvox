@@ -42,6 +42,10 @@ class TestHeyvoxConfigDefaults:
         cfg = HeyvoxConfig()
         assert cfg.push_to_talk.enabled is True
         assert cfg.push_to_talk.key == "fn"
+        # Double-tap → hands-free defaults (on, with sane timing windows).
+        assert cfg.push_to_talk.double_tap_handsfree is True
+        assert cfg.push_to_talk.tap_max_secs == 0.2
+        assert cfg.push_to_talk.double_tap_secs == 0.35
 
     def test_default_audio(self):
         cfg = HeyvoxConfig()
@@ -166,6 +170,8 @@ class TestLoadConfig:
             "  pause_media: true\n"
             "push_to_talk:\n"
             "  key: right_cmd\n"
+            "  double_tap_handsfree: false\n"
+            "  tap_max_secs: 0.3\n"
         )
         cfg = load_config(f)
         assert cfg.wake_words.start == "hey_vox"
@@ -174,6 +180,8 @@ class TestLoadConfig:
         assert cfg.target_mode == "last-agent"
         assert cfg.tts.pause_media is True
         assert cfg.push_to_talk.key == "right_cmd"
+        assert cfg.push_to_talk.double_tap_handsfree is False
+        assert cfg.push_to_talk.tap_max_secs == 0.3
 
     def test_invalid_yaml_exits(self, tmp_path):
         f = tmp_path / "config.yaml"

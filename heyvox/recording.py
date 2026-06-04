@@ -329,7 +329,7 @@ class RecordingStateMachine:
         self._hud_send = hud_send
         self.training_collector = None  # Set by main.py when collect_negatives is enabled
 
-    def start(self, ptt: bool = False, preroll=None) -> None:
+    def start(self, ptt: bool = False, preroll=None, handsfree: bool = False) -> None:
         """Begin a recording session.
 
         Sets is_recording flag, signals TTS to pause, plays listening cue,
@@ -339,6 +339,11 @@ class RecordingStateMachine:
             ptt: True if triggered by push-to-talk (affects auto-send behavior).
             preroll: Iterable of audio chunks captured before the wake word trigger.
                 Prepended to the audio buffer so the first words aren't clipped.
+            handsfree: True if triggered by a PTT-key double-tap (continuous
+                mode). Ends like a wake-word recording (silence/stop-word/Escape
+                via the main-loop watchdogs, which require triggered_by_ptt to be
+                False), but stop() skips the wake-word audio trim because there
+                is no spoken wake word to remove. Mutually exclusive with ptt.
         """
         if self.config is None:
             return
@@ -360,6 +365,10 @@ class RecordingStateMachine:
             # Pre-roll: prepend recent audio so first words aren't clipped
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
+            # handsfree (double-tap) keeps triggered_by_ptt False so the main
+            # loop's silence/stop-word watchdogs run, but flags itself so stop()
+            # skips the wake-word trim (no spoken wake word to remove).
+            self.ctx.handsfree = handsfree and not ptt
             self.ctx.stopped_via_ptt_mid_recording = False  # DEF-116: reset per-recording
             self.ctx.recording_target = None  # Will be filled by background snapshot
             # DEF-078: Seed tts-during-recording flag from the current TTS flag
@@ -478,6 +487,7 @@ class RecordingStateMachine:
             # Capture PTT flag and recording target under lock — _send_local runs on
             # a daemon thread and must not read ctx fields that could be overwritten.
             ptt_snapshot = self.ctx.triggered_by_ptt
+            handsfree_snapshot = self.ctx.handsfree
             target_snapshot = self.ctx.recording_target
 
         # If background snapshot hasn't finished yet, wait briefly (usually <1s)
@@ -565,8 +575,19 @@ class RecordingStateMachine:
                     # to remove, and 480 ms of trim would clip the user's last
                     # word(s). Start-trim still applies — the recording was
                     # started by wake-word, so the start wake-word IS there.
-                    ww_start_trim_secs = 1.5
-                    ww_end_trim_secs = 0.0 if self.ctx.stopped_via_ptt_mid_recording else 0.5
+                    #
+                    # Hands-free (double-tap) recordings have NO spoken wake word
+                    # at either end, so both trims are zeroed — any start-trim
+                    # would clip the user's opening words. A stop wake word, if
+                    # the user spoke one, is removed at the text level by
+                    # strip_wake_words() below, so dropping the audio end-trim
+                    # here is safe.
+                    if handsfree_snapshot:
+                        ww_start_trim_secs = 0.0
+                        ww_end_trim_secs = 0.0
+                    else:
+                        ww_start_trim_secs = 1.5
+                        ww_end_trim_secs = 0.0 if self.ctx.stopped_via_ptt_mid_recording else 0.5
                     start_trim_chunks = int(
                         ww_start_trim_secs * self.config.audio.sample_rate / self.config.audio.chunk_size
                     )
@@ -881,6 +902,32 @@ class RecordingStateMachine:
                         _raw_for_reverify = _last_raw_wav
                 except NameError:
                     pass
+                # DEF-133: the large-v3 recovery needs a raw WAV, but
+                # _save_debug_audio only writes one when STT_DEBUG_DIR exists.
+                # With debug capture off (the default), persist *this* garbled
+                # recording on-demand so the reverify still runs — and the
+                # failure stays provable on disk. Only fires on the rare garbled
+                # path, so it never bloats the per-recording hot path.
+                if _raw_for_reverify is None and audio_chunks:
+                    try:
+                        import wave as _wave
+                        import tempfile as _tempfile
+                        _gfd, _gpath = _tempfile.mkstemp(
+                            prefix="heyvox-garbled-", suffix=".wav"
+                        )
+                        os.close(_gfd)
+                        _gaudio = np.concatenate(audio_chunks)
+                        with _wave.open(_gpath, "wb") as _gwf:
+                            _gwf.setnchannels(1)
+                            _gwf.setsampwidth(2)  # int16
+                            _gwf.setframerate(self.config.audio.sample_rate)
+                            _gwf.writeframes(_gaudio.tobytes())
+                        _raw_for_reverify = _gpath
+                        self._log(
+                            f"FILTER (garbled): raw audio captured on-demand for reverify at {_gpath}"
+                        )
+                    except Exception as _ge:
+                        self._log(f"FILTER (garbled): on-demand raw save failed: {_ge}")
                 # P-stochastic-stt: whisper-small can hallucinate repetition on
                 # a clean recording; re-run large-v3 in the background and copy
                 # any clean recovery to the clipboard. No auto-paste — by the
