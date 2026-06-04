@@ -65,6 +65,7 @@ _INJECT_DEDUP_SECS = 2.0    # Suppress duplicate injections within this window
 _ZOMBIE_FAIL_THRESHOLD = 2  # Force reinit after N consecutive failed recordings
 _BUSY_TIMEOUT = 60.0        # Force-reset busy after this many seconds
 _DEAD_MIC_TIMEOUT = 30.0    # Force reinit after this many seconds of silence
+_POST_SWITCH_STALL_SECS = 12.0  # DEF-132: first-packet grace for a freshly-switched mic (BT A2DP→HFP cold-start) before the no-data stall guard evicts it
 _HUD_RECONNECT_INTERVAL = 1.0  # Retry every 1s (fast reconnect after overlay startup)
 _HUD_LEVEL_INTERVAL = 0.05    # 20fps throttle for audio_level messages
 
@@ -450,19 +451,39 @@ def _setup(config: HeyvoxConfig):
 
     recording = RecordingStateMachine(ctx=ctx, config=config, log_fn=log, hud_send=hud_send)
 
+    # Pre-roll ring buffer: ~500ms of audio captured while idle and prepended
+    # to a recording so the first words aren't clipped. Lives on ctx so the PTT
+    # callbacks (built here in _setup) and the fill/consume sites (in _run_loop)
+    # share one buffer. A held key starts recording ~tap_max_secs late (gesture
+    # detection); snapshotting this buffer back-fills that window so no speech
+    # is lost.
+    from collections import deque
+    _PREROLL_CHUNKS = max(1, int(0.5 * config.audio.sample_rate / config.audio.chunk_size))
+    ctx.preroll_buffer = deque(maxlen=_PREROLL_CHUNKS)
+
     # Start push-to-talk listener if enabled
     if config.push_to_talk.enabled:
         from heyvox.input.ptt import start_ptt_listener
 
         def _stop_wake_via_ptt():
             # DEF-116: mark the recording as PTT-interrupted so the end-trim
-            # is skipped (no stop-wake-word at the end to remove).
+            # is skipped (no stop-wake-word at the end to remove). Also serves
+            # as the hands-free toggle-off stop (handsfree zeroes both trims).
             ctx.stopped_via_ptt_mid_recording = True
             recording.stop()
 
         ptt_callbacks = {
-            "on_start": lambda: recording.start(ptt=True),
+            # Snapshot the idle pre-roll so the ~tap_max_secs hold-detection
+            # delay doesn't clip the user's opening words (Variant A latency).
+            "on_start": lambda: recording.start(ptt=True, preroll=list(ctx.preroll_buffer)),
             "on_stop": lambda: recording.stop(),
+            # Double-tap → hands-free: ends on silence / stop wake word / Escape
+            # like a wake-word recording (triggered_by_ptt stays False so the
+            # main-loop watchdogs run), but with no spoken wake word, so the
+            # stop() trim is skipped via ctx.handsfree.
+            "on_start_handsfree": lambda: recording.start(
+                handsfree=True, preroll=list(ctx.preroll_buffer)
+            ),
             "on_stop_wake_via_ptt": _stop_wake_via_ptt,
             "on_cancel_transcription": lambda: ctx.cancel_transcription.set(),
             "on_cancel_recording": lambda: recording.cancel(),
@@ -473,7 +494,12 @@ def _setup(config: HeyvoxConfig):
                 os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
             ),
         }
-        start_ptt_listener(config.push_to_talk.key, ptt_callbacks, log_fn=log)
+        start_ptt_listener(
+            config.push_to_talk.key, ptt_callbacks, log_fn=log,
+            double_tap=config.push_to_talk.double_tap_handsfree,
+            tap_max_secs=config.push_to_talk.tap_max_secs,
+            double_tap_secs=config.push_to_talk.double_tap_secs,
+        )
 
     # Load wake word models
     from heyvox.audio.wakeword import load_models
@@ -605,12 +631,6 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         recording.training_collector = _training_collector
         log(f"Training collector enabled → {training_base} (max {config.wake_words.negatives_max_clips} clips/category)")
         log("  Categories: tp/ fp/ tn/ fn/")
-
-    # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
-    # so the first words of the command aren't clipped.
-    from collections import deque
-    _PREROLL_CHUNKS = max(1, int(0.5 * sample_rate / chunk_size))  # ~500ms
-    _preroll_buffer: deque = deque(maxlen=_PREROLL_CHUNKS)
 
     # Memory watchdog
     _MEM_WARN_MB = 2000
@@ -801,7 +821,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # delivers in 1024-frame periods (< chunk_size 1280)
                     # but stream.read() accumulates internally.
                     _stall = time.monotonic() - ctx.last_read_time
-                    if _stall > 5.0:
+                    # DEF-132: a freshly-(re)selected mic — especially Bluetooth
+                    # after an A2DP→HFP renegotiation — can take several seconds
+                    # to deliver its first PCM packet. Grant a longer first-read
+                    # window so the just-chosen device isn't evicted before it
+                    # warms up; reverts to 5 s the moment any data flows (flag
+                    # cleared on the successful-read path below).
+                    _stall_limit = _POST_SWITCH_STALL_SECS if ctx.mic_just_switched else 5.0
+                    if _stall > _stall_limit:
                         log(f"WARNING: No audio data for {_stall:.1f}s, forcing mic recovery")
                         try:
                             print(f"[mic] No audio data for {_stall:.1f}s, recovering", file=sys.stderr, flush=True)
@@ -842,6 +869,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 audio = np.frombuffer(_raw, dtype=np.int16)
                 consecutive_errors = 0
                 ctx.last_read_time = time.monotonic()
+                if ctx.mic_just_switched:
+                    # DEF-132: first PCM packet after a switch arrived — drop the
+                    # extended first-read grace, back to the normal 5 s stall guard.
+                    ctx.mic_just_switched = False
 
                 # AUDIO-13: track last time we saw real audio (level >= 10).
                 # Also tally zero vs low-level chunks since the last reset so
@@ -934,7 +965,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     ctx.audio_buffer.append(audio.copy())
                 elif not _is_rec and not _is_busy:
                     # Feed pre-roll buffer when idle -- captures audio before wake word
-                    _preroll_buffer.append(audio.copy())
+                    ctx.preroll_buffer.append(audio.copy())
 
             # Reset first-speech tracker and model reset timer when recording starts
             if _is_rec and not _was_rec:
@@ -998,6 +1029,23 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     elif rss_mb > _MEM_WARN_MB:
                         log(f"WARNING: Memory usage high: {rss_mb:.0f} MB (threshold: {_MEM_WARN_MB} MB)")
                         hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
+
+                    # System-wide RAM pressure -> menu-bar banner. Distinct from
+                    # the self-RSS watchdog above (that restarts heyvox); this is
+                    # read-only and watches the WHOLE machine, because RAM pressure
+                    # is what forces MLX Whisper cold-reloads that silently slow STT.
+                    # Surfaced via HUDSurface (same banner primitive as mic-zombie).
+                    _mem_cfg = getattr(config, "memory", None)
+                    if _mem_cfg is None or _mem_cfg.monitor_system_ram:
+                        try:
+                            from heyvox import ram_pressure as _ram_pressure
+                            _ram_pressure.check_and_surface(
+                                warn_mb=(_mem_cfg.system_ram_warn_mb if _mem_cfg else 2048),
+                                crit_mb=(_mem_cfg.system_ram_critical_mb if _mem_cfg else 1024),
+                                log=log,
+                            )
+                        except Exception as _ram_exc:
+                            log(f"RAM-pressure check error: {_ram_exc}")
 
             # Overlay health: relaunch if dead, kill duplicates
             _now_scan = time.time()
@@ -1562,7 +1610,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         elif use_separate_words:
                             if start_word in ww_name and not _is_rec:
                                 _flush_user_effort()
-                                recording.start(preroll=_preroll_buffer)
+                                recording.start(preroll=ctx.preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
                                 # Warmup: ignore stop-word in first _STOP_WARMUP_SECS
                                 # to prevent user's own speech from self-stopping.
@@ -1573,7 +1621,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         else:
                             if not _is_rec:
                                 _flush_user_effort()
-                                recording.start(preroll=_preroll_buffer)
+                                recording.start(preroll=ctx.preroll_buffer)
                             elif time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                 # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS
                                 log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
