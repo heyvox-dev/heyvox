@@ -76,6 +76,7 @@ class STTLocalConfig(BaseModel):
     model_dir: str = "models/sherpa-onnx-whisper-small"
     language: str = ""
     threads: int = 4
+    initial_prompt: str = ""   # rendered glossary from `heyvox learn-vocab` (Phase 16)
 
 
 class STTConfig(BaseModel):
@@ -562,6 +563,29 @@ class MemoryConfig(BaseModel):
     system_ram_critical_mb: int = 1024
 
 
+class VocabLearnerConfig(BaseModel):
+    """Offline vocabulary glossary extractor for STT initial_prompt biasing (Phase 16).
+
+    Opt-in, off the hot path. When `enabled` is False (the default) NO transcript text is
+    ever sent to any subprocess or network — the learner is a no-op. The extraction call
+    (Haiku via the Max subscription, or the anthropic API-key path for OSS users) only runs
+    when the user explicitly flips `enabled` on.
+    """
+    enabled: bool = False                       # opt-in — MUST default closed (privacy)
+    provider: str = "subscription"              # "subscription" (claude CLI) | "api" (ANTHROPIC_API_KEY)
+    model: str = "claude-haiku-4-5"
+    max_terms: int = 30                         # cap on terms entering initial_prompt
+    min_frequency: int = 2                      # corpus-frequency gate (drop one-off junk)
+    min_confidence: float = 0.6                 # confidence gate (drop low-conf hallucinations)
+    seeds: list[str] = [                        # private terms no model can infer (guardrail layer 2)
+        "ngrid", "HeyVox", "Conductor", "Kokoro",
+        "Hush", "Herald", "Quartz", "Geminicap",
+        "MLX", "sherpa-onnx",
+    ]
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class HeyvoxConfig(BaseModel):
     """Root configuration model for the heyvox voice layer.
 
@@ -591,6 +615,7 @@ class HeyvoxConfig(BaseModel):
     transcription_prefix: str = ""
 
     stt: STTConfig = STTConfig()
+    vocab_learner: VocabLearnerConfig = VocabLearnerConfig()
     tts: TTSConfig = TTSConfig()
     hold_queue: HoldQueueConfig = HoldQueueConfig()
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
