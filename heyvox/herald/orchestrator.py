@@ -624,6 +624,49 @@ def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_lo
 
 
 # ---------------------------------------------------------------------------
+# Volume-zero guard
+# ---------------------------------------------------------------------------
+
+# Reuse the same threshold as _duck_audio's guard — below this the duck is
+# skipped and TTS plays at essentially no volume.
+_VOL_ZERO_THRESHOLD: float = 0.05
+# Banner TTL slightly longer than the 30s periodic check so it auto-expires
+# between checks once volume is fixed without needing a clear() call.
+_VOL_ZERO_BANNER_TTL: float = 35.0
+
+
+def _warn_if_vol_zero(cfg: OrchestratorConfig, debug_log: Path) -> bool:
+    """Emit a menu-bar / HUD-overlay warning when system volume is near zero.
+
+    Called before each TTS message and on a 30-second periodic poll from the
+    orchestrator idle loop. Clears the banner automatically when volume is
+    restored above the threshold.
+
+    Returns True if volume is effectively zero (TTS will be inaudible).
+    """
+    try:
+        from heyvox.herald.coreaudio import get_system_volume_cached
+        from heyvox.hud.surface import HUDSurface
+        vol = get_system_volume_cached(ttl=1.0)
+        if vol <= _VOL_ZERO_THRESHOLD:
+            HUDSurface.banner(
+                level="warn",
+                source="vol-zero",
+                text=f"Volume {int(round(vol * 100))}% — TTS muted",
+                ttl_secs=_VOL_ZERO_BANNER_TTL,
+            )
+            _herald_log(
+                f"ORCH: [VOL-ZERO] vol={vol:.2f} ≤ {_VOL_ZERO_THRESHOLD} — TTS inaudible",
+                debug_log,
+            )
+            return True
+        HUDSurface.clear("vol-zero")
+        return False
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Violation check
 # ---------------------------------------------------------------------------
 
@@ -783,6 +826,7 @@ def _play_wav(
             _media_pause(cfg)
             _herald_log("ORCH: media PAUSED", debug_log)
 
+        _warn_if_vol_zero(cfg, debug_log)
         original_vol = _duck_audio(cfg, debug_log)
         _set_tts_volume(original_vol, cfg)
     else:
@@ -1013,6 +1057,7 @@ class HeraldOrchestrator:
         original_vol: float | None = None
         current_workspace: str = ""
         last_msg_prefix: str = ""
+        _last_vol_check: float = 0.0
 
         # Signal handlers
         def _handle_signal(signum, frame):
@@ -1164,6 +1209,11 @@ class HeraldOrchestrator:
                     else:
                         time.sleep(cfg.poll_interval)
                         _gc_queue_dirs(cfg, cfg.debug_log)
+                        # Periodic volume-zero check — refresh banner every 30s
+                        _now_mono = time.monotonic()
+                        if _now_mono - _last_vol_check >= 30.0:
+                            _last_vol_check = _now_mono
+                            _warn_if_vol_zero(cfg, cfg.debug_log)
 
         finally:
             self._cleanup(original_vol)
