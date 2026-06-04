@@ -1062,46 +1062,52 @@ def _cmd_calibrate(args):
 
 
 def _cmd_learn_vocab(args):
-    """Run the offline vocabulary learner (STT initial_prompt biasing, Phase 16).
+    """Learn the STT vocabulary glossary from transcript history (Phase 16).
 
-    Loads the user's dictation history, sends batches to Claude Haiku for
-    extraction, validates and merges into a cumulative store, and writes the
-    top-N terms (within the 223-token Whisper cap) to stt_initial_prompt.txt.
-
-    The config flag `vocab_learner.enabled` must be True for any extraction
-    to run — the learner is privacy fail-closed.
+    Off the hot path: runs the offline extractor over ~/.local/share/heyvox/transcripts.jsonl,
+    merges into vocab_store.json, renders the top-N (<=223 whisper tokens) into
+    stt.local.initial_prompt, and writes it to config.yaml. Manual or nightly (launchd).
+    Requires config.vocab_learner.enabled = true (opt-in, default off).
     """
-    from heyvox.config import load_config
-    from heyvox.audio.vocab_learner import learn_vocab
+    from heyvox.config import load_config, update_config
+    from heyvox.audio import vocab_learner
 
-    cfg = load_config()
-    vocab_cfg = cfg.vocab_learner
-
-    summary = learn_vocab(
-        cfg=vocab_cfg,
+    config = load_config()
+    summary = vocab_learner.learn_vocab(
+        cfg=config.vocab_learner,
         dry_run=getattr(args, "dry_run", False),
         run_eval=getattr(args, "eval", False),
         model_override=getattr(args, "model", None),
+        max_terms_override=getattr(args, "max_terms", None),
+        min_frequency_override=getattr(args, "min_frequency", None),
         reset=getattr(args, "reset", False),
     )
 
-    if not summary.get("enabled"):
-        print(
-            "Vocabulary learner is disabled.\n"
-            "Set `vocab_learner.enabled: true` in your config to enable extraction."
-        )
+    if not summary.get("enabled", False):
+        print("vocab_learner is disabled. Enable it in config.yaml:")
+        print("  vocab_learner:\n    enabled: true")
         return
 
-    print(
-        f"Vocabulary learner run complete.\n"
-        f"  Extracted:       {summary.get('extracted', 0)} items\n"
-        f"  Dropped:         {summary.get('dropped', 0)} malformed\n"
-        f"  Skipped batches: {summary.get('skipped_batches', 0)}\n"
-        f"  Promoted:        {summary.get('promoted', 0)} (freq+conf gate)\n"
-        f"  Token count:     {summary.get('token_count', 0)} / 223\n"
-    )
-    if summary.get("prompt"):
-        print(f"  initial_prompt:  {summary['prompt']}")
+    # Monitoring summary (AI-SPEC §7): surface counts + token usage vs the 223 cap.
+    print(f"Extracted {summary.get('extracted', 0)} items, "
+          f"dropped {summary.get('dropped', 0)} malformed, "
+          f"skipped {summary.get('skipped_batches', 0)} batches.")
+    print(f"Promoted {summary.get('promoted', 0)} terms "
+          f"({summary.get('token_count', 0)}/223 whisper tokens).")
+    if summary.get("promoted", 0) == 0:
+        print("WARNING: 0 terms promoted — extractor may be broken or all entries gated.")
+    if summary.get("token_count", 0) >= 220:
+        print("WARNING: glossary hit the token cap — lower-frequency terms were dropped.")
+
+    rendered = summary.get("prompt", "")
+    if getattr(args, "dry_run", False):
+        print(f"\n[dry-run] would write initial_prompt:\n  {rendered!r}")
+        return
+
+    # Persist the rendered glossary where init_local_stt reads it. update_config takes
+    # **kwargs; the dotted key has dots so splat it from a dict (NOT a positional arg).
+    update_config(**{"stt.local.initial_prompt": rendered})
+    print("Wrote stt.local.initial_prompt to config.yaml. Restart heyvox to apply.")
 
 
 def main():
@@ -1368,6 +1374,20 @@ def main():
         default=None,
         metavar="MODEL",
         help="Override the extraction model (e.g. claude-opus-4-8)",
+    )
+    sub_learn_vocab.add_argument(
+        "--max-terms",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap how many terms enter initial_prompt (default: from config)",
+    )
+    sub_learn_vocab.add_argument(
+        "--min-frequency",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Minimum corpus frequency to include a term (default: from config)",
     )
     sub_learn_vocab.set_defaults(func=_cmd_learn_vocab)
 
