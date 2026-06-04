@@ -62,6 +62,35 @@ class TestHeyvoxConfigDefaults:
         assert "Claude" in cfg.agents
         assert "Cursor" in cfg.agents
 
+    def test_default_stt_initial_prompt(self):
+        cfg = HeyvoxConfig()
+        assert cfg.stt.local.initial_prompt == ""
+
+    def test_default_vocab_learner(self):
+        cfg = HeyvoxConfig()
+        # Privacy opt-in MUST default closed (non-negotiable 2).
+        assert cfg.vocab_learner.enabled is False
+        assert cfg.vocab_learner.provider == "subscription"
+        assert cfg.vocab_learner.model == "claude-haiku-4-5"
+        assert cfg.vocab_learner.max_terms == 30
+        assert cfg.vocab_learner.min_frequency == 2
+        assert cfg.vocab_learner.min_confidence == 0.6
+        assert "ngrid" in cfg.vocab_learner.seeds
+        assert "Herald" in cfg.vocab_learner.seeds
+
+
+class TestSTTLocalConfig:
+    """STTLocalConfig.initial_prompt field (Phase 16)."""
+
+    def test_initial_prompt_defaults_empty(self):
+        from heyvox.config import STTLocalConfig
+        assert STTLocalConfig().initial_prompt == ""
+
+    def test_initial_prompt_accepts_string(self):
+        from heyvox.config import STTLocalConfig
+        c = STTLocalConfig(initial_prompt="Claude Xero Herald")
+        assert c.initial_prompt == "Claude Xero Herald"
+
 
 class TestWakeWordConfig:
     """Wake word stop defaults to start when empty."""
