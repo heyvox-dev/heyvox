@@ -6,6 +6,7 @@
 - ✅ **v1.1 Architecture Hardening** — Phases 6-9 (shipped 2026-04-11)
 - 🔧 **v1.2 Paste Injection Reliability** — Phases 12-15 (Phase 14 in progress, 3/6 plans)
 - ✅ **v1.3 Robustness Sweep** — 5 defect-driven quick tasks (shipped 2026-05-25)
+- 🎯 **v1.4 STT Accuracy** — Phase 16 (Auto-Glossary → Whisper `initial_prompt`); 4 plans planned (Spike 001)
 - 📋 **v2.0 Cross-Platform & Polish** — TTS server, MediaRemote, custom wake word, Chrome extension, cross-platform client
 
 ## Phases
@@ -100,6 +101,24 @@ drift guard), P-stochastic-wake (silence gate). **Defects still open:**
 DEF-104 (PortAudio HAL cache prozessweit — diagnostiziert, nicht
 behoben).
 
+### 🎯 v1.4 STT Accuracy (Planned)
+
+- [ ] **Phase 16: STT Auto-Glossary** — Learn a vocabulary glossary of
+      recurring proper-noun / tech-term STT mis-transcriptions from the real
+      dictation history (Claude Haiku via Max subscription, no API key) and
+      feed the top-N into Whisper's `initial_prompt`. Off-hot-path, opt-in,
+      with mandatory guardrails (wake-word exclude, seed list, gibberish
+      prefilter, confidence/frequency gate). Validated by **Spike 001**
+      (cloud-gated; local 7B not viable).
+  **AI-SPEC:** `.planning/phases/16-stt-auto-glossary/16-AI-SPEC.md`
+  **Context:** Spike 001 (`.planning/spikes/001-auto-glossary-extraction/`)
+  **Plans:** 4 plans (3 waves)
+  Plans:
+  - [ ] 16-01-PLAN.md — Wave 0 test scaffolding: promote spike fixtures + deterministic scorer eval + pipeline test stubs + test_config extensions
+  - [ ] 16-02-PLAN.md — Consumer wiring: STTLocalConfig.initial_prompt + VocabLearnerConfig + stt.py module-global thread + main.py call site
+  - [ ] 16-03-PLAN.md — Learner pipeline (vocab_learner.py): GlossaryItem + wake/gibberish guardrails + Haiku extraction (CLI + API) + idempotent merge + 223-token cap + fail-closed learn_vocab
+  - [ ] 16-04-PLAN.md — CLI surface: heyvox learn-vocab subcommand + config write + run summary + Open Question 2 insert test + anthropic optional extra
+
 ### 📋 v2.0 Cross-Platform & Polish (Planned)
 
 Phases TBD — define via `/gsd:new-milestone`
@@ -127,3 +146,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | Q. Banner UX (icon + tooltip) | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. Stop-wake VAD silence gate | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. DEF-080 herald CLI pin | v1.3 | 1/1 | Complete | 2026-05-25 |
+| 16. STT Auto-Glossary | v1.4 | 0/4 | Planned | — |
