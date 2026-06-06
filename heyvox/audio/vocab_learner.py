@@ -72,6 +72,14 @@ _EXTRA_WAKE_FORMS: frozenset[str] = frozenset({
     "hoi box", "hand box", "wox", "wux",
 })
 
+# Separator-stripped ("squished") wake forms. The variant lists above are all
+# SPACED ("hey vox"), so concatenated / hyphenated spellings — "HeyVox",
+# "heyvox", "hey-vox" — slipped past every check and leaked into initial_prompt
+# (DEF-145, found in UAT). Comparing a separator-free form closes that class.
+_WAKE_SQUISHED: frozenset[str] = frozenset(
+    re.sub(r"[\s\-_.,!?]+", "", w) for w in (_WAKE_VARIANTS | _EXTRA_WAKE_FORMS)
+) | {"heyvox", "heyjarvis"}
+
 
 def is_wake_word(text: str) -> bool:
     """Return True if *text* is (or starts/ends with) a wake-word form.
@@ -88,6 +96,9 @@ def is_wake_word(text: str) -> bool:
         return False
     norm = text.strip().lower().strip(".,!?")
     if norm in _WAKE_VARIANTS or norm in _EXTRA_WAKE_FORMS:
+        return True
+    # Separator-stripped match — catches "HeyVox" / "heyvox" / "hey-vox" (DEF-145)
+    if re.sub(r"[\s\-_.,!?]+", "", norm) in _WAKE_SQUISHED:
         return True
     # Any canonical variant as a whole-phrase prefix/suffix
     for v in _WAKE_VARIANTS:
@@ -166,22 +177,37 @@ def is_gibberish(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def build_initial_prompt(items: list[dict], max_terms: int) -> str:
-    """Rank by corpus_freq, pack `right`-spellings until the 223-token Whisper cap.
+    """Rank by corpus_freq, pack DISTINCT `right`-spellings until the 223-token cap.
 
     Uses the WHISPER tokenizer (not len(str)) — proper nouns and German
     compounds tokenise to more sub-tokens than character length implies.
     Safety margin: stop at 220 (3 tokens under the hard 223 clamp).
+
+    Deduplicates by canonical spelling (case-insensitive): several mis-transcription
+    forms map to the same `right`, and emitting it twice wastes the token budget
+    (DEF-145 — e.g. "Claude Claude HeyVox HeyVox"). Also skips any wake form as a
+    final belt-and-suspenders gate — a wake form must NEVER reach initial_prompt
+    (non-negotiable 1), even if a stale store entry slipped past earlier filters.
     """
     tok = _get_whisper_tokenizer()
-    ranked = sorted(items, key=lambda r: r.get("corpus_freq", 0), reverse=True)[:max_terms]
+    ranked = sorted(items, key=lambda r: r.get("corpus_freq", 0), reverse=True)
     out: list[str] = []
+    seen: set[str] = set()
     used = 0
     for r in ranked:
+        if len(out) >= max_terms:
+            break
         piece = r["right"]
+        if is_wake_word(piece):
+            continue  # last gate: never let a wake form into the prompt
+        key = piece.strip().lower()
+        if key in seen:
+            continue  # one slot per canonical spelling
         n = len(tok.encode(" " + piece))
         if used + n > 220:
             break
         out.append(piece)
+        seen.add(key)
         used += n
     return " ".join(out)
 

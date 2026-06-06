@@ -310,3 +310,38 @@ def test_update_config_returns_true_on_success(tmp_path, monkeypatch):
     result = update_config(**{"stt.local.initial_prompt": "Claude"})
     assert result is True
     assert "initial_prompt:" in cfg_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# UAT regression guards (DEF-145 — found in live Test 2 run)
+# ---------------------------------------------------------------------------
+
+def test_is_wake_word_catches_concatenated_forms():
+    """DEF-145: concatenated/hyphenated wake spellings must be caught, not just spaced
+    ones. "HeyVox" leaked into initial_prompt 4x because only "hey vox" was matched."""
+    from heyvox.audio.vocab_learner import is_wake_word
+
+    for form in ("HeyVox", "heyvox", "hey-vox", "Hey Vox", "hey vox", "HeyJarvis", "Vox"):
+        assert is_wake_word(form), f"{form!r} should be flagged as a wake form"
+    # Real corrections must still pass through.
+    for term in ("Claude", "Herald", "Xero", "Geminicap", "Blackhole"):
+        assert not is_wake_word(term), f"{term!r} should NOT be flagged as a wake form"
+
+
+def test_build_initial_prompt_dedupes_and_skips_wake():
+    """DEF-145: duplicate right-spellings collapse to one slot, and a wake form is
+    dropped as the final belt-and-suspenders gate."""
+    from heyvox.audio.vocab_learner import build_initial_prompt
+
+    items = [
+        {"right": "Claude", "corpus_freq": 10},
+        {"right": "claude", "corpus_freq": 9},   # case-insensitive duplicate
+        {"right": "HeyVox", "corpus_freq": 8},   # wake form → must be skipped
+        {"right": "Xero", "corpus_freq": 7},
+        {"right": "Xero", "corpus_freq": 6},      # duplicate
+    ]
+    toks = build_initial_prompt(items, max_terms=30).split()
+    assert toks.count("Claude") == 1, f"Claude not deduped: {toks}"
+    assert toks.count("Xero") == 1, f"Xero not deduped: {toks}"
+    assert "HeyVox" not in toks, f"wake form leaked: {toks}"
+    assert {t.lower() for t in toks} == {"claude", "xero"}
