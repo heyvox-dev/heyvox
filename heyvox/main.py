@@ -21,9 +21,11 @@ from heyvox.config import load_config, HeyvoxConfig, CONFIG_DIR
 from heyvox.app_context import AppContext
 from heyvox.device_manager import DeviceManager
 from heyvox.audio.profile import MicProfileManager
+from heyvox.audio.normalize import apply_input_gain
 from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
+    HOTPLUG_RESTART_MARKER,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
@@ -234,6 +236,124 @@ def _release_singleton():
                 os.unlink(_PID_FILE)
     except (OSError, ValueError):
         pass
+
+
+def _read_hotplug_marker():
+    """Return ``(epoch, device_name)`` from the DEF-104 restart marker, or None."""
+    try:
+        with open(HOTPLUG_RESTART_MARKER) as f:
+            ts, _, dev = f.read().partition("\n")
+        return float(ts), dev.strip()
+    except (OSError, ValueError):
+        return None
+
+
+def _write_hotplug_marker(device: str) -> None:
+    """Stamp the restart marker so the post-restart process can detect a loop."""
+    try:
+        with open(HOTPLUG_RESTART_MARKER, "w") as f:
+            f.write(f"{time.time()}\n{device}")
+    except OSError:
+        pass
+
+
+def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
+    """DEF-104: self-restart if a higher-priority mic is live in CoreAudio but
+    missing from PortAudio's cached enumeration.
+
+    A device hotplugged after the daemon's first PortAudio init is invisible to
+    every PortAudio code path (scan, find_best_mic, the hotplug watcher) until
+    the process restarts — PortAudio's process-global HAL cache survives
+    ``pa.terminate()`` + re-init. CoreAudio's live HAL still sees it, so the
+    mismatch is the detection signal. The only reliable in-process fix is a
+    full restart (the documented manual ``launchctl kickstart`` workaround,
+    automated here via the same ``os.execv`` path the memory watchdog uses).
+
+    Caller must gate on idle (not recording / not busy) and minimum daemon age.
+    This adds the loop guard: if we already restarted for this same device
+    within ``cooldown`` seconds and it's STILL missing, we stop — a device that
+    stays invisible even after a restart is a different problem and must not
+    spin the daemon.
+    """
+    try:
+        from heyvox.audio.mic import (
+            get_live_input_device_names,
+            _enumerate_pa_signature,
+        )
+        from heyvox.audio.device_handle import detect_missed_hotplug
+    except Exception as e:  # pragma: no cover - import guard
+        log(f"[hotplug] import failed (skipping check): {e}")
+        return
+
+    try:
+        live = get_live_input_device_names()
+        if not live:
+            return  # CoreAudio unavailable — degrade to no-op, never false-fire
+        pa_names = {
+            n.lower()
+            for _i, n, c in _enumerate_pa_signature(devices.pa)
+            if c > 0
+        }
+    except Exception as e:
+        log(f"[hotplug] enumeration failed (skipping check): {e}")
+        return
+
+    missed = detect_missed_hotplug(
+        live, pa_names, config.mic_priority, devices.dev_name
+    )
+    if not missed:
+        return
+
+    # DEF-147: never self-restart for a Bluetooth mic. A BT-HFP device is
+    # chronically "live in CoreAudio but absent from PortAudio" as it flaps
+    # A2DP<->HFP, so detect_missed_hotplug misreads it as a USB cache-miss
+    # hotplug — and each restart tears the fragile SCO link apart (observed:
+    # G435 over BT died repeatedly until HeyVox was stopped). BT has its own
+    # A2DP->HFP path (_bt_trigger_hfp_switch) and never needs a process restart;
+    # DEF-104 is strictly for USB devices the PortAudio cache missed.
+    try:
+        from heyvox.audio.mic import get_bluetooth_input_device_names
+        bt_names = get_bluetooth_input_device_names()
+        if any(missed.lower() in n for n in bt_names):
+            log(
+                f"MIC_HOTPLUG_MISSED: '{missed}' is a Bluetooth device — "
+                f"NOT self-restarting (DEF-147; BT has its own A2DP->HFP path)"
+            )
+            return
+    except Exception as e:
+        log(f"[hotplug] BT-transport check failed (proceeding): {e}")
+
+    marker = _read_hotplug_marker()
+    if marker is not None:
+        ts, dev = marker
+        age = time.time() - ts
+        if dev == missed and age < cooldown:
+            log(
+                f"MIC_HOTPLUG_MISSED: '{missed}' still absent from PortAudio "
+                f"{age:.0f}s after a restart — not looping (cooldown {cooldown:.0f}s)"
+            )
+            return
+
+    log(
+        f"MIC_HOTPLUG_MISSED: '{missed}' is live in CoreAudio but absent from "
+        f"PortAudio's cache (DEF-104 hotplug) — self-restarting to clear it"
+    )
+    try:
+        hud_send({"type": "error", "text": f"New mic '{missed}' — restarting"})
+    except Exception:
+        pass
+    _write_hotplug_marker(missed)
+    time.sleep(0.3)
+    _release_singleton()
+    try:
+        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+    except Exception as exc:
+        log(f"[hotplug] execv failed ({exc}), falling back to subprocess restart")
+        import subprocess as _sp
+        _sp.Popen(
+            [sys.executable, "-m", "heyvox.main"], start_new_session=True
+        )
+        ctx.shutdown.set()
 
 
 def _stop_tts_from_escape(hud_send_fn) -> None:
@@ -639,6 +759,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _last_mem_check = time.time()
     _MEM_CHECK_INTERVAL = 15.0
 
+    # DEF-104: hotplug self-restart. Detect a higher-priority mic that's live in
+    # CoreAudio but missing from PortAudio's per-process cache (plugged in after
+    # startup) and restart to clear the cache. Min-age lets the startup scan +
+    # BT A2DP→HFP settle before any restart; cooldown (in the marker) prevents a
+    # loop if a device stays invisible even after restarting.
+    _HOTPLUG_CHECK_INTERVAL = 15.0
+    _HOTPLUG_RESTART_COOLDOWN = 300.0
+    _HOTPLUG_MIN_AGE = 90.0
+    _last_hotplug_check = time.time()
+    _hotplug_start_time = time.time()
+
     # SIGKILL-proof heartbeat
     _HEARTBEAT_FILE = HEYVOX_HEARTBEAT_FILE
     _HEARTBEAT_INTERVAL = 10.0
@@ -868,6 +999,15 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     ctx.last_read_time = time.monotonic()
                     continue
                 audio = np.frombuffer(_raw, dtype=np.int16)
+                # DEF-101: per-mic software capture gain. BT-HFP devices (G435
+                # etc.) deliver a low level the macOS input slider can't lift
+                # (slider is decoupled from the HFP codec gain). A per-mic
+                # `gain` in the active profile boosts the signal HERE — before
+                # level tracking, calibration, wake word, recording and STT —
+                # so every consumer sees the same lifted audio. No-op (zero
+                # copy) when gain is None/1.0; switches with the active profile.
+                if devices.active_profile is not None and devices.active_profile.gain:
+                    audio = apply_input_gain(audio, devices.active_profile.gain)
                 consecutive_errors = 0
                 ctx.last_read_time = time.monotonic()
                 if ctx.mic_just_switched:
@@ -1008,6 +1148,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 if devices.stream is not _prev_stream and devices.stream is not None:
                     model.reset()  # Clear corrupted wake word state (AUDIO-12)
                     consecutive_errors = 0
+
+                # DEF-104: hotplug self-restart check (idle-gated by this block,
+                # plus min daemon age + cooldown marker inside the helper).
+                if (now - _last_hotplug_check >= _HOTPLUG_CHECK_INTERVAL
+                        and now - _hotplug_start_time >= _HOTPLUG_MIN_AGE):
+                    _last_hotplug_check = now
+                    _maybe_restart_for_hotplug(
+                        devices, config, log, hud_send, ctx,
+                        cooldown=_HOTPLUG_RESTART_COOLDOWN,
+                    )
 
                 # Memory watchdog -- check RSS every 60s
                 if now - _last_mem_check >= _MEM_CHECK_INTERVAL:

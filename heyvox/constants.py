@@ -14,6 +14,13 @@ _TMP = tempfile.gettempdir()
 # Requirement: DECP-04
 RECORDING_FLAG = f"{_TMP}/heyvox-recording"
 
+# DEF-104: marker written just before a hotplug-triggered self-restart.
+# Carries "<monotonic-ish epoch>\n<device name>" so the freshly-started
+# process can tell whether it already tried (and failed) to clear the
+# PortAudio cache for this device — preventing a restart loop when a device
+# stays invisible to PortAudio even after a restart.
+HOTPLUG_RESTART_MARKER = f"{_TMP}/heyvox-hotplug-restart"
+
 # Default log file location
 LOG_FILE_DEFAULT = f"{_TMP}/heyvox.log"
 
