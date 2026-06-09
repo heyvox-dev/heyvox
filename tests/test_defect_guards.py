@@ -1531,3 +1531,55 @@ def test_def147_main_loop_excludes_bluetooth_before_restart():
     assert bt_idx != -1 and marker_idx != -1 and bt_idx < marker_idx, (
         "DEF-147: the BT exclusion must short-circuit BEFORE the restart marker/execv"
     )
+
+
+# ---------------------------------------------------------------------------
+# DEF-148: output keep-alive for USB power-saving headsets (G535/Lightspeed).
+#
+# USB wireless headsets park the output path after silence; the next stream's
+# cold start (~0.7s) swallows short cues. A silent output stream held open keeps
+# the device awake → cues play immediately. MUST be gated on USB transport
+# (irrelevant on built-in/BT/virtual) and stopped on cleanup.
+# ---------------------------------------------------------------------------
+
+def test_def148_keepalive_wired_and_usb_gated():
+    pytest.importorskip("pyaudio")
+    from heyvox.config import AudioConfig
+    from heyvox.audio.keepalive import default_output_is_usb, default_output_transport
+    assert AudioConfig().output_keepalive is True, "keep-alive defaults on"
+    assert isinstance(default_output_transport(), int)
+    assert isinstance(default_output_is_usb(), bool)
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "OutputKeepAlive(" in src, "main loop must construct the keep-alive"
+    assert "config.audio.output_keepalive" in src, "keep-alive must be config-gated"
+    assert "_ka.stop()" in src, "keep-alive must be stopped in cleanup"
+
+
+def test_def148_keepalive_opens_one_stream_and_closes(monkeypatch):
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.keepalive import OutputKeepAlive
+    events = []
+
+    class FakeStream:
+        def start_stream(self):
+            events.append("start")
+
+        def stop_stream(self):
+            events.append("stop")
+
+        def close(self):
+            events.append("close")
+
+    class FakePA:
+        def open(self, **kw):
+            events.append("open")
+            return FakeStream()
+
+    ka = OutputKeepAlive(FakePA(), lambda m: None)
+    ka._open_stream()
+    ka._open_stream()  # idempotent — must NOT open a second stream
+    assert events.count("open") == 1, "DEF-148: only one silent stream at a time"
+    ka._close_stream()
+    assert "close" in events, "DEF-148: stream must be released on close"
