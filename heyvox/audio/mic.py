@@ -122,26 +122,31 @@ _kAudioObjectPropertyElementMain = 0
 _kAudioObjectPropertyName = _fourcc("lnam")
 _kAudioDevicePropertyDeviceIsAlive = _fourcc("livn")
 _kAudioDevicePropertyStreams = _fourcc("stm#")
+_kAudioDevicePropertyTransportType = _fourcc("tran")
+_kAudioDeviceTransportTypeBluetooth = _fourcc("blue")
+_kAudioDeviceTransportTypeBluetoothLE = _fourcc("blea")
 _kCFStringEncodingUTF8 = 0x08000100
 
 
-def get_dead_input_device_names() -> set[str]:
-    """Return names of CoreAudio input devices that are not alive.
+def _enumerate_coreaudio_inputs() -> list[tuple[str, bool, int]]:
+    """Return ``[(device_name, is_alive, transport)]`` for every CoreAudio
+    device that has input streams. ``transport`` is the CoreAudio transport-type
+    four-char-code (e.g. 'blue' = Bluetooth) used to exclude BT from DEF-104.
 
-    macOS keeps paired-but-disconnected Bluetooth devices in the audio device
-    list. PyAudio still enumerates them and can even open streams that return
-    low-level noise, causing find_best_mic to select a phantom device.
+    Hits the **live** CoreAudio HAL directly via ctypes, bypassing PortAudio's
+    per-process device cache. That cache is the root of DEF-104: a device
+    hotplugged after the daemon's first PortAudio init is invisible to every
+    PortAudio code path (``get_device_count``, ``find_best_mic``, the hotplug
+    watcher) until the process restarts — but it shows up here immediately.
+    ``get_live_input_device_names`` uses this to detect that exact mismatch.
 
-    This function queries CoreAudio's kAudioDevicePropertyDeviceIsAlive to
-    identify dead devices so they can be skipped during mic selection.
-
-    Returns an empty set if CoreAudio is unavailable (graceful degradation).
+    Returns ``[]`` if CoreAudio is unavailable (graceful degradation).
     """
     try:
         ca_path = ctypes.util.find_library("CoreAudio")
         cf_path = ctypes.util.find_library("CoreFoundation")
         if not ca_path or not cf_path:
-            return set()
+            return []
 
         ca = ctypes.cdll.LoadLibrary(ca_path)
         cf = ctypes.cdll.LoadLibrary(cf_path)
@@ -198,7 +203,7 @@ def get_dead_input_device_names() -> set[str]:
             for i in range(device_count)
         ]
 
-        dead_names = set()
+        results: list[tuple[str, bool, int]] = []
         for did in device_ids:
             # Check if device has input streams
             stream_addr = _AudioObjectPropertyAddress(
@@ -229,32 +234,105 @@ def get_dead_input_device_names() -> set[str]:
             )
             if status != 0:
                 continue
+            is_alive = alive_val.value != 0
 
-            if alive_val.value == 0:
-                # Device is dead — get its name
-                name_addr = _AudioObjectPropertyAddress(
-                    _kAudioObjectPropertyName,
-                    _kAudioObjectPropertyScopeGlobal,
-                    _kAudioObjectPropertyElementMain,
-                )
-                cfstr = ctypes.c_void_p(0)
-                name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
-                status = ca.AudioObjectGetPropertyData(
-                    ctypes.c_uint32(did), ctypes.byref(name_addr),
-                    ctypes.c_uint32(0), None, ctypes.byref(name_size),
-                    ctypes.byref(cfstr),
-                )
-                if status == 0 and cfstr.value:
-                    name = cfstr_to_str(cfstr.value)
-                    cf.CFRelease(cfstr)
-                    if name:
-                        dead_names.add(name.lower())
-                        _log(f"  CoreAudio: '{name}' is not alive (disconnected)")
+            # Fetch the name for EVERY input device (the original code only
+            # named dead ones; live detection needs names for live ones too).
+            name_addr = _AudioObjectPropertyAddress(
+                _kAudioObjectPropertyName,
+                _kAudioObjectPropertyScopeGlobal,
+                _kAudioObjectPropertyElementMain,
+            )
+            cfstr = ctypes.c_void_p(0)
+            name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
+            status = ca.AudioObjectGetPropertyData(
+                ctypes.c_uint32(did), ctypes.byref(name_addr),
+                ctypes.c_uint32(0), None, ctypes.byref(name_size),
+                ctypes.byref(cfstr),
+            )
+            if status == 0 and cfstr.value:
+                name = cfstr_to_str(cfstr.value)
+                cf.CFRelease(cfstr)
+                if name:
+                    # Transport type (four-char-code) — used to exclude
+                    # Bluetooth mics from the DEF-104 self-restart (DEF-147).
+                    transport = 0
+                    trans_addr = _AudioObjectPropertyAddress(
+                        _kAudioDevicePropertyTransportType,
+                        _kAudioObjectPropertyScopeGlobal,
+                        _kAudioObjectPropertyElementMain,
+                    )
+                    trans_val = ctypes.c_uint32(0)
+                    trans_size = ctypes.c_uint32(4)
+                    if ca.AudioObjectGetPropertyData(
+                        ctypes.c_uint32(did), ctypes.byref(trans_addr),
+                        ctypes.c_uint32(0), None, ctypes.byref(trans_size),
+                        ctypes.byref(trans_val),
+                    ) == 0:
+                        transport = trans_val.value
+                    results.append((name, is_alive, transport))
 
-        return dead_names
+        return results
     except Exception as e:
-        _log(f"  CoreAudio alive check failed: {e}")
-        return set()
+        _log(f"  CoreAudio enumeration failed: {e}")
+        return []
+
+
+def get_dead_input_device_names() -> set[str]:
+    """Return names (lowercase) of CoreAudio input devices that are NOT alive.
+
+    macOS keeps paired-but-disconnected Bluetooth devices in the audio device
+    list. PyAudio still enumerates them and can even open streams that return
+    low-level noise, causing find_best_mic to select a phantom device. Querying
+    CoreAudio's kAudioDevicePropertyDeviceIsAlive lets find_best_mic skip them.
+
+    Returns an empty set if CoreAudio is unavailable (graceful degradation).
+    """
+    dead: set[str] = set()
+    for name, alive, _transport in _enumerate_coreaudio_inputs():
+        if not alive:
+            dead.add(name.lower())
+            _log(f"  CoreAudio: '{name}' is not alive (disconnected)")
+    return dead
+
+
+def get_live_input_device_names() -> set[str]:
+    """Return names (lowercase) of CoreAudio input devices that ARE alive.
+
+    The live-HAL view used to detect DEF-104 hotplugs that PortAudio's cached
+    enumeration misses: a device present here but absent from PortAudio's
+    ``get_device_count()`` was plugged in after the daemon started and stays
+    invisible to every PortAudio code path until the process restarts. Empty
+    set if CoreAudio is unavailable (graceful degradation — detection simply
+    no-ops rather than false-firing a restart).
+    """
+    return {name.lower() for name, alive, _t in _enumerate_coreaudio_inputs() if alive}
+
+
+def get_bluetooth_input_device_names() -> set[str]:
+    """Return names (lowercase) of CoreAudio input devices on a Bluetooth
+    transport (classic BT or BLE).
+
+    DEF-147: the DEF-104 hotplug self-restart must NEVER fire for a Bluetooth
+    mic. A BT-HFP device is chronically "live in CoreAudio but absent from
+    PortAudio" as it flaps between A2DP (output-only) and HFP (bidirectional),
+    so the DEF-104 detector misreads it as a fresh USB hotplug and restarts the
+    daemon — and each restart tears the fragile SCO link apart, killing the mic
+    (the exact regression a user hit: G435 over BT died repeatedly, then was
+    stable the moment HeyVox was stopped). BT has its own A2DP->HFP path
+    (``_bt_trigger_hfp_switch``) and never needs a process restart. Empty set if
+    CoreAudio is unavailable (graceful degradation — the BT exclusion simply
+    doesn't apply, leaving DEF-104's prior behaviour intact).
+    """
+    bt_types = {
+        _kAudioDeviceTransportTypeBluetooth,
+        _kAudioDeviceTransportTypeBluetoothLE,
+    }
+    return {
+        name.lower()
+        for name, _alive, transport in _enumerate_coreaudio_inputs()
+        if transport in bt_types
+    }
 
 
 def force_os_default_input(name_substr: str) -> bool:

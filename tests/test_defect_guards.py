@@ -1286,3 +1286,248 @@ def test_def132_arm_post_switch_grace_runtime():
         "DEF-132: last_read_time must be reset to ~now (monotonic) so the "
         "freshly-switched device isn't evicted on carried-over dead-air debt"
     )
+
+
+# ---------------------------------------------------------------------------
+# DEF-104: hotplug self-restart — a higher-priority mic that is live in
+# CoreAudio but absent from PortAudio's per-process cache (plugged in after
+# the daemon's first init) is invisible until restart. detect_missed_hotplug
+# is the pure detection core; the main loop self-restarts on its signal.
+# ---------------------------------------------------------------------------
+
+def test_def104_detects_priority_device_missing_from_portaudio():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # The exact 2026-06-06 case: Jabra live in CoreAudio, PortAudio only sees
+    # the built-in mic, daemon stuck on the built-in fallback.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390", "macbook pro microphone"},
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed == "Jabra Link 390", (
+        "DEF-104: a priority device live in CoreAudio but absent from PortAudio "
+        "and outranking the current mic must be flagged for a cache-clearing restart"
+    )
+
+
+def test_def104_no_restart_when_device_already_in_portaudio():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # PortAudio sees the Jabra too — the normal scan/switch handles it, no restart.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390", "macbook pro microphone"},
+        pa_input_names={"jabra link 390", "macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed is None, (
+        "DEF-104: if PortAudio already enumerates the device, restarting is "
+        "pointless churn — the normal mic switch will pick it up"
+    )
+
+
+def test_def104_no_restart_for_lower_priority_device():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # A live-but-uncached device ranking BELOW the current mic is not an upgrade.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390", "g435"},
+        pa_input_names={"g435"},
+        mic_priority=["G435", "Jabra Link 390"],
+        current_dev_name="G435",
+    )
+    assert missed is None, (
+        "DEF-104: only a HIGHER-priority missing device justifies a restart; "
+        "a lower-ranked one must not spin the daemon"
+    )
+
+
+def test_def104_no_false_fire_when_coreaudio_unavailable():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # Empty live set = CoreAudio unavailable. Must degrade to no-op.
+    missed = detect_missed_hotplug(
+        live_input_names=set(),
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed is None, (
+        "DEF-104: with no CoreAudio data the detector must never fire — a "
+        "restart on missing input would be a self-inflicted outage"
+    )
+
+
+def test_def104_detects_when_no_current_device():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # No mic in use (None) → any live-but-uncached priority device is an upgrade.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390"},
+        pa_input_names=set(),
+        mic_priority=["Jabra Link 390"],
+        current_dev_name=None,
+    )
+    assert missed == "Jabra Link 390"
+
+
+def test_def104_substring_match_like_find_best_mic():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # priority entries are substrings; the real device name may be longer.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390 (hands-free)"},
+        pa_input_names=set(),
+        mic_priority=["Jabra Link 390"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed == "Jabra Link 390", (
+        "DEF-104: detection must use the same substring match as find_best_mic "
+        "so the two agree on what counts as present"
+    )
+
+
+def test_def104_empty_or_none_priority_is_noop():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    assert detect_missed_hotplug({"x"}, set(), [], None) is None
+    assert detect_missed_hotplug({"x"}, set(), None, None) is None
+
+
+def test_def104_main_loop_wires_hotplug_check():
+    # File-text inspection (no pyaudio import): the main loop must call the
+    # restart helper gated on min age, and the helper must use the live-vs-cached
+    # signal and the MIC_HOTPLUG_MISSED tag.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "_maybe_restart_for_hotplug(" in src, (
+        "DEF-104: main loop must invoke the hotplug self-restart helper"
+    )
+    assert "_HOTPLUG_MIN_AGE" in src, (
+        "DEF-104: restart must be gated on minimum daemon age to let BT HFP settle"
+    )
+    assert "get_live_input_device_names" in src
+    assert "detect_missed_hotplug" in src
+    assert "MIC_HOTPLUG_MISSED" in src
+    assert "_write_hotplug_marker" in src, (
+        "DEF-104: a cooldown marker must be written to prevent restart loops"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-101: per-mic software capture gain (BT-HFP G435 low-level workaround)
+#
+# The macOS input slider is decoupled from the Bluetooth-HFP codec gain, so a
+# BT headset (G435) captures at a very low level the slider cannot raise. The
+# fix is a per-mic `gain` in the active profile, applied on the capture hot
+# path. The `gain` config field existed long before this but was never applied
+# (dead config) — these guards ensure it actually multiplies the signal, stays
+# int16, hard-clips instead of wrapping, and no-ops cheaply when unset.
+# ---------------------------------------------------------------------------
+
+def test_def101_apply_input_gain_scales_signal():
+    import numpy as np
+    from heyvox.audio.normalize import apply_input_gain
+    src = np.array([100, -200, 300], dtype=np.int16)
+    out = apply_input_gain(src, 4.0)
+    assert out.dtype == np.int16, "gain output must stay int16 for openwakeword"
+    assert list(out) == [400, -800, 1200], "gain must be a flat multiplier"
+
+
+def test_def101_apply_input_gain_clips_no_wraparound():
+    import numpy as np
+    from heyvox.audio.normalize import apply_input_gain
+    # 20000 * 4 = 80000 would wrap to a negative int16 without clamping.
+    out = apply_input_gain(np.array([20000, -20000], dtype=np.int16), 4.0)
+    assert out.dtype == np.int16
+    assert int(out[0]) == 32767 and int(out[1]) == -32768, (
+        "DEF-101: gain must hard-clip to int16 range, never wrap around"
+    )
+
+
+def test_def101_apply_input_gain_noop_when_unset():
+    import numpy as np
+    from heyvox.audio.normalize import apply_input_gain
+    src = np.frombuffer(b"\x01\x00\x02\x00", dtype=np.int16)  # read-only view
+    # None / 1.0 / <=0 must return the SAME object (zero copy on the hot path).
+    assert apply_input_gain(src, None) is src
+    assert apply_input_gain(src, 1.0) is src
+    assert apply_input_gain(src, 0.0) is src
+    assert apply_input_gain(src, -2.0) is src
+
+
+def test_def101_main_loop_applies_profile_gain():
+    # File-text inspection (main.py imports pyaudio): the capture loop must
+    # apply the active profile's gain right after np.frombuffer.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "apply_input_gain" in src, "DEF-101: capture loop must call apply_input_gain"
+    assert "devices.active_profile.gain" in src, (
+        "DEF-101: gain must come from the active mic profile so it switches "
+        "with the device"
+    )
+
+
+def test_def101_gain_field_wired_through_profile_manager():
+    # MicProfileEntryConfig.gain was dead config before DEF-101 — ensure the
+    # profile manager copies it into the resolved entry and substring-matches.
+    import pathlib
+    import tempfile
+    from heyvox.audio.profile import MicProfileManager
+    from heyvox.config import MicProfileEntryConfig
+    mgr = MicProfileManager(
+        {"g435 bluetooth": MicProfileEntryConfig(gain=4.0)},
+        pathlib.Path(tempfile.mkdtemp()),
+    )
+    assert mgr.get_profile("G435 Bluetooth Gaming Headset").gain == 4.0, (
+        "DEF-101: per-mic gain must resolve through MicProfileManager.get_profile"
+    )
+    # A device without a matching profile gets no gain (None → no-op).
+    assert mgr.get_profile("MacBook Pro Microphone").gain is None
+    # The Lightspeed variant must NOT match the "G435 Bluetooth" key (no gain →
+    # no clipping on the healthy USB level).
+    assert mgr.get_profile("G435 Wireless Gaming Headset").gain is None
+
+
+# ---------------------------------------------------------------------------
+# DEF-147: DEF-104 hotplug self-restart must NEVER fire for a Bluetooth mic.
+#
+# A BT-HFP device is chronically "live in CoreAudio but absent from PortAudio"
+# as it flaps A2DP<->HFP, so the DEF-104 detector misread it as a USB hotplug
+# and restarted the daemon — each restart tearing the fragile SCO link apart
+# (real regression: G435 over BT died repeatedly, stable the moment HeyVox was
+# stopped). These guards ensure the BT-transport exclusion exists and is
+# consulted before the restart.
+# ---------------------------------------------------------------------------
+
+def test_def147_bluetooth_helper_returns_set():
+    # Must import and return a set even with no BT hardware (graceful
+    # degradation — empty set, never raises).
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.mic import get_bluetooth_input_device_names
+    assert isinstance(get_bluetooth_input_device_names(), set)
+
+
+def test_def147_enumerate_triples_dont_break_live_dead_helpers():
+    # _enumerate_coreaudio_inputs now yields (name, alive, transport); the
+    # live/dead helpers must still unpack without ValueError.
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.mic import (
+        get_live_input_device_names,
+        get_dead_input_device_names,
+    )
+    assert isinstance(get_live_input_device_names(), set)
+    assert isinstance(get_dead_input_device_names(), set)
+
+
+def test_def147_main_loop_excludes_bluetooth_before_restart():
+    # File-text inspection: the hotplug helper must consult the BT set and skip
+    # the restart for BT devices BEFORE writing the marker / calling execv.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "get_bluetooth_input_device_names" in src, (
+        "DEF-147: hotplug restart must consult the BT-transport set"
+    )
+    bt_idx = src.find("is a Bluetooth device")
+    marker_idx = src.find("_write_hotplug_marker(missed)")
+    assert bt_idx != -1 and marker_idx != -1 and bt_idx < marker_idx, (
+        "DEF-147: the BT exclusion must short-circuit BEFORE the restart marker/execv"
+    )
