@@ -22,6 +22,7 @@ from heyvox.app_context import AppContext
 from heyvox.device_manager import DeviceManager
 from heyvox.audio.profile import MicProfileManager
 from heyvox.audio.normalize import apply_input_gain
+from heyvox.audio.keepalive import OutputKeepAlive
 from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
@@ -701,6 +702,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Threaded audio read: protects against stream.read() blocking after AUHAL errors
     import concurrent.futures as _cf
     _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
+
+    # DEF-148: output keep-alive for USB power-saving headsets (G535 over
+    # Lightspeed). Holds a silent output stream open ONLY while the default
+    # output is USB, so the device never parks and swallows short cues' cold
+    # start. No-op on built-in/BT/virtual outputs. Stopped in main()'s finally.
+    if config.audio.output_keepalive and getattr(devices, "keepalive", None) is None:
+        try:
+            devices.keepalive = OutputKeepAlive(devices.pa, log)
+            devices.keepalive.start()
+        except Exception as _ka_e:
+            log(f"[keepalive] failed to start (skipping): {_ka_e}")
 
     # Local aliases for frequently read config values (avoid attribute lookups in hot loop)
     threshold = config.threshold
@@ -1861,6 +1873,9 @@ def main() -> None:
         if config.tts.enabled:
             _shutdown_tts()
             log("TTS worker stopped")
+        _ka = getattr(devices, "keepalive", None)
+        if _ka is not None:
+            _ka.stop()
         devices.cleanup()
         log("Shutdown complete.")
 

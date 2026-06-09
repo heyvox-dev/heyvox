@@ -429,6 +429,14 @@ class AudioConfig(BaseModel):
     sample_rate: int = 16000
     chunk_size: int = 1280
 
+    # DEF-148: hold a silent OUTPUT stream open while the default output is a
+    # USB device, so USB power-saving headsets (G535 over Lightspeed) don't park
+    # the audio path and swallow the cold-start of short cues. No-op on built-in
+    # speakers / Bluetooth / virtual outputs (the delay doesn't occur there), so
+    # it's safe to leave on. Disable if the suppressed idle deep-sleep costs too
+    # much battery on a wireless headset.
+    output_keepalive: bool = True
+
 
 class InjectionConfig(BaseModel):
     """Per-app focus settle delays and retry parameters for paste injection.
