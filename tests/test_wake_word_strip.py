@@ -68,3 +68,26 @@ class TestStripWakeWords:
         text = "Okay, it's still not working. Hey Charvis."
         result = _strip_wake_words(text, "hey_jarvis_v0.1", "hey_jarvis_v0.1")
         assert result == "Okay, it's still not working"
+
+    # DEF-154: variants observed live that leaked into injected text.
+    def test_strips_single_word_heybox(self):
+        text = "Das ist ganz wichtig, das zu bedenken. Heybox!"
+        result = _strip_wake_words(text, "hey_vox", "hey_vox")
+        assert result == "Das ist ganz wichtig, das zu bedenken"
+
+    def test_strips_hey_wax(self):
+        text = "Die Frage ist, ob die Qualität passt. Hey, Wax"
+        result = _strip_wake_words(text, "hey_vox", "hey_vox")
+        assert result == "Die Frage ist, ob die Qualität passt"
+
+    def test_keeps_trailing_product_name_heyvox(self):
+        # "HeyVox" written as one word is the product name and must survive
+        # (silence-stopped dictations can legitimately end with it).
+        text = "Das neue Feature gehört zu HeyVox"
+        result = _strip_wake_words(text, "hey_vox", "hey_vox")
+        assert result == "Das neue Feature gehört zu HeyVox"
+
+    def test_keeps_leading_word_starting_with_vox(self):
+        text = "Voxel rendering ist langsam"
+        result = _strip_wake_words(text, "hey_vox", "hey_vox")
+        assert result == "Voxel rendering ist langsam"
