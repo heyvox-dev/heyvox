@@ -77,6 +77,7 @@ class STTLocalConfig(BaseModel):
     language: str = ""
     threads: int = 4
     initial_prompt: str = ""   # rendered glossary from `heyvox learn-vocab` (Phase 16)
+    unload_secs: float = 300.0  # idle seconds before MLX model is unloaded from RAM
 
 
 class STTConfig(BaseModel):

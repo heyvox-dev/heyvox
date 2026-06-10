@@ -34,7 +34,7 @@ _mlx_language: str = ""
 _mlx_loaded = threading.Event()  # Set when model is ready
 _mlx_lock = threading.Lock()
 _mlx_last_use: float = 0.0
-_mlx_unload_secs: float = 600.0  # 10 minutes idle → unload (short timeouts cause slow reloads under swap pressure)
+_mlx_unload_secs: float = 300.0  # idle → unload; configurable via stt.local.unload_secs (too-short timeouts cause slow reloads under swap pressure)
 _mlx_unloader: threading.Timer | None = None
 _mlx_transcribing: bool = False  # Guard: prevents unload during active transcription
 _log_fn: Callable[[str], None] | None = None
@@ -134,6 +134,7 @@ def init_local_stt(
     threads: int = 4,
     log_fn: Callable[[str], None] | None = None,
     initial_prompt: str = "",
+    unload_secs: float = 300.0,
 ) -> None:
     """Initialize local STT engine.
 
@@ -148,17 +149,22 @@ def init_local_stt(
         threads: CPU thread count for sherpa backend.
         log_fn: Optional callable(str) for log messages. Defaults to print.
         initial_prompt: Rendered glossary string for MLX Whisper biasing (Phase 16).
+        unload_secs: Idle seconds before the MLX model is unloaded from RAM.
     """
     global _recognizer, _mlx_model_id, _mlx_language, _log_fn, _mlx_initial_prompt
+    global _mlx_unload_secs
     _log_fn = log_fn
 
     if engine == "mlx":
         _mlx_model_id = mlx_model
         _mlx_language = language
         _mlx_initial_prompt = initial_prompt
+        if unload_secs > 0:
+            _mlx_unload_secs = unload_secs
         _log(f"Local STT configured (MLX Metal GPU, lazy load, "
              f"lang={'auto' if not language else language}, "
-             f"glossary={'on' if initial_prompt else 'off'})")
+             f"glossary={'on' if initial_prompt else 'off'}, "
+             f"unload={int(_mlx_unload_secs)}s)")
     else:
         try:
             import sherpa_onnx

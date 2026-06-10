@@ -110,7 +110,7 @@ Chrome extension + native messaging host. 3-tier fallback:
 - **Volume-modulated recording indicator**: Live waveform bars, not static red dot.
 - **Smart target detection**: Configurable always-focused / pinned-app / last-agent.
 - **Dead mic recovery**: Health check every 15s, auto-restart audio session after 30s of silence.
-- **Memory watchdog**: Auto-restart at 1GB RSS, MLX Whisper lazy load/unload after 2min idle.
+- **Memory watchdog**: Auto-restart at 1GB RSS, MLX Whisper lazy load/unload after idle timeout (`stt.local.unload_secs`, default 300s).
 - **Transcription timeout**: 30s max to prevent STT hangs blocking the pipeline.
 
 ## Development Guidelines
