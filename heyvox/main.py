@@ -896,7 +896,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     #      speech with no natural pauses.
     _was_vad_silent: bool = False
     _last_silent_frame_time: float = 0.0
-    _PRE_SILENCE_DISCOUNT_WINDOW = 0.5  # seconds since last silent frame
+    # DEF-149: widened 0.5 -> 1.0s. The pre-silence window must cover the brief
+    # pause PLUS the spoken "Hey Vox" itself (~0.5s): the stop-trigger fires at
+    # the END of "Hey Vox", so by then the pause is already ~0.5-0.7s old.
+    # At 0.5s that consistently just-missed (observed last_silent=0.56s blocked),
+    # forcing the slow consecutive path and repeated tries. 1.0s catches the
+    # natural "...sentence. Hey Vox" cadence while still expiring fast enough to
+    # keep mid-sentence protection (DEF-043 flares have no preceding silence).
+    _PRE_SILENCE_DISCOUNT_WINDOW = 1.0  # seconds since last silent frame
     _PRE_SILENCE_THRESHOLD_FACTOR = 0.85  # 15 % discount post-pause
 
     # User-effort metric: timestamps of every above-threshold wake attempt while
@@ -1443,10 +1450,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     model.reset()
                     _last_model_reset = time.time()
                 _was_vad_silent = _vad_silent
-                # DEF-096-B: track most recent silent-frame timestamp so the
-                # threshold-discount block below can recognise the
-                # pause-then-Hey-Vox pattern.
-                if _vad_silent:
+                # DEF-096-B / DEF-149: track the most recent RAW silent-frame
+                # timestamp so the pre-silence discount recognises the
+                # "...sentence. [brief pause] Hey Vox" stop pattern. This MUST
+                # use _raw_vad_silent (instantaneous level < gate), NOT
+                # _vad_silent — the latter carries the DEF-053 grace (~0.5 s),
+                # which delays silence recognition by exactly as long as the
+                # pre-silence window (_PRE_SILENCE_DISCOUNT_WINDOW = 0.5 s), so
+                # the two never line up: _last_silent_frame_time stayed unset
+                # (silent=True count = 0), the discount + fast/window stop paths
+                # were blocked, and the user had to repeat "Hey Vox" 3x. The
+                # grace still governs the VAD eval-gate and the DEF-096-A model
+                # reset above; only the pre-silence clock reads the raw level.
+                if _raw_vad_silent:
                     _last_silent_frame_time = time.time()
             else:
                 _vad_silent = _raw_vad_silent
