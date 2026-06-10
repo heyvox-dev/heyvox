@@ -467,11 +467,19 @@ class RecordingStateMachine:
         except (BrokenPipeError, OSError):
             pass
 
-    def stop(self) -> None:
+    def stop(self, reason: str = "other") -> None:
         """End a recording session and dispatch transcription.
 
         Checks minimum recording duration, plays feedback cue, and starts
         the transcription thread.
+
+        Args:
+            reason: What ended the session — "stop_wake" (stop wake word),
+                "silence_timeout", "max_duration", "ptt", "ptt_interrupt"
+                (user gave up waiting for the stop wake word, DEF-116) or
+                "other". Forwarded to _send_local so the wake-word strip can
+                emit [STOP_MISSED] when a spoken stop word survived into the
+                transcript without having ended the recording (DEF-151).
         """
         if self.config is None:
             return
@@ -650,7 +658,7 @@ class RecordingStateMachine:
                     target=self._send_local,
                     args=(duration, recorded_chunks, raw_rms_db),
                     kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot,
-                            "stop_time": _stop_t0},
+                            "stop_time": _stop_t0, "stop_reason": reason},
                     daemon=True,
                 ).start()
         except Exception as e:
@@ -692,6 +700,7 @@ class RecordingStateMachine:
         ptt: bool = False,
         recording_target=None,
         stop_time: float = 0.0,
+        stop_reason: str = "other",
     ) -> None:
         """Transcribe locally and inject text into target app."""
         import subprocess as _subprocess
@@ -872,6 +881,26 @@ class RecordingStateMachine:
                 self._log(
                     f"Wake word strip: '{pre_strip_text[:80]}' -> '{text[:80]}'"
                 )
+                # DEF-151 observability: trailing wake words in the transcript
+                # of a recording that was NOT ended by the stop-wake path are
+                # ground truth for missed stops — the user audibly said
+                # "Hey Vox" (STT heard it!) but the detector/gates dropped
+                # every attempt and a timeout/PTT/cap ended the session.
+                # End-strip is detected via common-prefix: a start-only strip
+                # changes the head of the text, an end-strip keeps it.
+                # reason == "stop_wake" with a stripped tail is the normal
+                # DEF-091 imperfect-trim case and stays untagged.
+                _pre_n = pre_strip_text.strip()
+                _post_n = text.strip()
+                _end_stripped = (
+                    len(_pre_n) > len(_post_n)
+                    and _pre_n.lower().startswith(_post_n.lower())
+                )
+                if _end_stripped and stop_reason != "stop_wake":
+                    self._log(
+                        f"[STOP_MISSED] reason={stop_reason} "
+                        f"tail='{_pre_n[len(_post_n):].strip()[:60]}'"
+                    )
                 if self.training_collector and _training_chunks:
                     self.training_collector.save_fn_stop(
                         _training_chunks, _training_sr
