@@ -1,34 +1,33 @@
-"""DEF-148: output-stream keep-alive for USB power-saving wireless headsets.
+"""DEF-148/DEF-150: output keep-alive + cue playback for USB power-saving headsets.
 
 USB wireless headsets (e.g. the Logitech G535 over its Lightspeed/A00142
-receiver) drop the *cold start* of a freshly opened output stream: after a
-short silence the device parks the audio path in a low-power state, and the
-next stream open loses its first ~0.5-0.7 s. Long sounds (TTS, YouTube) survive
-because only their start is clipped; short cues (~0.5 s) are swallowed whole.
+receiver) park the output path after a short silence; opening a FRESH output
+stream then loses its cold start (~0.5-0.7 s). Long sounds (TTS, YouTube)
+survive because only their start clips; short cues (~0.5 s) and — crucially —
+any separate ``afplay`` process (which opens its own fresh stream every time)
+are swallowed whole. Verified: with the keep-alive holding one silent stream
+open, a cue written INTO that already-running stream is audible, while a
+separate ``afplay`` of the same file is silent.
 
-This is distinct from Lightspeed's ~1 ms *running* latency — that's the
-in-stream figure; this is the wake-from-idle figure, which gaming never hits
-(continuous stream) so it isn't optimized. The G535's aggressive power-saving
-(33 h battery vs the G435's 18 h) is exactly what causes it; the G435 over its
-A00150 receiver doesn't park as hard, so it never showed the problem.
+So this module does two things on a USB-transport output:
+ 1. Holds a silent output stream open so the device never parks.
+ 2. Plays HeyVox's cues (listening/ok/...) by writing them INTO that same
+    already-warm stream — no fresh stream, no cold start, no delay.
 
-Fix: hold a *silent* output stream open so the device never parks → cues play
-immediately, no lead-in padding, no delay.
-
-RELEVANT ONLY ON A USB-TRANSPORT OUTPUT DEVICE. On built-in speakers,
-Bluetooth, or virtual devices the cold-start delay doesn't occur, so the
-keep-alive stays OFF (no needless wake / battery drain) — it re-checks the
-default output's transport periodically and starts/stops the silent stream
-accordingly. A silent stream draws almost nothing at the amplifier; the cost is
-that the device's idle deep-sleep is suppressed while a USB output is active.
+On built-in speakers / Bluetooth / virtual outputs the cold-start delay doesn't
+occur, so the keep-alive stays OFF and ``play_cue_via_stream`` returns False —
+the caller (cues.py) falls back to ``afplay``.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
+import subprocess
+import tempfile
 import threading
-import time
+import wave
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +63,6 @@ def default_output_transport() -> int:
             return 0
         ca = ctypes.cdll.LoadLibrary(ca_path)
 
-        # default output device id
         addr = _AOPA(_DEFAULT_OUTPUT, _SCOPE_GLOBAL, _ELEM_MAIN)
         dev = ctypes.c_uint32(0)
         size = ctypes.c_uint32(4)
@@ -74,7 +72,6 @@ def default_output_transport() -> int:
         ) != 0 or dev.value == 0:
             return 0
 
-        # its transport type
         taddr = _AOPA(_TRANSPORT, _SCOPE_GLOBAL, _ELEM_MAIN)
         tval = ctypes.c_uint32(0)
         tsize = ctypes.c_uint32(4)
@@ -94,15 +91,28 @@ def default_output_is_usb() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Keep-alive: silent output stream, gated on USB output
+# Module singleton: the running keep-alive with an OPEN usb stream (else None).
+# cues.py calls play_cue_via_stream() — returns False when there's no warm
+# stream so the caller falls back to afplay.
 # ---------------------------------------------------------------------------
 
-class OutputKeepAlive:
-    """Holds a silent output stream open while the default output is USB.
+_ACTIVE: "OutputKeepAlive | None" = None
 
-    Runs a low-frequency monitor thread (no audio work on it — the silence is
-    produced by a PortAudio callback). Safe to start/stop repeatedly; every
-    failure path degrades to "keep-alive off" rather than raising.
+
+def play_cue_via_stream(name: str, path: str) -> bool:
+    ka = _ACTIVE
+    if ka is None:
+        return False
+    return ka.play_cue(name, path)
+
+
+class OutputKeepAlive:
+    """Holds a silent output stream open while the default output is USB, and
+    plays cues into that same warm stream (no cold start).
+
+    Runs a low-frequency monitor thread (the silence + cue audio is produced by
+    a PortAudio callback). Every failure path degrades to "off" / "fall back to
+    afplay" rather than raising.
     """
 
     def __init__(self, pa, log, *, check_interval: float = 5.0,
@@ -115,7 +125,11 @@ class OutputKeepAlive:
         self._stream = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._silence = b"\x00" * (chunk * 2)  # int16 mono
+        # Cue playback over the warm stream
+        self._cues: dict[str, object] = {}   # name -> int16 ndarray @ rate
+        self._cue_buf = None                 # currently-playing samples
+        self._cue_pos = 0
+        self._cue_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -130,13 +144,73 @@ class OutputKeepAlive:
         self._stop.set()
         self._close_stream()
 
+    # -- cue playback over the warm stream --------------------------------
+
+    def _load_cue(self, path: str):
+        """afconvert the cue to the stream's rate/mono/int16 → numpy array, cached."""
+        try:
+            import numpy as np
+        except Exception:
+            return None
+        tmp = tempfile.mktemp(suffix=".wav")
+        try:
+            r = subprocess.run(
+                ["afconvert", "-f", "WAVE", "-d", f"LEI16@{self._rate}",
+                 "-c", "1", path, tmp],
+                capture_output=True,
+            )
+            if r.returncode != 0 or not os.path.exists(tmp):
+                return None
+            wf = wave.open(tmp)
+            data = wf.readframes(wf.getnframes())
+            wf.close()
+            return np.frombuffer(data, dtype=np.int16).copy()
+        except Exception as e:
+            self._log(f"[keepalive] cue load failed for {path}: {e}")
+            return None
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    def play_cue(self, name: str, path: str) -> bool:
+        """Queue a cue to play over the warm stream. Returns False (→ caller
+        falls back to afplay) if no stream is currently open."""
+        if self._stream is None:
+            return False
+        buf = self._cues.get(name)
+        if buf is None:
+            buf = self._load_cue(path)
+            if buf is None:
+                return False
+            self._cues[name] = buf
+        with self._cue_lock:
+            self._cue_buf = buf
+            self._cue_pos = 0
+        return True
+
     # -- internal ----------------------------------------------------------
 
     def _cb(self, in_data, frame_count, time_info, status):
         import pyaudio
+        with self._cue_lock:
+            buf = self._cue_buf
+            if buf is not None:
+                import numpy as np
+                chunk = buf[self._cue_pos:self._cue_pos + frame_count]
+                self._cue_pos += len(chunk)
+                if self._cue_pos >= len(buf):
+                    self._cue_buf = None  # finished
+                if len(chunk) < frame_count:
+                    chunk = np.concatenate(
+                        [chunk, np.zeros(frame_count - len(chunk), dtype=np.int16)]
+                    )
+                return (chunk.tobytes(), pyaudio.paContinue)
         return (b"\x00" * (frame_count * 2), pyaudio.paContinue)
 
     def _open_stream(self) -> None:
+        global _ACTIVE
         if self._stream is not None:
             return
         try:
@@ -147,13 +221,17 @@ class OutputKeepAlive:
                 stream_callback=self._cb,
             )
             self._stream.start_stream()
+            _ACTIVE = self
             self._log("[keepalive] USB output detected — holding silent stream "
-                      "open (DEF-148: prevents cold-start cue loss)")
+                      "open + routing cues through it (DEF-148/150)")
         except Exception as e:
             self._log(f"[keepalive] could not open silent stream: {e}")
             self._stream = None
 
     def _close_stream(self) -> None:
+        global _ACTIVE
+        if _ACTIVE is self:
+            _ACTIVE = None
         s, self._stream = self._stream, None
         if s is None:
             return

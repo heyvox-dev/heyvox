@@ -70,6 +70,18 @@ def audio_cue(name: str, cues_dir: str | None = None) -> None:
     with _suppress_lock:
         _cue_suppress_until = time.time() + duration + 0.5
 
+    # DEF-150: on a USB power-saving output (G535 over Lightspeed) a fresh
+    # afplay process opens a cold stream and its short cue is swallowed. Route
+    # the cue through the already-warm keep-alive stream instead. Returns False
+    # on built-in/BT/virtual outputs (no keep-alive stream is held there) — then
+    # fall back to afplay, which has no cold-start problem on those devices.
+    try:
+        from heyvox.audio.keepalive import play_cue_via_stream
+        if play_cue_via_stream(name, cue_file):
+            return
+    except Exception:
+        pass
+
     subprocess.Popen(
         ["afplay", cue_file],
         stdout=subprocess.DEVNULL,
