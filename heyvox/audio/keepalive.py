@@ -17,6 +17,13 @@ So this module does two things on a USB-transport output:
 On built-in speakers / Bluetooth / virtual outputs the cold-start delay doesn't
 occur, so the keep-alive stays OFF and ``play_cue_via_stream`` returns False —
 the caller (cues.py) falls back to ``afplay``.
+
+DEF-153: the keep-alive owns its own PortAudio context instead of borrowing the
+DeviceManager's. A context created before a USB device flap (e.g. the G535
+power-cycling) holds a stale CoreAudio device ID — every reopen then fails with
+-9986/-10851 forever, cues silently fall back to afplay, and afplay is exactly
+what this device class swallows. On open failure the context is dropped and
+recreated fresh on the next tick (a fresh context resolves the current ID).
 """
 
 from __future__ import annotations
@@ -113,12 +120,18 @@ class OutputKeepAlive:
     Runs a low-frequency monitor thread (the silence + cue audio is produced by
     a PortAudio callback). Every failure path degrades to "off" / "fall back to
     afplay" rather than raising.
+
+    Owns its own PortAudio context (DEF-153): created lazily on first open,
+    dropped + recreated after an open failure so a stale device ID from a USB
+    flap can't wedge the keep-alive permanently. Never touch the
+    DeviceManager's shared context here — its lifecycle belongs to the mic.
     """
 
-    def __init__(self, pa, log, *, check_interval: float = 5.0,
+    def __init__(self, log, *, check_interval: float = 5.0,
                  rate: int = 48000, chunk: int = 1024) -> None:
-        self._pa = pa
         self._log = log
+        self._pa = None          # own PortAudio context (DEF-153), lazy
+        self._open_fails = 0     # consecutive open failures, for log throttle
         self._interval = check_interval
         self._rate = rate
         self._chunk = chunk
@@ -143,6 +156,7 @@ class OutputKeepAlive:
     def stop(self) -> None:
         self._stop.set()
         self._close_stream()
+        self._drop_pa()
 
     # -- cue playback over the warm stream --------------------------------
 
@@ -215,6 +229,8 @@ class OutputKeepAlive:
             return
         try:
             import pyaudio
+            if self._pa is None:
+                self._pa = pyaudio.PyAudio()
             self._stream = self._pa.open(
                 format=pyaudio.paInt16, channels=1, rate=self._rate,
                 output=True, frames_per_buffer=self._chunk,
@@ -222,11 +238,27 @@ class OutputKeepAlive:
             )
             self._stream.start_stream()
             _ACTIVE = self
+            if self._open_fails:
+                self._log(f"[keepalive] stream recovered after "
+                          f"{self._open_fails} failed attempt(s) — fresh PA context (DEF-153)")
+            self._open_fails = 0
             self._log("[keepalive] USB output detected — holding silent stream "
                       "open + routing cues through it (DEF-148/150)")
         except Exception as e:
-            self._log(f"[keepalive] could not open silent stream: {e}")
             self._stream = None
+            self._open_fails += 1
+            # DEF-153: a context created before a USB flap holds a stale
+            # CoreAudio device ID — reopen fails with -9986/-10851 forever.
+            # Drop it so the next tick recreates a fresh one (which resolves
+            # the device's CURRENT ID). Log first failure, then 1/min; call
+            # out the DEF-104 escalation if fresh contexts keep failing too.
+            self._drop_pa()
+            if self._open_fails == 1 or self._open_fails % 12 == 0:
+                self._log(f"[keepalive] could not open silent stream "
+                          f"(attempt {self._open_fails}, PA context dropped for fresh retry): {e}")
+            if self._open_fails == 24:
+                self._log("[keepalive] fresh PA contexts keep failing for 2min — "
+                          "process-level PA staleness (DEF-104 class), daemon restart required")
 
     def _close_stream(self) -> None:
         global _ACTIVE
@@ -239,6 +271,17 @@ class OutputKeepAlive:
             s.stop_stream()
             s.close()
             self._log("[keepalive] output no longer USB — released silent stream")
+        except Exception:
+            pass
+
+    def _drop_pa(self) -> None:
+        """Terminate and forget our own PA context (DEF-153). Safe to call
+        with no context; never called while a stream is open on it."""
+        pa, self._pa = self._pa, None
+        if pa is None:
+            return
+        try:
+            pa.terminate()
         except Exception:
             pass
 

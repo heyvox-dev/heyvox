@@ -707,9 +707,11 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Lightspeed). Holds a silent output stream open ONLY while the default
     # output is USB, so the device never parks and swallows short cues' cold
     # start. No-op on built-in/BT/virtual outputs. Stopped in main()'s finally.
+    # DEF-153: owns its own PA context (NOT devices.pa) — a captured shared
+    # context goes stale after a USB flap and wedges the keep-alive forever.
     if config.audio.output_keepalive and getattr(devices, "keepalive", None) is None:
         try:
-            devices.keepalive = OutputKeepAlive(devices.pa, log)
+            devices.keepalive = OutputKeepAlive(log)
             devices.keepalive.start()
         except Exception as _ka_e:
             log(f"[keepalive] failed to start (skipping): {_ka_e}")

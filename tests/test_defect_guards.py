@@ -1577,9 +1577,62 @@ def test_def148_keepalive_opens_one_stream_and_closes(monkeypatch):
             events.append("open")
             return FakeStream()
 
-    ka = OutputKeepAlive(FakePA(), lambda m: None)
+    ka = OutputKeepAlive(lambda m: None)
+    ka._pa = FakePA()  # inject context (DEF-153: keep-alive owns its own PA)
     ka._open_stream()
     ka._open_stream()  # idempotent — must NOT open a second stream
     assert events.count("open") == 1, "DEF-148: only one silent stream at a time"
     ka._close_stream()
     assert "close" in events, "DEF-148: stream must be released on close"
+
+
+# ---------------------------------------------------------------------------
+# DEF-153: keep-alive wedged forever on a stale PA context after a USB flap.
+# The G535 power-cycled → CoreAudio assigned a new device ID → the PA context
+# captured at daemon start failed every reopen with -9986/-10851 (every 5 s,
+# no recovery), cues silently fell back to afplay — exactly the path the
+# device swallows (DEF-148). The keep-alive must drop its own context on an
+# open failure and recover with a freshly created one on the next tick.
+# ---------------------------------------------------------------------------
+
+def test_def153_keepalive_recreates_pa_context_after_open_failure(monkeypatch):
+    pytest.importorskip("pyaudio")
+    import pyaudio
+    from heyvox.audio.keepalive import OutputKeepAlive
+
+    created = []
+
+    class FakeStream:
+        def start_stream(self):
+            pass
+
+        def stop_stream(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakePA:
+        def __init__(self):
+            self.stale = len(created) == 0  # first context: stale after USB flap
+            self.terminated = False
+            created.append(self)
+
+        def open(self, **kw):
+            if self.stale:
+                raise OSError(-9986, "Internal PortAudio error")
+            return FakeStream()
+
+        def terminate(self):
+            self.terminated = True
+
+    monkeypatch.setattr(pyaudio, "PyAudio", FakePA)
+    ka = OutputKeepAlive(lambda m: None)
+    ka._open_stream()  # stale context → open fails
+    assert ka._stream is None
+    assert created[0].terminated, "DEF-153: stale PA context must be dropped on failure"
+    ka._open_stream()  # next tick → fresh context succeeds
+    assert ka._stream is not None, "DEF-153: fresh context must recover the stream"
+    assert len(created) == 2, "DEF-153: a new PA context must be created after the drop"
+    ka.stop()
+    assert created[1].terminated, "DEF-153: own context must be released on stop"
