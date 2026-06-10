@@ -48,6 +48,11 @@ _WAKE_WORD_PHRASES: dict[str, list[str]] = {
         "hey locks", "hey, locks",
         "hey socks", "hey, socks",
         "he walks", "he vox", "he box",  # "hey vox" without the y
+        # DEF-154: single-word + "wax" variants observed live with
+        # large-v3-turbo-german-f16-q4 ("Heybox!") and whisper-small ("Hey, Wax").
+        # Deliberately NOT "heyvox": that is the product's written name and may
+        # legitimately end a silence-stopped dictation.
+        "heybox", "hey wax", "hey, wax",
         "vox", "vox.",
     ],
 }
@@ -289,10 +294,14 @@ def strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
     for _ in range(5):  # Cap iterations to avoid infinite loop
         matched = False
         for phrase in sorted_phrases:
-            lower = cleaned.lower().rstrip(" .,!?")
-            if lower.endswith(phrase):
-                idx = len(cleaned.rstrip(" .,!?")) - len(phrase)
-                cleaned = cleaned[:idx].rstrip(" .,!?")
+            base = cleaned.rstrip(" .,!?")
+            if base.lower().endswith(phrase):
+                idx = len(base) - len(phrase)
+                # DEF-154: word-boundary guard — "HeyVox" must not lose its
+                # "vox" suffix, "14 Uhr" must not lose "hr" (jarvis variant).
+                if idx > 0 and base[idx - 1].isalnum():
+                    continue
+                cleaned = base[:idx].rstrip(" .,!?")
                 stripped = True
                 matched = True
                 break
@@ -303,6 +312,10 @@ def strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
     for phrase in sorted_phrases:
         lower = cleaned.lower().lstrip(" .,!?")
         if lower.startswith(phrase):
+            # DEF-154: word-boundary guard — "Voxel rendering" must not
+            # lose its "vox" prefix.
+            if len(phrase) < len(lower) and lower[len(phrase)].isalnum():
+                continue
             cleaned = cleaned[len(phrase):].lstrip(" .,!?")
             stripped = True
             break
