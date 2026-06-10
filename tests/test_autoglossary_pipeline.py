@@ -345,3 +345,48 @@ def test_build_initial_prompt_dedupes_and_skips_wake():
     assert toks.count("Xero") == 1, f"Xero not deduped: {toks}"
     assert "HeyVox" not in toks, f"wake form leaked: {toks}"
     assert {t.lower() for t in toks} == {"claude", "xero"}
+
+
+def test_pinned_bypasses_promotion_gate():
+    """User-curated (pinned) entries promote regardless of corpus_freq/confidence."""
+    from heyvox.audio.vocab_learner import passes_promotion_gate
+
+    fresh = {"wrong": "Cloud MD", "right": "CLAUDE.md", "corpus_freq": 1,
+             "confidence": 0.95, "pinned": True}
+    unpinned = {"wrong": "Cloud MD", "right": "CLAUDE.md", "corpus_freq": 1,
+                "confidence": 0.95}
+    organic = {"wrong": "Xerox", "right": "Xero", "corpus_freq": 5,
+               "confidence": 0.9}
+    assert passes_promotion_gate(fresh, min_frequency=2, min_confidence=0.6)
+    assert not passes_promotion_gate(unpinned, min_frequency=2, min_confidence=0.6)
+    assert passes_promotion_gate(organic, min_frequency=2, min_confidence=0.6)
+
+
+def test_pinned_ranks_before_high_frequency_terms():
+    """Pinned terms must not be displaced by the max_terms cap."""
+    from heyvox.audio.vocab_learner import build_initial_prompt
+
+    items = [
+        {"wrong": f"w{i}", "right": f"Organic{i}", "corpus_freq": 100 + i,
+         "confidence": 0.9}
+        for i in range(5)
+    ]
+    items.append({"wrong": "Wispers", "right": "Whisper", "corpus_freq": 1,
+                  "confidence": 0.95, "pinned": True})
+    toks = build_initial_prompt(items, max_terms=3).split()
+    assert "Whisper" in toks, f"pinned term displaced by cap: {toks}"
+    assert len(toks) == 3
+
+
+def test_glossary_item_accepts_pinned_field():
+    from heyvox.audio.vocab_learner import GlossaryItem
+
+    plain = GlossaryItem.model_validate(
+        {"wrong": "Freshhold", "right": "Threshold", "kind": "tech", "confidence": 0.9}
+    )
+    assert plain.pinned is False
+    pinned = GlossaryItem.model_validate(
+        {"wrong": "Freshhold", "right": "Threshold", "kind": "tech",
+         "confidence": 0.9, "pinned": True}
+    )
+    assert pinned.pinned is True

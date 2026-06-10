@@ -123,6 +123,9 @@ class GlossaryItem(BaseModel):
     right: str = Field(min_length=1, description="correct canonical spelling")
     kind: Literal["private", "public", "tech"]
     confidence: float = Field(ge=0.0, le=1.0)
+    # User-curated entries bypass the corpus_freq/confidence gate and rank
+    # first in the prompt. Never set by LLM extraction — manual store edits only.
+    pinned: bool = False
     model_config = ConfigDict(extra="ignore")
 
     @field_validator("wrong", "right")
@@ -190,7 +193,13 @@ def build_initial_prompt(items: list[dict], max_terms: int) -> str:
     (non-negotiable 1), even if a stale store entry slipped past earlier filters.
     """
     tok = _get_whisper_tokenizer()
-    ranked = sorted(items, key=lambda r: r.get("corpus_freq", 0), reverse=True)
+    # Pinned (user-curated) terms first, then by corpus frequency — pinned
+    # entries must never be displaced by the max_terms/token cap.
+    ranked = sorted(
+        items,
+        key=lambda r: (1 if r.get("pinned", False) else 0, r.get("corpus_freq", 0)),
+        reverse=True,
+    )
     out: list[str] = []
     seen: set[str] = set()
     used = 0
@@ -434,6 +443,20 @@ def count_in_corpus(wrong: str, transcripts: list[str]) -> int:
 # Store load / save
 # ---------------------------------------------------------------------------
 
+def passes_promotion_gate(rec: dict, min_frequency: int, min_confidence: float) -> bool:
+    """Guardrail layer 4: corpus_freq + confidence gate for prompt promotion.
+
+    Pinned (user-curated) entries bypass the gate — they exist precisely
+    because the term has not (yet) been heard often enough to promote itself.
+    """
+    if rec.get("pinned", False):
+        return True
+    return (
+        rec.get("corpus_freq", 0) >= min_frequency
+        and rec.get("confidence", 0.0) >= min_confidence
+    )
+
+
 def load_store(path: Path = _VOCAB_STORE) -> dict:
     """Load the cumulative vocab store. Returns {} on any error (swallow-and-log)."""
     try:
@@ -648,8 +671,7 @@ def learn_vocab(
     # -------------------------------------------------------------------------
     kept = [
         r for r in store.values()
-        if r.get("corpus_freq", 0) >= min_frequency
-        and r.get("confidence", 0.0) >= min_confidence
+        if passes_promotion_gate(r, min_frequency, min_confidence)
     ]
 
     # -------------------------------------------------------------------------
