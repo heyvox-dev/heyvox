@@ -492,21 +492,78 @@ def _cmd_log_health(args):
     vad_drops = [ln for ln in main_lines_all if "[WAKE_VAD_DROP]" in ln]
     near_misses = [ln for ln in main_lines_all if "[NEAR_MISS]" in ln]
     user_efforts = [ln for ln in main_lines_all if "[USER_EFFORT]" in ln]
+    # DEF-151: pre-dedup logs double-counted trigger-frames of one utterance
+    # as attempts=2 window<0.3s. Split those legacy artifacts out so the
+    # headline number reflects real "user had to repeat" events.
+    real_efforts = []
+    for ln in user_efforts:
+        m = re.search(r"attempts=(\d+) window=([\d.]+)s", ln)
+        if m and int(m.group(1)) == 2 and float(m.group(2)) < 0.3:
+            continue
+        real_efforts.append(ln)
+    # DEF-117/118 forensic tags: stop-wake at full confidence rejected by the
+    # pre-silence gate. last_silent <= 2s is the suspect band (a real
+    # "...pause. Hey Vox" whose pause fell just outside the window — the
+    # DEF-149 class); larger ages are speech-flow FPs blocked as designed.
+    gate_blocks = [
+        ln for ln in main_lines_all
+        if "[NEAR_MISS_FAST_BLOCKED]" in ln or "[NEAR_MISS_WINDOW_BLOCKED]" in ln
+    ]
+    suspect_blocks = []
+    for ln in gate_blocks:
+        m = re.search(r"last_silent=([\d.]+)s ago", ln)
+        if m and float(m.group(1)) <= 2.0:
+            suspect_blocks.append(ln)
+    cooldown_drops = [ln for ln in main_lines_all if "[WAKE_COOLDOWN_DROP]" in ln]
+    stop_missed = [ln for ln in main_lines_all if "[STOP_MISSED]" in ln]
 
     _say("\n## Wake word (current rotation of heyvox.log)")
     _say(f"  Triggers fired:        {triggers}")
     _say(f"  VAD drops (lost):      {len(vad_drops)}")
     _say(f"  Near-misses (sub-thr): {len(near_misses)}")
-    _say(f"  USER_EFFORT events:    {len(user_efforts)}")
+    _say(
+        f"  USER_EFFORT events:    {len(real_efforts)}"
+        + (
+            f"  ({len(user_efforts) - len(real_efforts)} frame-doubling artifacts filtered)"
+            if len(user_efforts) != len(real_efforts) else ""
+        )
+    )
+    _say(
+        f"  Stop-gate blocks:      {len(gate_blocks)}"
+        f"  ({len(suspect_blocks)} suspect: last_silent <= 2s)"
+    )
+    _say(f"  Cooldown drops:        {len(cooldown_drops)}")
+    _say(f"  Missed stops (STT-confirmed): {len(stop_missed)}")
 
-    if user_efforts:
+    if real_efforts:
         _say("\n  Recent USER_EFFORT (user had to repeat 'Hey Vox'):")
-        for ln in user_efforts[-5:]:
+        for ln in real_efforts[-5:]:
             ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
             n_match = re.search(r"attempts=(\d+) window=([\d.]+)s", ln)
             ts = ts_match.group(1) if ts_match else "??:??:??"
             if n_match:
                 _say(f"    {ts}  {n_match.group(1)} attempts in {n_match.group(2)}s")
+
+    if stop_missed:
+        _say("\n  Recent STOP_MISSED (user said it, STT heard it, detector didn't):")
+        for ln in stop_missed[-5:]:
+            ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
+            detail = re.search(r"reason=(\S+) tail='([^']*)'", ln)
+            ts = ts_match.group(1) if ts_match else "??:??:??"
+            if detail:
+                _say(f"    {ts}  ended_by={detail.group(1)}  tail='{detail.group(2)}'")
+
+    if suspect_blocks:
+        _say("\n  Recent suspect stop-gate blocks (full score, pause just outside window):")
+        for ln in suspect_blocks[-5:]:
+            ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
+            sc = re.search(r"score=([\d.]+)", ln)
+            ls = re.search(r"last_silent=([\d.]+)s", ln)
+            ts = ts_match.group(1) if ts_match else "??:??:??"
+            _say(
+                f"    {ts}  score={sc.group(1) if sc else '?'} "
+                f"last_silent={ls.group(1) if ls else '?'}s"
+            )
 
     if vad_drops:
         _say("\n  Recent WAKE_VAD_DROP (model heard it, VAD killed it):")
@@ -694,7 +751,12 @@ def _cmd_log_health(args):
                 "triggers": triggers,
                 "vad_drops": len(vad_drops),
                 "near_misses": len(near_misses),
-                "user_efforts": len(user_efforts),
+                "user_efforts": len(real_efforts),
+                "user_effort_artifacts": len(user_efforts) - len(real_efforts),
+                "stop_gate_blocks": len(gate_blocks),
+                "stop_gate_blocks_suspect": len(suspect_blocks),
+                "cooldown_drops": len(cooldown_drops),
+                "stop_missed": len(stop_missed),
             },
             "stt": {
                 "finals": len(stt_finals),

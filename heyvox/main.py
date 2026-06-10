@@ -592,13 +592,13 @@ def _setup(config: HeyvoxConfig):
             # is skipped (no stop-wake-word at the end to remove). Also serves
             # as the hands-free toggle-off stop (handsfree zeroes both trims).
             ctx.stopped_via_ptt_mid_recording = True
-            recording.stop()
+            recording.stop(reason="ptt_interrupt")
 
         ptt_callbacks = {
             # Snapshot the idle pre-roll so the ~tap_max_secs hold-detection
             # delay doesn't clip the user's opening words (Variant A latency).
             "on_start": lambda: recording.start(ptt=True, preroll=list(ctx.preroll_buffer)),
-            "on_stop": lambda: recording.stop(),
+            "on_stop": lambda: recording.stop(reason="ptt"),
             # Double-tap → hands-free: ends on silence / stop wake word / Escape
             # like a wake-word recording (triggered_by_ptt stays False so the
             # main-loop watchdogs run), but with no spoken wake word, so the
@@ -913,6 +913,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # days. Cleared on every recording.start.
     _recent_wake_attempts: list[float] = []
     _USER_EFFORT_WINDOW = 10.0
+    # DEF-151: one spoken "Hey Vox" produces 2+ consecutive trigger-frames
+    # ~30-100 ms apart; each used to count as a separate "attempt", inflating
+    # USER_EFFORT ~2x (the attempts=2 window=0.1s artifact class — 75 of 87
+    # events on 2026-06-10 were this). A real repeat requires re-saying the
+    # phrase (>= ~0.6 s), so frames closer than this gap are one utterance.
+    _USER_EFFORT_DEDUP_GAP = 0.5
 
     def _flush_user_effort() -> None:
         """Emit [USER_EFFORT] if multiple wake attempts piled up before start."""
@@ -1278,7 +1284,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 elapsed = time.time() - ctx.recording_start_time
                 if elapsed > max_recording_secs:
                     log(f"Max recording duration ({max_recording_secs}s) reached, stopping")
-                    recording.stop()
+                    recording.stop(reason="max_duration")
                     continue
 
             # Track when user first starts speaking during recording
@@ -1338,7 +1344,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             quiet_pct = quiet_count / len(recent_chunks)
                             if quiet_pct >= 0.85:
                                 log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet), transcribing")
-                                recording.stop()
+                                recording.stop(reason="silence_timeout")
                                 continue
 
             if _is_busy:
@@ -1594,7 +1600,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             t for t in _recent_wake_attempts
                             if _now_attempt - t < _USER_EFFORT_WINDOW
                         ]
-                        _recent_wake_attempts.append(_now_attempt)
+                        # DEF-151: collapse trigger-frames of the same
+                        # utterance into one attempt (see constant above).
+                        if (
+                            not _recent_wake_attempts
+                            or _now_attempt - _recent_wake_attempts[-1]
+                            > _USER_EFFORT_DEDUP_GAP
+                        ):
+                            _recent_wake_attempts.append(_now_attempt)
 
                     # Dedicated tags for log-health digest grep:
                     # WAKE_VAD_DROP — model triggered but VAD post-filter killed
@@ -1779,6 +1792,18 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 else "window" if _window_stop
                                 else "consec"
                             )
+                            # DEF-151 observability: log the silent-frame age on
+                            # SUCCESSFUL stops too, so its distribution can be
+                            # compared against the *_BLOCKED tags' last_silent
+                            # — that comparison is what justified DEF-149's
+                            # 0.5->1.0s window and will justify (or veto) any
+                            # future re-tune without guesswork.
+                            if _last_silent_frame_time > 0.0:
+                                _silent_age_ok = (
+                                    f"{_now_for_pre_silence - _last_silent_frame_time:.2f}s"
+                                )
+                            else:
+                                _silent_age_ok = "never"
                             log(
                                 f"[STOP_PATH] [{ww_name}] path={_path} "
                                 f"score={s:.3f} "
@@ -1786,7 +1811,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 f"/{_STOP_WINDOW_HITS_REQUIRED} "
                                 f"hits={_consecutive_hits.get(ww_name, 0)}"
                                 f"/{active_frames_required} "
-                                f"pre_silence={_recent_silence}"
+                                f"pre_silence={_recent_silence} "
+                                f"last_silent={_silent_age_ok}"
                             )
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
@@ -1818,7 +1844,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 if time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                     log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
                                 else:
-                                    recording.stop()
+                                    recording.stop(reason="stop_wake")
                         else:
                             if not _is_rec:
                                 _flush_user_effort()
@@ -1827,7 +1853,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS
                                 log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
                             else:
-                                recording.stop()
+                                recording.stop(reason="stop_wake")
+                    else:
+                        # DEF-151 observability: a full trigger swallowed by the
+                        # wake-cooldown was silent until now — the log showed
+                        # ">>> TRIGGER" with no recording.start and no reason
+                        # (observed 2026-06-10 07:53:33: two full-score triggers
+                        # vanished, user repeated and filed USER_EFFORT). Tagged
+                        # so log-health can attribute "heard but ignored" misses.
+                        log(
+                            f"[WAKE_COOLDOWN_DROP] [{ww_name}] score={s:.3f} "
+                            f"since_last={now - last_trigger:.1f}s "
+                            f"cooldown={active_cooldown:.1f}s is_rec={_is_rec}"
+                        )
                     model.reset()
 
     except KeyboardInterrupt:
