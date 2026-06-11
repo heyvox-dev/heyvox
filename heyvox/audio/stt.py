@@ -126,6 +126,16 @@ def preload_model() -> None:
     t.start()
 
 
+# DEF-152: the glossary initial_prompt collapses prompt-fragile Whisper decoders —
+# whisper-small degenerates to "!" on healthy audio, large-v3 stalls — while only the
+# "turbo" class (large-v3-turbo, turbo-german-f16-q4) is prompt-robust. Gate the glossary
+# so switching to a fragile model auto-disables biasing instead of breaking dictation.
+# Prompts are model-sensitive (cf. P-detector-tuned-to-model, DEF-137).
+def _model_supports_glossary(model_id: str) -> bool:
+    """True only for prompt-robust MLX Whisper models (the turbo class, DEF-152)."""
+    return "turbo" in (model_id or "").lower()
+
+
 def init_local_stt(
     engine: str = "mlx",
     mlx_model: str = "mlx-community/whisper-small-mlx",
@@ -158,12 +168,18 @@ def init_local_stt(
     if engine == "mlx":
         _mlx_model_id = mlx_model
         _mlx_language = language
-        _mlx_initial_prompt = initial_prompt
+        # DEF-152 model-gate: only turbo-class models survive the glossary prompt.
+        if initial_prompt and not _model_supports_glossary(mlx_model):
+            _log(f"glossary DISABLED for prompt-fragile model {mlx_model} "
+                 f"(DEF-152 — only turbo-class models are prompt-robust); biasing skipped")
+            _mlx_initial_prompt = ""
+        else:
+            _mlx_initial_prompt = initial_prompt
         if unload_secs > 0:
             _mlx_unload_secs = unload_secs
         _log(f"Local STT configured (MLX Metal GPU, lazy load, "
              f"lang={'auto' if not language else language}, "
-             f"glossary={'on' if initial_prompt else 'off'}, "
+             f"glossary={'on' if _mlx_initial_prompt else 'off'}, "
              f"unload={int(_mlx_unload_secs)}s)")
     else:
         try:
@@ -263,10 +279,12 @@ def transcribe_audio(
         kwargs["condition_on_previous_text"] = False
         kwargs["compression_ratio_threshold"] = 2.2
         kwargs["logprob_threshold"] = -0.8
-        # Phase 16: bias the first decode window toward the learned glossary. Engine-gated —
-        # sherpa-onnx has no initial_prompt equivalent (Pitfall 5). With
-        # condition_on_previous_text=False (above) this only affects the first 30s window — by design.
-        if _mlx_initial_prompt and engine == "mlx":
+        # Phase 16: bias the first decode window toward the learned glossary. Engine-gated
+        # (sherpa-onnx has no initial_prompt equivalent, Pitfall 5) AND model-gated to the
+        # prompt-robust turbo class (DEF-152 — fragile models collapse under the prompt;
+        # init already clears _mlx_initial_prompt for them, this is belt-and-suspenders).
+        # With condition_on_previous_text=False (above) this only affects the first 30s window.
+        if _mlx_initial_prompt and engine == "mlx" and _model_supports_glossary(_mlx_model_id or mlx_model):
             kwargs["initial_prompt"] = _mlx_initial_prompt
 
         # Run transcription with timeout to prevent hangs.
