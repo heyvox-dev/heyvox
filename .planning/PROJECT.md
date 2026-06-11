@@ -60,7 +60,7 @@ HeyVox is a macOS voice layer that turns your voice into a first-class input dev
 
 **Shipped v1.1** on 2026-04-11 (Architecture Hardening). All 15 requirements satisfied.
 **v1.2 Paste Injection Reliability** (phases 12–15) and **v1.3 Robustness Sweep** (shipped 2026-05-25) followed — per-device mic profiles, headset-aware echo suppression, paste-target lock, and defect-driven robustness fixes.
-**v1.4 STT Accuracy** — Phase 16 (STT auto-glossary) complete 2026-06-04: learns recurring proper-noun / tech-term STT mis-transcriptions from dictation history (Claude Haiku, opt-in, fully guardrailed) and feeds the top-N into Whisper's `initial_prompt` via `heyvox learn-vocab`. Two live-test items pending human UAT.
+**v1.4 STT Accuracy** — Phase 16 (STT auto-glossary) complete 2026-06-11: learns recurring proper-noun / tech-term STT mis-transcriptions from dictation history (Claude Haiku, opt-in, fully guardrailed) and feeds the top-N into Whisper's `initial_prompt` via `heyvox learn-vocab`. Two live-test items pending human UAT.
 
 ### Out of Scope
 
@@ -154,4 +154,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-04 after Phase 16 (STT auto-glossary) complete*
+*Last updated: 2026-06-11 after Phase 16 (STT auto-glossary) complete*

@@ -103,7 +103,7 @@ behoben).
 
 ### 🎯 v1.4 STT Accuracy (Planned)
 
-- [x] **Phase 16: STT Auto-Glossary** — Learn a vocabulary glossary of (completed 2026-06-04)
+- [x] **Phase 16: STT Auto-Glossary** — Learn a vocabulary glossary of (completed 2026-06-11)
       recurring proper-noun / tech-term STT mis-transcriptions from the real
       dictation history (Claude Haiku via Max subscription, no API key) and
       feed the top-N into Whisper's `initial_prompt`. Off-hot-path, opt-in,
@@ -146,4 +146,4 @@ Phases TBD — define via `/gsd:new-milestone`
 | Q. Banner UX (icon + tooltip) | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. Stop-wake VAD silence gate | v1.3 | 1/1 | Complete | 2026-05-25 |
 | Q. DEF-080 herald CLI pin | v1.3 | 1/1 | Complete | 2026-05-25 |
-| 16. STT Auto-Glossary | v1.4 | 4/4 | Complete    | 2026-06-04 |
+| 16. STT Auto-Glossary | v1.4 | 4/4 | Complete    | 2026-06-11 |
