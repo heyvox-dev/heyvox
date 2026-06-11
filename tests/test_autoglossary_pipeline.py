@@ -52,9 +52,12 @@ def _make_vocab_cfg(**kwargs) -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 def test_init_local_stt_stores_prompt():
-    """init_local_stt() must accept initial_prompt and store it as a module global."""
+    """init_local_stt() must accept initial_prompt and store it as a module global
+    for a prompt-robust turbo-class model (DEF-152 model-gate keeps it; a fragile
+    model would clear it — covered by test_init_local_stt_gates_glossary_for_fragile_model)."""
     from heyvox.audio import stt
-    stt.init_local_stt(engine="mlx", initial_prompt="Herald Hush")
+    stt.init_local_stt(engine="mlx", mlx_model="mlx-community/whisper-large-v3-turbo",
+                       initial_prompt="Herald Hush")
     assert stt._mlx_initial_prompt == "Herald Hush"
 
 
@@ -64,6 +67,7 @@ def test_transcribe_kwargs_include_prompt():
     from heyvox.audio import stt
 
     stt._mlx_initial_prompt = "Claude Xero"
+    stt._mlx_model_id = "mlx-community/whisper-large-v3-turbo"  # turbo class → glossary active (DEF-152)
     stt._mlx_loaded.set()
 
     captured_kwargs = {}
@@ -345,6 +349,42 @@ def test_build_initial_prompt_dedupes_and_skips_wake():
     assert toks.count("Xero") == 1, f"Xero not deduped: {toks}"
     assert "HeyVox" not in toks, f"wake form leaked: {toks}"
     assert {t.lower() for t in toks} == {"claude", "xero"}
+
+
+# ---------------------------------------------------------------------------
+# Model-gate (DEF-152 option a — glossary only for prompt-robust turbo class)
+# ---------------------------------------------------------------------------
+
+def test_model_supports_glossary_predicate():
+    """DEF-152: only the turbo class is prompt-robust; small/large-v3 collapse."""
+    from heyvox.audio.stt import _model_supports_glossary
+
+    for ok in ("mlx-community/whisper-large-v3-turbo",
+               "mlx-community/whisper-large-v3-turbo-german-f16-q4"):
+        assert _model_supports_glossary(ok), ok
+    for bad in ("mlx-community/whisper-small-mlx", "mlx-community/whisper-large-v3", "", None):
+        assert not _model_supports_glossary(bad), repr(bad)
+
+
+def test_init_local_stt_gates_glossary_for_fragile_model():
+    """DEF-152: init_local_stt drops the glossary for a prompt-fragile model and
+    keeps it for a turbo-class model. Restores module globals to avoid pollution."""
+    import heyvox.audio.stt as stt
+
+    saved = (stt._mlx_initial_prompt, stt._mlx_model_id, stt._mlx_language)
+    try:
+        logs: list[str] = []
+        stt.init_local_stt(engine="mlx", mlx_model="mlx-community/whisper-small-mlx",
+                           initial_prompt="Claude Xero Herald", log_fn=logs.append)
+        assert stt._mlx_initial_prompt == "", "glossary must be gated off for whisper-small"
+        assert any("glossary DISABLED" in m for m in logs)
+
+        stt.init_local_stt(engine="mlx",
+                           mlx_model="mlx-community/whisper-large-v3-turbo-german-f16-q4",
+                           initial_prompt="Claude Xero Herald", log_fn=logs.append)
+        assert stt._mlx_initial_prompt == "Claude Xero Herald", "glossary must survive on turbo"
+    finally:
+        stt._mlx_initial_prompt, stt._mlx_model_id, stt._mlx_language = saved
 
 
 def test_pinned_bypasses_promotion_gate():
