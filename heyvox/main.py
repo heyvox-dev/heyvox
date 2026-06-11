@@ -1540,6 +1540,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
+                # DEF-155: track the recording's peak score for stop-miss
+                # diagnostics — saved into fn_stop/tp_stop clip filenames so
+                # model-blind misses (peak≈0) and gate-blocked misses (peak
+                # near threshold) are distinguishable without log archaeology.
+                if _is_rec and s > ctx.rec_stop_score_max:
+                    ctx.rec_stop_score_max = s
                 base_thr = _model_thresholds.get(ww_name, threshold)
                 # Cap at 0.95 — openwakeword scores are in [0, 1], so any higher
                 # threshold makes triggering physically impossible. Prevents the
