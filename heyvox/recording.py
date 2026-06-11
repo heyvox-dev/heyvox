@@ -362,6 +362,9 @@ class RecordingStateMachine:
                 return
             self.ctx.is_recording = True
             self.ctx.recording_start_time = time.time()
+            # DEF-155: fresh score horizon for this recording's stop-miss
+            # diagnostics (written by the main loop, read by stop()).
+            self.ctx.rec_stop_score_max = 0.0
             # Pre-roll: prepend recent audio so first words aren't clipped
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
@@ -569,6 +572,25 @@ class RecordingStateMachine:
                     "raw_rms_dbfs": round(raw_rms_db, 1),
                 }, log_fn=self._log)
 
+                # DEF-155/156: snapshot the UN-trimmed tail for training
+                # collection before the wake-word trim below removes the very
+                # audio the collector needs. Long enough to reach back past a
+                # full silence-timeout to a missed stop wake word. The observed
+                # stop-score travels with it so saved fn/tp clips distinguish
+                # model-blind misses from gate-blocked ones in the filename.
+                _raw_tail: list = []
+                _observed_stop_score = 0.0
+                if self.training_collector:
+                    _tail_chunk_count = int(
+                        (self.config.silence_timeout_secs + 3.0)
+                        * self.config.audio.sample_rate
+                        / self.config.audio.chunk_size
+                    ) + 1
+                    _raw_tail = list(recorded_chunks[-_tail_chunk_count:])
+                    _observed_stop_score = getattr(
+                        self.ctx, "rec_stop_score_max", 0.0
+                    )
+
                 if not ptt_snapshot:
                     # Wake word audio trim -- remove wake word from both ends so
                     # Whisper never sees it. This is the primary defense; the text-level
@@ -658,7 +680,9 @@ class RecordingStateMachine:
                     target=self._send_local,
                     args=(duration, recorded_chunks, raw_rms_db),
                     kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot,
-                            "stop_time": _stop_t0, "stop_reason": reason},
+                            "stop_time": _stop_t0, "stop_reason": reason,
+                            "raw_tail": _raw_tail,
+                            "observed_stop_score": _observed_stop_score},
                     daemon=True,
                 ).start()
         except Exception as e:
@@ -701,6 +725,8 @@ class RecordingStateMachine:
         recording_target=None,
         stop_time: float = 0.0,
         stop_reason: str = "other",
+        raw_tail: list | None = None,
+        observed_stop_score: float = 0.0,
     ) -> None:
         """Transcribe locally and inject text into target app."""
         import subprocess as _subprocess
@@ -877,6 +903,7 @@ class RecordingStateMachine:
                 self.config.wake_words.stop,
             )
             _wake_word_stripped = text != pre_strip_text
+            _end_stripped = False
             if _wake_word_stripped:
                 self._log(
                     f"Wake word strip: '{pre_strip_text[:80]}' -> '{text[:80]}'"
@@ -901,17 +928,33 @@ class RecordingStateMachine:
                         f"[STOP_MISSED] reason={stop_reason} "
                         f"tail='{_pre_n[len(_post_n):].strip()[:60]}'"
                     )
-                if self.training_collector and _training_chunks:
-                    self.training_collector.save_fn_stop(
-                        _training_chunks, _training_sr
-                    )
-            elif (
-                self.training_collector and _training_chunks
-                and text and text.strip()
-            ):
-                self.training_collector.save_tp_stop(
-                    _training_chunks, _training_sr
+            # DEF-155/156: label the recording tail for wake-word training.
+            # Labeling rules live in classify_stop_outcome (unit-tested):
+            # fn = proven miss (end-strip on a non-stop_wake recording),
+            # tp = confirmed stop_wake detection (strip or not — DEF-091
+            # trim leftovers are TPs, the old code filed them as FN).
+            # Clips cut from the UN-trimmed raw_tail so the spoken wake
+            # word is actually in them; the trimmed _training_chunks
+            # (wake word removed) remain for the FP paths below.
+            if self.training_collector:
+                from heyvox.audio.training_collector import classify_stop_outcome
+                _label = classify_stop_outcome(
+                    stop_reason,
+                    end_stripped=_end_stripped,
+                    has_text=bool(text and text.strip()),
                 )
+                _tail_for_training = raw_tail if raw_tail else _training_chunks
+                if _label and _tail_for_training:
+                    if _label == "fn":
+                        self.training_collector.save_fn_stop(
+                            _tail_for_training, _training_sr,
+                            score=observed_stop_score,
+                        )
+                    else:
+                        self.training_collector.save_tp_stop(
+                            _tail_for_training, _training_sr,
+                            score=observed_stop_score,
+                        )
 
             # Quality filter: discard garbled/nonsensical STT output.
             # DEF-076 + DEF-081: surface the discard to the user with a HUD

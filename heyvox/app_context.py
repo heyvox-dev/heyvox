@@ -50,6 +50,13 @@ class AppContext:
     busy_since: float = 0.0
     """Timestamp when busy flag was set (used by busy watchdog)."""
 
+    rec_stop_score_max: float = 0.0
+    """Highest wake-word score the model produced during the current
+    recording. Reset by RecordingManager.start(), written by the main
+    loop's prediction sweep, snapshotted by stop() into fn_stop/tp_stop
+    training-clip filenames — distinguishes model-blind stop misses
+    (score≈0) from gate-blocked ones (score near threshold). DEF-155."""
+
     audio_buffer: list = dataclasses.field(default_factory=list)
     preroll_buffer: deque = dataclasses.field(default_factory=deque)
     """~500ms ring buffer of idle audio, prepended to a recording so the first
