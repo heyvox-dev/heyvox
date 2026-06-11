@@ -862,6 +862,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # unchanged (the consecutive+hard-reset path remains authoritative
     # for idle-mic noise rejection).
     _HIGH_CONFIDENCE_FAST_STOP = 0.92
+    # Ultra-confidence single-frame stop: fires WITHOUT the DEF-117/118
+    # pre-silence gate. Rationale: setups exist where the VAD never sees a
+    # silent frame (2026-06-10 20:09: last_silent=3033s, ambient level above
+    # silence_threshold) — fast-path, window-path AND the DEF-096-B discount
+    # are all dead there, so a lone 0.999 peak dies even though the model is
+    # as sure as it ever gets. Log evidence 06-09/10: 78 high-confidence
+    # frames blocked by the silence gate, 60 of them >= 0.999 (53 at a flat
+    # 1.000). The bar must clear every documented mid-sentence phoneme
+    # flare: 0.982 (DEF-117) and 0.997 (DEF-118) — hence 0.999, NOT lower.
+    # FP-rate of this bypass is measurable via STOP_PATH path=ultra lines.
+    _ULTRA_CONFIDENCE_FAST_STOP = 0.999
     _STOP_WINDOW_FRAMES = 4
     _STOP_WINDOW_HITS_REQUIRED = 2
     _stop_hit_window: dict[str, "collections.deque[int]"] = {}
@@ -1509,10 +1520,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 )
                 _training_collector.save_tn(_neg_max_score)
 
-            # ECHO-02: Dynamic threshold in speaker mode
+            # ECHO-02: Dynamic threshold in speaker mode — IDLE ONLY. During
+            # a recording no TTS is playing (media paused via Hush, new TTS
+            # held behind RECORDING_FLAG, active TTS interrupted on wake), so
+            # the speaker-echo self-trigger this multiplier defends against
+            # cannot hit the stop path; echo suppression additionally mutes
+            # the mic during speaker-mode TTS. Keeping the 1.4x penalty while
+            # recording cost real stops: 2026-06-10 20:09 score=0.999 vs
+            # thr=0.91 (0.65 x 1.4) died as a single blocked frame.
             _speaker_mult = (
                 config.echo_suppression.speaker_threshold_multiplier
-                if not devices.headset_mode else 1.0
+                if (not devices.headset_mode and not _is_rec) else 1.0
             )
 
             # Cooldown is shorter during recording
@@ -1719,13 +1737,28 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     and not _vad_silent
                     and _recent_silence
                 )
+                # Ultra-confidence bypass: a single frame at >= 0.999 may
+                # stop WITHOUT the pre-silence gate (see constant rationale
+                # above — covers setups where the VAD never reports silence
+                # and every pre_silence-dependent lever is dead). Keeps the
+                # DEF-047 VAD-silent guard: dead-stream silence bursts must
+                # not self-stop the recording.
+                _ultra_stop = (
+                    _is_rec
+                    and triggered
+                    and s >= _ULTRA_CONFIDENCE_FAST_STOP
+                    and not _vad_silent
+                )
                 # Forensic tag: high-confidence stop-wake that the silence
                 # gate REJECTED. Pairs with the existing NEAR_MISS tag for
-                # idle-state borderline scores; same triage idea.
+                # idle-state borderline scores; same triage idea. Scores
+                # >= _ULTRA_CONFIDENCE_FAST_STOP no longer count as blocked
+                # — the ultra path fires for them.
                 if (
                     _is_rec
                     and triggered
                     and s > _HIGH_CONFIDENCE_FAST_STOP
+                    and s < _ULTRA_CONFIDENCE_FAST_STOP
                     and not _vad_silent
                     and not _recent_silence
                 ):
@@ -1780,7 +1813,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         f"last_silent={_silent_age} window={_PRE_SILENCE_DISCOUNT_WINDOW}s"
                     )
 
-                if _consec_trigger or _fast_stop or _window_stop:
+                if _consec_trigger or _fast_stop or _window_stop or _ultra_stop:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         # DEF-063: wake→trigger latency (first hit → accumulation complete).
@@ -1796,8 +1829,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         # attributed (consec / fast / window). Recording
                         # path only — start-wake always uses consec.
                         if _is_rec:
+                            # "ultra" labels stops ONLY the gate-bypass made
+                            # possible (fast would have fired anyway when
+                            # pre_silence was present) — its count is the
+                            # direct measure of the bypass's benefit, and
+                            # any FP-stop complaints trace back to it.
                             _path = (
                                 "fast" if _fast_stop
+                                else "ultra" if _ultra_stop
                                 else "window" if _window_stop
                                 else "consec"
                             )

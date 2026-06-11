@@ -688,23 +688,24 @@ def test_def103_stop_path_observability():
     )
 
 
-def test_def103_three_path_disjunction_in_trigger():
-    """The trigger condition must be the disjunction of all three stop
-    paths: existing consecutive-frames + fast-path + sliding-window.
-    Regression guard against accidentally collapsing back to a single
-    path during a refactor.
+def test_def103_stop_path_disjunction_in_trigger():
+    """The trigger condition must be the disjunction of all four stop
+    paths: consecutive-frames + fast-path + sliding-window + the
+    ultra-confidence bypass. Regression guard against accidentally
+    collapsing back to fewer paths during a refactor.
     """
     src = _read_main_py()
-    # Find the trigger expression — should be `if X or Y or Z:` involving
-    # the three named flags.
+    # Find the trigger expression — should be `if W or X or Y or Z:`
+    # involving the four named flags.
     pattern = re.compile(
-        r"if\s+_consec_trigger\s+or\s+_fast_stop\s+or\s+_window_stop\s*:",
+        r"if\s+_consec_trigger\s+or\s+_fast_stop\s+or\s+_window_stop"
+        r"\s+or\s+_ultra_stop\s*:",
     )
     assert pattern.search(src), (
-        "DEF-103: trigger guard missing or refactored away. The three stop "
+        "DEF-103: trigger guard missing or refactored away. The four stop "
         "paths must be disjunctively combined: `_consec_trigger or _fast_stop "
-        "or _window_stop`. If you renamed any of these, update this test "
-        "and the DEFECT-LOG entry together."
+        "or _window_stop or _ultra_stop`. If you renamed any of these, update "
+        "this test and the DEFECT-LOG entry together."
     )
 
 
@@ -1636,3 +1637,100 @@ def test_def153_keepalive_recreates_pa_context_after_open_failure(monkeypatch):
     assert len(created) == 2, "DEF-153: a new PA context must be created after the drop"
     ka.stop()
     assert created[1].terminated, "DEF-153: own context must be released on stop"
+
+
+# ---------------------------------------------------------------------------
+# Stop-gate quick-win 2026-06-11: ultra-confidence bypass + idle-only
+# speaker multiplier
+#
+# Log evidence 06-09/10: 78 high-confidence stop frames blocked by the
+# DEF-117/118 pre-silence gates, 60 of them >= 0.999 (53 at a flat 1.000),
+# while setups exist where the VAD never reports a silent frame
+# (last_silent=3033s observed) — every pre_silence-dependent lever is dead
+# there. Documented mid-sentence phoneme flares reach 0.982 (DEF-117) and
+# 0.997 (DEF-118), so the bypass bar must sit above BOTH.
+# ---------------------------------------------------------------------------
+
+
+def test_ultra_fast_stop_constant_above_documented_flares():
+    """_ULTRA_CONFIDENCE_FAST_STOP must exist and clear every documented
+    mid-sentence flare (0.982 DEF-117, 0.997 DEF-118) while staying below
+    1.0 so flat-1.000 real peaks pass."""
+    src = _read_main_py()
+    m = re.search(r"_ULTRA_CONFIDENCE_FAST_STOP\s*=\s*([\d.]+)", src)
+    assert m, (
+        "_ULTRA_CONFIDENCE_FAST_STOP constant missing — the no-pre-silence "
+        "bypass is the only stop path that works when the VAD never reports "
+        "silence (all DEF-096-B/117/118 levers dead)."
+    )
+    val = float(m.group(1))
+    assert 0.998 <= val < 1.0, (
+        f"_ULTRA_CONFIDENCE_FAST_STOP={val} outside [0.998, 1.0). Below "
+        f"0.998 admits documented phoneme flares (0.997, DEF-118) → "
+        f"mid-sentence false stops that ABORT AND SEND half a prompt; at "
+        f"1.0 even flat-peak real stops would need exact saturation."
+    )
+
+
+def test_ultra_fast_stop_bypasses_silence_gate_but_keeps_vad_guard():
+    """_ultra_stop must NOT require _recent_silence (that bypass is its
+    purpose) but MUST keep `not _vad_silent` (DEF-047: dead-stream silence
+    bursts must not self-stop a recording)."""
+    src = _read_main_py()
+    m = re.search(r"_ultra_stop\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _ultra_stop assignment in main.py"
+    block = m.group(1)
+    assert "_recent_silence" not in block, (
+        "_ultra_stop must not depend on _recent_silence — it exists exactly "
+        "for setups where the VAD never reports silence."
+    )
+    assert "not _vad_silent" in block, (
+        "_ultra_stop must keep the DEF-047 `not _vad_silent` guard."
+    )
+    assert "_ULTRA_CONFIDENCE_FAST_STOP" in block, (
+        "_ultra_stop must gate on _ULTRA_CONFIDENCE_FAST_STOP."
+    )
+
+
+def test_ultra_fast_stop_has_distinct_stop_path_label():
+    """[STOP_PATH] must label ultra-bypass stops distinctly ("ultra") so the
+    FP rate of the new gate bypass is measurable from logs alone — without
+    it, a false-stop regression is unattributable (P-detector-without-action
+    in reverse)."""
+    src = _read_main_py()
+    assert '"ultra" if _ultra_stop' in src, (
+        "STOP_PATH label for the ultra path missing — path=ultra counts are "
+        "the direct measure of the bypass's benefit AND its FP risk."
+    )
+
+
+def test_near_miss_fast_blocked_excludes_ultra_band():
+    """NEAR_MISS_FAST_BLOCKED must only tag scores that are actually still
+    blocked (< _ULTRA_CONFIDENCE_FAST_STOP) — tagging fired ultra-stops as
+    'blocked' would corrupt the gate-effectiveness metric the DEF-149
+    tuning relies on."""
+    src = _read_main_py()
+    m = re.search(
+        r"if\s*\(([\s\S]+?)\):\s*\n[\s\S]{0,400}?NEAR_MISS_FAST_BLOCKED", src
+    )
+    assert m is not None, "Could not find the NEAR_MISS_FAST_BLOCKED guard"
+    assert "_ULTRA_CONFIDENCE_FAST_STOP" in m.group(1), (
+        "The NEAR_MISS_FAST_BLOCKED condition must exclude scores >= "
+        "_ULTRA_CONFIDENCE_FAST_STOP (those fire via the ultra path now)."
+    )
+
+
+def test_speaker_mult_applies_idle_only():
+    """speaker_threshold_multiplier must not apply while recording: no TTS
+    plays during a recording (media paused, TTS held behind RECORDING_FLAG),
+    so the echo self-trigger it defends against can't hit the stop path —
+    while the 1.4x penalty demonstrably killed real stops (2026-06-10 20:09
+    score=0.999 vs thr=0.91)."""
+    src = _read_main_py()
+    m = re.search(r"_speaker_mult\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _speaker_mult assignment in main.py"
+    assert "not _is_rec" in m.group(1), (
+        "_speaker_mult must include `and not _is_rec` — the multiplier is an "
+        "idle-time echo defense; applying it to the stop path raises the "
+        "stop threshold to 0.91 in speaker mode for no protective benefit."
+    )
