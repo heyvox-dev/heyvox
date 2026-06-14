@@ -7,7 +7,6 @@ Issue body or copying to the clipboard. Replaces the missing
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 

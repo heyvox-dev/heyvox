@@ -102,7 +102,6 @@ def detect_workspace_from_path(jsonl_path):
       ~/.claude/projects/-Users-<user>-<app>-workspaces-<workspace>/...
     We match against known workspace names from the workspace-aware app's DB.
     """
-    import re
     db_path = _get_workspace_db_path()
     if not db_path:
         return ""

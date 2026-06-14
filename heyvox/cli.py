@@ -863,7 +863,6 @@ def _cmd_telemetry(args):
     """
     from heyvox.telemetry import consent
     from heyvox.telemetry import events as evmod
-    from heyvox.telemetry import sender
 
     action = getattr(args, "telemetry_action", None) or "status"
 

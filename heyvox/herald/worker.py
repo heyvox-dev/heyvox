@@ -41,7 +41,6 @@ from heyvox.constants import (
     KOKORO_DAEMON_SOCK,
     QWEN_DAEMON_PID,
     QWEN_DAEMON_SOCK,
-    VERBOSITY_FILE,
     HERALD_GENERATING_WAV_PREFIX,
 )
 

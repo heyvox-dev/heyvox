@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from heyvox.audio.device_handle import CoreAudioHandle, PortAudioHandle
 

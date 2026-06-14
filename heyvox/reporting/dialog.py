@@ -36,12 +36,10 @@ def prompt_for_report() -> Optional[BundleOptions]:
         NSAlertFirstButtonReturn,
         NSBezelBorder,
         NSButton,
-        NSColor,
         NSFont,
         NSMakeRect,
         NSScrollView,
         NSSwitchButton,
-        NSTextField,
         NSTextView,
         NSView,
     )

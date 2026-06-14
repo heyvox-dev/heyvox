@@ -7,9 +7,7 @@ plus the announce_workspace master switch and middle-dot normalisation.
 
 from __future__ import annotations
 
-import os
 import subprocess
-from unittest.mock import patch
 
 import pytest
 

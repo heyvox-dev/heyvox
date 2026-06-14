@@ -14,11 +14,10 @@ the zip before submitting.
 from __future__ import annotations
 
 import datetime as _dt
-import io
 import json
 import os
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from heyvox.reporting.redact import redact_config, redact_text
