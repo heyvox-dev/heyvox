@@ -46,12 +46,15 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 class WakeWordConfig(BaseModel):
     """Wake word model names for start and stop triggers."""
-    start: str = "hey_vox"
+    # Default ships with hey_jarvis_v0.1 (bundled with openwakeword) so a fresh
+    # pip install works out-of-the-box on any voice. Switch to "hey_vox" once the
+    # general-purpose model ships (see docs/wakeword-training.md). DEF-159.
+    start: str = "hey_jarvis_v0.1"
     stop: str = ""  # Empty = use same as start
-    # Additional models to load as fallback wake words. Ships with
-    # hey_jarvis_v0.1 (bundled with openwakeword) so fresh installs get a
-    # working fallback before any custom model is trained.
-    also_load: list[str] = ["hey_jarvis_v0.1"]
+    # Additional fallback wake words. Empty by default — do NOT add "hey_vox"
+    # until ~/.config/heyvox/models/hey_vox.onnx exists, or openwakeword raises
+    # ValueError on the unknown model name (DEF-159).
+    also_load: list[str] = []
     model_thresholds: dict[str, float] = {}  # Per-model threshold overrides (e.g. hey_vox: 0.95)
     models_dir: str = ""  # Custom models directory (empty = use default locations)
     # Hard negative mining: passively save audio clips that contain speech but
@@ -974,9 +977,9 @@ def generate_default_config() -> str:
 # ---------------------------------------------------------------------------
 
 wake_words:
-  start: hey_vox                   # Model name (from models/ directory)
-  stop: hey_vox                    # Leave same as start to toggle; use different for separate start/stop
-  also_load: [hey_jarvis_v0.1]     # Extra fallback wake words loaded alongside start/stop
+  start: hey_jarvis_v0.1           # Bundled default (works on any voice). Switch to "hey_vox" after the general model ships — see docs/wakeword-training.md
+  stop: hey_jarvis_v0.1            # Leave same as start to toggle; use different for separate start/stop
+  also_load: []                    # Extra fallback wake words; add "hey_vox" only once its .onnx model is present
 
 threshold: 0.5             # Detection confidence threshold (0.0–1.0)
 cooldown_secs: 2.0         # Minimum seconds between triggers

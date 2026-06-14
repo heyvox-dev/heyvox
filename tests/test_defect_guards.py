@@ -1734,3 +1734,42 @@ def test_speaker_mult_applies_idle_only():
         "idle-time echo defense; applying it to the stop path raises the "
         "stop threshold to 0.91 in speaker mode for no protective benefit."
     )
+
+
+def test_default_wake_word_loadable_on_fresh_install():
+    """DEF-159: the shipped default wake word must load on a fresh pip install
+    with no custom .onnx present. The old default `hey_vox` crashed
+    `heyvox start` with `ValueError: Could not find pretrained model for model
+    name 'hey_vox'` because that model ships nowhere yet (not bundled in the
+    wheel, no setup download — plan 14-04 unbuilt). A shipped default must be
+    an openwakeword-bundled name OR a package-bundled .onnx — never a bare
+    name openwakeword can't resolve. Re-add 'hey_vox' only once its model is
+    bundled/downloaded by setup."""
+    import os
+
+    import heyvox
+    from heyvox.config import WakeWordConfig
+
+    # openwakeword's bundled pretrained model names (no .onnx suffix needed)
+    oww_bundled = {
+        "alexa_v0.1", "hey_jarvis_v0.1", "hey_mycroft_v0.1",
+        "hey_rhasspy_v0.1", "timer_v0.1", "weather_v0.1",
+    }
+    pkg_models_dir = os.path.join(os.path.dirname(heyvox.__file__), "models")
+
+    def _resolvable(name: str) -> bool:
+        if not name:
+            return True  # empty stop is resolved to start by the validator
+        if name in oww_bundled:
+            return True
+        return os.path.exists(os.path.join(pkg_models_dir, f"{name}.onnx"))
+
+    cfg = WakeWordConfig()
+    defaults = [cfg.start, cfg.stop, *cfg.also_load]
+    unresolvable = [n for n in defaults if not _resolvable(n)]
+    assert not unresolvable, (
+        f"DEF-159: shipped default wake words {unresolvable} cannot load on a "
+        f"fresh install — not openwakeword-bundled and no .onnx in "
+        f"{pkg_models_dir}. openwakeword raises ValueError on unknown names. "
+        f"Bundle the model or keep the default to a bundled name."
+    )
