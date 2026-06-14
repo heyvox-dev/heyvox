@@ -117,6 +117,24 @@ def isolate_flags(tmp_path, monkeypatch):
     }
 
 
+@pytest.fixture(autouse=True)
+def disable_hush_socket(monkeypatch):
+    """Force injection's osascript fallback so the suite is deterministic.
+
+    press_enter()/type_text() try the Hush Chrome-extension socket first and
+    skip subprocess entirely when it answers. With a real HeyVox/Hush running
+    locally that socket exists, so tests that mock subprocess.run see zero calls
+    and fail — while CI (no socket) passes. Neutralise the Hush path everywhere
+    so `pytest` is green regardless of a running local HeyVox.
+    """
+    try:
+        monkeypatch.setattr(
+            "heyvox.input.injection._hush_send", lambda *a, **k: None
+        )
+    except (AttributeError, ImportError):
+        pass  # injection module not importable in this environment — fine
+
+
 @pytest.fixture
 def mock_config():
     """Return a HeyvoxConfig with test-friendly defaults."""

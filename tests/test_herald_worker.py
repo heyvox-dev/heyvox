@@ -425,7 +425,7 @@ class TestWorkspaceLabelPrepend:
         from heyvox.herald.worker import HeraldWorker
         # Force the cwd-detect fallback to "" so the test only exercises
         # the env-var path (and an empty ws actually stays empty).
-        with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws}, clear=False), \
+        with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws, "CONDUCTOR_WORKSPACE_NAME": ws}, clear=False), \
              patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
             return HeraldWorker()
 
