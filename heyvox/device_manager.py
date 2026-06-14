@@ -788,6 +788,15 @@ class DeviceManager:
             _probe_pa.terminate()
 
         if candidate_name and candidate_name == self.dev_name:
+            # Probe rejected target_name (silent mic) — register cooldown so
+            # scan() skips it next round instead of retrying every 3s.
+            # DEF-158: without this, a silent BT mic causes an infinite probe
+            # loop that mutes the system output for ~2s every 3s.
+            if target_name.lower() not in self.dev_name.lower():
+                add_device_cooldown(target_name)
+                self._log(
+                    f"Probe: '{target_name}' silent — cooldown registered, skipping upgrade"
+                )
             # No actual change — don't close/reopen/cue, stay on current stream
             return False
 
