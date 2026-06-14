@@ -63,7 +63,7 @@ def test_init_local_stt_stores_prompt():
 
 def test_transcribe_kwargs_include_prompt():
     """transcribe_audio() passes initial_prompt kwarg to mlx_whisper when non-empty."""
-    import mlx_whisper
+    mlx_whisper = pytest.importorskip("mlx_whisper")
     from heyvox.audio import stt
 
     stt._mlx_initial_prompt = "Claude Xero"
@@ -85,7 +85,7 @@ def test_transcribe_kwargs_include_prompt():
 
 def test_transcribe_kwargs_no_prompt_when_empty():
     """transcribe_audio() must NOT pass initial_prompt kwarg when it is empty string."""
-    import mlx_whisper
+    mlx_whisper = pytest.importorskip("mlx_whisper")
     from heyvox.audio import stt
 
     stt._mlx_initial_prompt = ""
@@ -142,6 +142,7 @@ def test_gibberish_prefilter():
 
 def test_cap_discipline():
     """build_initial_prompt with 200 items stays <= 223 whisper tokens."""
+    pytest.importorskip("mlx_whisper")
     from heyvox.audio.vocab_learner import build_initial_prompt
     from mlx_whisper.tokenizer import get_tokenizer
 
@@ -335,6 +336,7 @@ def test_is_wake_word_catches_concatenated_forms():
 def test_build_initial_prompt_dedupes_and_skips_wake():
     """DEF-145: duplicate right-spellings collapse to one slot, and a wake form is
     dropped as the final belt-and-suspenders gate."""
+    pytest.importorskip("mlx_whisper")  # build_initial_prompt needs the whisper tokenizer
     from heyvox.audio.vocab_learner import build_initial_prompt
 
     items = [
@@ -404,6 +406,7 @@ def test_pinned_bypasses_promotion_gate():
 
 def test_pinned_ranks_before_high_frequency_terms():
     """Pinned terms must not be displaced by the max_terms cap."""
+    pytest.importorskip("mlx_whisper")  # build_initial_prompt needs the whisper tokenizer
     from heyvox.audio.vocab_learner import build_initial_prompt
 
     items = [
