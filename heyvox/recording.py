@@ -393,7 +393,19 @@ class RecordingStateMachine:
         # === Instant feedback FIRST — before any blocking work ===
         from heyvox.audio.cues import audio_cue, get_cues_dir
         cues_dir = get_cues_dir(self.config.cues_dir)
-        audio_cue("listening", cues_dir)
+        # [WW_LATENCY] consume t1/detect_ms set by _run_loop just before this call.
+        # Reset to 0.0 immediately so stale values don't leak to the next activation.
+        # PTT and handsfree paths leave these at 0.0 (no wake-word timing to report).
+        try:
+            import heyvox.main as _main_mod
+            _ww_t1 = _main_mod._ww_t1
+            _ww_detect_ms = _main_mod._ww_detect_ms
+            _main_mod._ww_t1 = 0.0
+            _main_mod._ww_detect_ms = 0.0
+        except Exception:
+            _ww_t1 = 0.0
+            _ww_detect_ms = 0.0
+        audio_cue("listening", cues_dir, t1=_ww_t1, detect_ms=_ww_detect_ms)
         self._hud_send({"type": "state", "state": "listening"})
         self._log("Recording started. Waiting for stop wake word.")
 

@@ -74,6 +74,15 @@ _HUD_LEVEL_INTERVAL = 0.05    # 20fps throttle for audio_level messages
 
 
 # ---------------------------------------------------------------------------
+# [WW_LATENCY] t1 threading: set by _run_loop just before recording.start(),
+# consumed once by RecordingStateMachine.start() to pass into audio_cue().
+# Both reset to 0.0 after use so stale values don't leak across activations.
+# ---------------------------------------------------------------------------
+_ww_t1: float = 0.0       # perf_counter at trigger commit (t1)
+_ww_detect_ms: float = 0.0  # (t1-t0)*1000 — pre-computed for the log line
+
+
+# ---------------------------------------------------------------------------
 # Logging (module-level path set from config at startup)
 # ---------------------------------------------------------------------------
 
@@ -882,7 +891,11 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
     # DEF-063: timestamp of the first confirmed hit in the current accumulation run.
     # Used to report wake→recording.start latency so future slowdowns are measurable.
-    _first_hit_time: float = 0.0
+    # [WW_LATENCY] t0 = perf_counter at the first above-threshold frame (proxy for
+    # "last frame containing the wake word"). Renamed to _t0_wakeword for clarity;
+    # _first_hit_time alias kept to avoid touching stop-word paths accidentally.
+    _t0_wakeword: float = 0.0
+    _first_hit_time: float = 0.0  # alias — set together with _t0_wakeword
     # VAD gate multiplier: skip wake-word eval when idle and audio level is below
     # silence_threshold * this factor. Prevents silence-driven false triggers.
     _VAD_GATE_MULT = 0.8
@@ -1673,7 +1686,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # DEF-063: capture the moment the run of consecutive hits
                     # started, so wake→start latency can be measured below.
                     if prev == 0 and not _is_rec:
-                        _first_hit_time = time.time()
+                        _t0_wakeword = time.perf_counter()
+                        _first_hit_time = _t0_wakeword  # keep alias in sync
                     # DEF-103-B: append this frame to the per-ww sliding window
                     # used for the 2-of-4 stop-trigger path. Only relevant
                     # while recording; idle hits are ignored to avoid
@@ -1820,10 +1834,18 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         # Does not include model feature-window lag (~500 ms) or afplay
                         # subprocess spawn, but gives an apples-to-apples number for
                         # regressions inside the consecutive-frame gate.
-                        if not _is_rec and _first_hit_time > 0:
-                            log(f"[TIMING] wake→trigger: {(now - _first_hit_time) * 1000:.0f}ms "
-                                f"({active_frames_required} frames)")
+                        if not _is_rec and _t0_wakeword > 0:
+                            _t1_wakeword = time.perf_counter()
+                            _detect_ms = (_t1_wakeword - _t0_wakeword) * 1000
+                            log(
+                                f"[WW_LATENCY] detect={_detect_ms:.0f}ms "
+                                f"frames={active_frames_required} score={s:.3f}"
+                            )
                             _first_hit_time = 0.0
+                            _t0_wakeword = 0.0
+                        else:
+                            _t1_wakeword = 0.0
+                            _detect_ms = 0.0
                         # DEF-103: surface which trigger path fired so a
                         # follow-up regression in stop reliability can be
                         # attributed (consec / fast / window). Recording
@@ -1885,6 +1907,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         elif use_separate_words:
                             if start_word in ww_name and not _is_rec:
                                 _flush_user_effort()
+                                # [WW_LATENCY] thread t1/detect_ms to recording.start via module globals
+                                import heyvox.main as _self_mod
+                                _self_mod._ww_t1 = _t1_wakeword
+                                _self_mod._ww_detect_ms = _detect_ms
                                 recording.start(preroll=ctx.preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
                                 # Warmup: ignore stop-word in first _STOP_WARMUP_SECS
@@ -1896,6 +1922,10 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         else:
                             if not _is_rec:
                                 _flush_user_effort()
+                                # [WW_LATENCY] thread t1/detect_ms to recording.start via module globals
+                                import heyvox.main as _self_mod
+                                _self_mod._ww_t1 = _t1_wakeword
+                                _self_mod._ww_detect_ms = _detect_ms
                                 recording.start(preroll=ctx.preroll_buffer)
                             elif time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                 # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS
