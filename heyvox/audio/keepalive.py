@@ -137,6 +137,7 @@ class OutputKeepAlive:
         self._chunk = chunk
         self._stream = None
         self._stop = threading.Event()
+        self.stale = threading.Event()   # set after 24 consecutive open failures
         self._thread: threading.Thread | None = None
         # Cue playback over the warm stream
         self._cues: dict[str, object] = {}   # name -> int16 ndarray @ rate
@@ -258,7 +259,8 @@ class OutputKeepAlive:
                           f"(attempt {self._open_fails}, PA context dropped for fresh retry): {e}")
             if self._open_fails == 24:
                 self._log("[keepalive] fresh PA contexts keep failing for 2min — "
-                          "process-level PA staleness (DEF-104 class), daemon restart required")
+                          "process-level PA staleness (DEF-104 class), signalling auto-restart")
+                self.stale.set()
 
     def _close_stream(self) -> None:
         global _ACTIVE

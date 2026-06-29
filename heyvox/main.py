@@ -1211,6 +1211,23 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         cooldown=_HOTPLUG_RESTART_COOLDOWN,
                     )
 
+                # DEF-163: keepalive PA staleness watchdog — auto-restart when
+                # the output stream can't reopen for 2min.
+                _ka = getattr(devices, "keepalive", None)
+                if _ka is not None and _ka.stale.is_set():
+                    log("WATCHDOG: keepalive PA context stale for 2min — auto-restarting to clear it")
+                    hud_send({"type": "error", "text": "Cues silent — restarting"})
+                    time.sleep(0.5)
+                    _release_singleton()
+                    try:
+                        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+                    except Exception as _ka_exc:
+                        log(f"WATCHDOG: execv failed ({_ka_exc}), falling back to subprocess restart")
+                        import subprocess as _sp
+                        _sp.Popen([sys.executable, "-m", "heyvox.main"],
+                                  start_new_session=True)
+                        ctx.shutdown.set()
+
                 # Memory watchdog -- check RSS every 60s
                 if now - _last_mem_check >= _MEM_CHECK_INTERVAL:
                     _last_mem_check = now
