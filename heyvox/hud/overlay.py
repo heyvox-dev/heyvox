@@ -408,7 +408,9 @@ def _apply_state(
                 _spk_muted = get_verbosity() == "skip"
             except Exception:
                 pass
-            from AppKit import NSImage, NSImageSymbolConfiguration
+            from AppKit import NSImage, NSImageSymbolConfiguration, NSVariableStatusItemLength as _NSVarLen
+            # Release reserved width so the brand glyph sits compactly.
+            status_item.setLength_(_NSVarLen)
             btn = status_item.button()
             if _mic_muted:
                 # Muted: keep SF Symbol mic.slash with red palette — clearer
@@ -462,7 +464,11 @@ def _apply_state(
             else:
                 btn.setToolTip_(f"Mic: {_friendly}")
         else:
-            # Non-idle states or crashed: use emoji text, clear image
+            # Non-idle states or crashed: use emoji text, clear image.
+            # Reserve fixed width BEFORE setting title so macOS doesn't reflow
+            # and potentially hide the item when it expands (e.g. Docker + other
+            # icons leave no margin for a NSVariableStatusItemLength expansion).
+            status_item.setLength_(150)
             status_item.button().setImage_(None)
             status_item.button().setTitle_(_bar_title)
         # Refresh menu on state change (updates transcript list, mute state)
