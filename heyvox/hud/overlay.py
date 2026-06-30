@@ -350,7 +350,7 @@ def _apply_state(
                 if (has_pid or has_sock) and not pid_alive:
                     crashed.append(name)
             if crashed:
-                icon = "\u26a0\ufe0f"
+                icon = "\u26a0"  # \u26a0 text-mode, no emoji overflow
                 label = f" {'+'.join(crashed)} crashed"
         # DEF-100: held TTS count badge \u2014 surfaces hold-queue state.
         # Stays at 0 with default config (hold_queue.enabled=false), but if
@@ -384,10 +384,10 @@ def _apply_state(
         _banner_symbol = ""
         if _mic_warn:
             _banner_symbol = {
-                "error": "\u274c",
-                "warn": "\u26a0\ufe0f",
-                "info": "\u2139\ufe0f",
-            }.get(_banner_level, "\u26a0\ufe0f")
+                "error": "\u2716",   # \u2716 text-mode, fits menu bar height
+                "warn": "\u26a0",    # \u26a0 text-mode (no \ufe0f emoji selector)
+                "info": "\u2139",    # \u2139 text-mode
+            }.get(_banner_level, "\u26a0")
         # Build menu bar title with SF Symbol-style mute indicators.
         # The banner appears as a *suffix symbol*, not a title override \u2014
         # brand glyph + state stay intact, only a small badge gets added.
