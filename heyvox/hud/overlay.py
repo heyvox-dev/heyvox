@@ -351,7 +351,7 @@ def _apply_state(
                     crashed.append(name)
             if crashed:
                 icon = "\u26a0"  # \u26a0 text-mode, no emoji overflow
-                label = f" {'+'.join(crashed)} crashed"
+                label = f" {'&'.join(crashed)} err"
         # DEF-100: held TTS count badge \u2014 surfaces hold-queue state.
         # Stays at 0 with default config (hold_queue.enabled=false), but if
         # the user opts back into hold-queue behaviour, this makes it visible.
@@ -470,10 +470,12 @@ def _apply_state(
             # can disappear when neighbours like Docker leave no room).
             try:
                 from AppKit import NSFont, NSFontAttributeName
+                from Foundation import NSString as _NSString
                 _mfont = NSFont.menuBarFontOfSize_(0)
-                _w = int(_bar_title.sizeWithAttributes_({NSFontAttributeName: _mfont}).width) + 14
+                _ns = _NSString.stringWithString_(_bar_title)
+                _w = int(_ns.sizeWithAttributes_({NSFontAttributeName: _mfont}).width) + 14
             except Exception:
-                _w = 80
+                _w = 120
             status_item.setLength_(_w)
             status_item.button().setImage_(None)
             status_item.button().setTitle_(_bar_title)
