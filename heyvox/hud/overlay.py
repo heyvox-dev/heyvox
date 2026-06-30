@@ -323,8 +323,8 @@ def _apply_state(
     # Update menu bar status icon + label
     _STATUS_LABELS = {
         "idle":       ("\U0001f399", ""),                # 🎙 (icon only)
-        "listening":  ("\U0001f534", " Recording..."),   # 🔴 Recording...
-        "processing": ("\U0001f7e1", " Transcribing..."),# 🟡 Transcribing...
+        "listening":  ("\U0001f534", " Rec"),              # 🔴 Rec
+        "processing": ("\U0001f7e1", " Trans"),           # 🟡 Trans
         "speaking":   ("\U0001f7e2", " Speaking..."),    # 🟢 Speaking...
     }
     if status_item is not None:
@@ -468,7 +468,7 @@ def _apply_state(
             # Reserve fixed width BEFORE setting title so macOS doesn't reflow
             # and potentially hide the item when it expands (e.g. Docker + other
             # icons leave no margin for a NSVariableStatusItemLength expansion).
-            status_item.setLength_(150)
+            status_item.setLength_(100)
             status_item.button().setImage_(None)
             status_item.button().setTitle_(_bar_title)
         # Refresh menu on state change (updates transcript list, mute state)
