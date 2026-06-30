@@ -323,9 +323,9 @@ def _apply_state(
     # Update menu bar status icon + label
     _STATUS_LABELS = {
         "idle":       ("\U0001f399", ""),                # 🎙 (icon only)
-        "listening":  ("\U0001f534", " Rec"),              # 🔴 Rec
-        "processing": ("\U0001f7e1", " Trans"),           # 🟡 Trans
-        "speaking":   ("\U0001f7e2", " Speaking..."),    # 🟢 Speaking...
+        "listening":  ("\U0001f534", " Rec"),               # 🔴 Rec
+        "processing": ("\U0001f7e1", " Trans"),            # 🟡 Trans
+        "speaking":   ("\U0001f7e2", " Speak"),             # 🟢 Speak
     }
     if status_item is not None:
         icon, label = _STATUS_LABELS.get(state_str, _STATUS_LABELS["idle"])
@@ -465,10 +465,16 @@ def _apply_state(
                 btn.setToolTip_(f"Mic: {_friendly}")
         else:
             # Non-idle states or crashed: use emoji text, clear image.
-            # Reserve fixed width BEFORE setting title so macOS doesn't reflow
-            # and potentially hide the item when it expands (e.g. Docker + other
-            # icons leave no margin for a NSVariableStatusItemLength expansion).
-            status_item.setLength_(100)
+            # Reserve exact measured width BEFORE setting title so macOS doesn't
+            # reflow and hide the item when it expands (NSVariableStatusItemLength
+            # can disappear when neighbours like Docker leave no room).
+            try:
+                from AppKit import NSFont, NSFontAttributeName
+                _mfont = NSFont.menuBarFontOfSize_(0)
+                _w = int(_bar_title.sizeWithAttributes_({NSFontAttributeName: _mfont}).width) + 14
+            except Exception:
+                _w = 80
+            status_item.setLength_(_w)
             status_item.button().setImage_(None)
             status_item.button().setTitle_(_bar_title)
         # Refresh menu on state change (updates transcript list, mute state)
