@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 Phase: 16
 Plan: Not started
 Status: Executing Phase 16
-Last activity: 2026-06-11
+Last activity: 2026-06-28 - Completed quick task 260628-mhf: Wake-word latency instrumentation (t0/t1/t2 perf_counter)
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
 
@@ -97,6 +97,8 @@ None — milestone complete.
 | 260525-hdd | Herald producer-parity — shared tts_helpers module + WATCHER_FIRED forensic tag + drift-guard tests; mitigates P-producer-parity | 2026-05-25 | f513b27a5 | [260525-herald-dedup](./quick/260525-herald-dedup/) |
 | 260525-svg | Stop-wake VAD silence gate — fast-path stop-wake requires recent silence (closes DEF-117); NEAR_MISS_FAST_BLOCKED forensic tag added | 2026-05-25 | c351f2c55 | [260525-stop-wake-vad-gate](./quick/260525-stop-wake-vad-gate/) |
 | 260525-d80 | DEF-080 herald CLI pinned to `[sys.executable, -m, heyvox.herald.cli]` — closes 5-week-old WIP parked fix; defect-guard tests for the pin + dispatch argv | 2026-05-25 | 40e254046 | [260525-def080-herald-cmd](./quick/260525-def080-herald-cmd/) |
+| 260628-mhf | Wake-word latency instrumentation — t0/t1/t2 perf_counter timestamps + [WW_LATENCY] log tags in main.py, cues.py, recording.py; baseline measurement pending | 2026-06-28 | 2ef86947c | [260628-mhf-wakeword-latency](./quick/260628-mhf-wakeword-latency/) |
+| 260701-dis | cues.py: sounddevice + cache statt afplay für non-USB output — eliminiert p99-Spike (212ms→<50ms erwartet); afplay als Fallback erhalten | 2026-07-01 | 01cf8dd40 | [260701-dis-cues-sounddevice](./quick/260701-dis-cues-sounddevice/) |
 
 ## Session Continuity
 
