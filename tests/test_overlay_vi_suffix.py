@@ -5,7 +5,6 @@ regression guard (SPEC R5 acceptance #11).
 """
 import re
 
-import pytest
 
 from heyvox.config import HeyvoxConfig, MicProfileEntryConfig
 from heyvox.hud.menu_bar_title import vi_suffix_for_device

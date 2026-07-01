@@ -688,23 +688,24 @@ def test_def103_stop_path_observability():
     )
 
 
-def test_def103_three_path_disjunction_in_trigger():
-    """The trigger condition must be the disjunction of all three stop
-    paths: existing consecutive-frames + fast-path + sliding-window.
-    Regression guard against accidentally collapsing back to a single
-    path during a refactor.
+def test_def103_stop_path_disjunction_in_trigger():
+    """The trigger condition must be the disjunction of all four stop
+    paths: consecutive-frames + fast-path + sliding-window + the
+    ultra-confidence bypass. Regression guard against accidentally
+    collapsing back to fewer paths during a refactor.
     """
     src = _read_main_py()
-    # Find the trigger expression — should be `if X or Y or Z:` involving
-    # the three named flags.
+    # Find the trigger expression — should be `if W or X or Y or Z:`
+    # involving the four named flags.
     pattern = re.compile(
-        r"if\s+_consec_trigger\s+or\s+_fast_stop\s+or\s+_window_stop\s*:",
+        r"if\s+_consec_trigger\s+or\s+_fast_stop\s+or\s+_window_stop"
+        r"\s+or\s+_ultra_stop\s*:",
     )
     assert pattern.search(src), (
-        "DEF-103: trigger guard missing or refactored away. The three stop "
+        "DEF-103: trigger guard missing or refactored away. The four stop "
         "paths must be disjunctively combined: `_consec_trigger or _fast_stop "
-        "or _window_stop`. If you renamed any of these, update this test "
-        "and the DEFECT-LOG entry together."
+        "or _window_stop or _ultra_stop`. If you renamed any of these, update "
+        "this test and the DEFECT-LOG entry together."
     )
 
 
@@ -819,6 +820,293 @@ def test_def117_stop_path_log_carries_pre_silence_field():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-118: window-path stop-wake requires pre-silence gate
+#
+# Mid-sentence FP at score=0.997 win=2/2 hits=2/2 pre_silence=False fired
+# the window-path on 2026-05-27 08:01:40 ("Ich denke der Grund ist ein...").
+# DEF-117 had gated fast-path only; this extends the same gate to window-path
+# because two-frame bursts in continuous German speech reach win=2/2 too.
+# ---------------------------------------------------------------------------
+
+
+def test_def118_window_stop_requires_recent_silence():
+    """The _window_stop predicate must include the _recent_silence term."""
+    src = _read_main_src()
+    # _window_stop spans multiple lines and contains a nested ().
+    # Match from `_window_stop = (` to the next line that is whitespace + `)`.
+    m = re.search(r"_window_stop\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _window_stop assignment in main.py"
+    block = m.group(1)
+    assert "_recent_silence" in block, (
+        "_window_stop predicate must include `and _recent_silence` (DEF-118). "
+        "Otherwise two consecutive high-score phoneme bursts in continuous "
+        "speech trigger a false stop via the window path."
+    )
+
+
+def test_def118_near_miss_window_blocked_tag_present():
+    """NEAR_MISS_WINDOW_BLOCKED log tag must exist so forensic users can see
+    how often the silence gate fires on the window path (P-detector-without-action)."""
+    src = _read_main_src()
+    assert "NEAR_MISS_WINDOW_BLOCKED" in src, (
+        "NEAR_MISS_WINDOW_BLOCKED log tag missing — DEF-118 forensic visibility "
+        "was wired alongside the gate; do not remove without replacing."
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-124: mic-zombie banner UX hardening
+#
+# Three coupled fixes to device_manager.reinit():
+#   1. Banner text varies by mic type — built-in mics don't have a mute button,
+#      so "check mute" is misleading; point at Permission/exclusive-hold/HAL.
+#   2. After a successful recovery onto a different device, the warn banner
+#      is stale and must be cleared explicitly.
+#   3. HFP probe-fallback reinit is an *expected* cache flush, not an
+#      unexpected zombie — banner + error toast suppressed via expected=True.
+# ---------------------------------------------------------------------------
+
+
+def _read_device_manager_src() -> str:
+    import heyvox
+    return open(os.path.join(os.path.dirname(heyvox.__file__), "device_manager.py")).read()
+
+
+def test_def124_reinit_has_expected_kwarg():
+    """reinit() must accept an expected= kwarg so callers can suppress
+    user-visible banners when the reinit is a planned cache flush."""
+    src = _read_device_manager_src()
+    m = re.search(r"def reinit\(self,([^)]+)\)", src)
+    assert m is not None, "Could not find reinit signature in device_manager.py"
+    sig = m.group(1)
+    assert "expected" in sig, (
+        "reinit() must accept an `expected` kwarg (DEF-124). Without it, the "
+        "HFP-probe-fallback reinit can't suppress the misleading "
+        "'Mic zombie: reinitializing' toast and 'Mic silent' banner."
+    )
+
+
+def test_def124_reinit_banner_uses_builtin_specific_text():
+    """The mic-silent banner text must branch on is_builtin_mic — built-in
+    mics get a Permission/exclusive-hold hint, not the misleading 'check mute'."""
+    src = _read_device_manager_src()
+    assert "is_builtin_mic" in src, (
+        "device_manager.py must call is_builtin_mic() to differentiate the "
+        "mic-silent banner hint (DEF-124). Built-in mics have no mute button "
+        "so 'check mute' is misleading."
+    )
+    assert "Microphone permission" in src, (
+        "Built-in-mic hint must mention 'Microphone permission' as one of "
+        "the actual causes (DEF-124)."
+    )
+
+
+def test_def124_reinit_clears_banner_after_recovery():
+    """When reinit recovers onto a different device, the stale mic-silent
+    banner must be cleared explicitly (HUDSurface.clear)."""
+    src = _read_device_manager_src()
+    assert 'HUDSurface.clear("mic-zombie")' in src, (
+        'device_manager.py must call HUDSurface.clear("mic-zombie") in the '
+        "recovery-success branch (DEF-124). Without it, the warn banner "
+        "lingers in the menu bar for the full TTL even though the mic is "
+        "live again."
+    )
+
+
+def test_def124_hfp_path_uses_expected_reinit():
+    """The BT HFP probe-fallback must call reinit with expected=True so the
+    user-visible banners stay quiet when the user is the one who triggered
+    the flush."""
+    src = _read_device_manager_src()
+    # Look for any reinit() call carrying expected=True; the HFP path is
+    # the canonical caller introduced by DEF-124.
+    assert re.search(r"reinit\([^)]*expected\s*=\s*True", src), (
+        "BT HFP probe-fallback (or any expected-reinit caller) must invoke "
+        "reinit(expected=True) (DEF-124). Otherwise the misleading "
+        "'Mic silent — check mute (MacBook Pro Microphone)' banner fires "
+        "right when the user has actively clicked a different headset."
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-127: auto-HFP-probe when output device changes to a BT headset
+# ---------------------------------------------------------------------------
+
+
+def test_def127_output_change_auto_triggers_hfp_probe():
+    """The output-device-change branch in scan() must call _bt_trigger_hfp_switch
+    when the new output looks like an A2DP-only BT device."""
+    src = _read_device_manager_src()
+    assert "DEF-127" in src, (
+        "DEF-127 marker missing from device_manager.py — auto-HFP-probe on "
+        "output change was removed. Without it, the user has to manually "
+        "click the headset in the HUD menu every time they plug a new BT mic."
+    )
+    # The auto path must set _bt_hfp_pin_mode = False (auto-switch, not pin).
+    m = re.search(r"DEF-127[\s\S]{0,2000}?_bt_hfp_pin_mode\s*=\s*False", src)
+    assert m is not None, (
+        "DEF-127 auto-probe path must set _bt_hfp_pin_mode = False so the "
+        "switch is a passive auto-detect, not a user pin (which has stronger "
+        "stick semantics)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-128: hush-noop info banner removed from menu bar
+# ---------------------------------------------------------------------------
+
+
+def test_def128_hush_noop_banner_not_emitted():
+    """heyvox/audio/media.py must NOT call HUDSurface.banner(source="hush-noop").
+    The signal is recoverable from the [media] log without the menu bar cost."""
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "audio", "media.py")).read()
+    assert not re.search(
+        r'HUDSurface\.banner\([^)]*source\s*=\s*["\']hush-noop["\']',
+        src,
+    ), (
+        "heyvox/audio/media.py must not call HUDSurface.banner(source='hush-noop') "
+        "(DEF-128). That banner fired on every TTS event with no browser media — "
+        "non-actionable noise in the menu bar."
+    )
+
+
+def test_def120_worker_logger_name_pinned():
+    """Worker logger must be pinned to 'heyvox.herald.worker' — not getLogger(__name__).
+
+    Reason: the hook shim runs `python3 -m heyvox.herald.worker`, which sets
+    __name__ == "__main__". getLogger(__name__) would then orphan the logger
+    from the heyvox.herald handler chain — every log call silently writes
+    nowhere. This was DEF-120's root cause.
+    """
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "herald", "worker.py")).read()
+    assert 'getLogger("heyvox.herald.worker")' in src, (
+        "DEF-120: worker.py must pin its logger name explicitly so the "
+        "`python -m heyvox.herald.worker` entry path stays connected to the "
+        "heyvox.herald file handler. Replacing with getLogger(__name__) "
+        "silently breaks all hook-driven worker logging."
+    )
+    # Strip comment-only lines before grepping so the DEF-120 explanatory
+    # comment (which DOES reference getLogger(__name__) as the anti-pattern)
+    # doesn't false-positive against the actual binding.
+    code_lines = [
+        ln for ln in src.splitlines()
+        if not ln.lstrip().startswith("#")
+    ]
+    code_src = "\n".join(code_lines)
+    assert "getLogger(__name__)" not in code_src, (
+        "DEF-120: worker.py has an actual getLogger(__name__) binding (not "
+        "just a comment) — under the `python -m` entry point that resolves "
+        "to 'logging.getLogger(\"__main__\")', orphaned from the heyvox.herald "
+        "handler chain."
+    )
+
+
+def test_def120_worker_silent_skips_log_at_info():
+    """The three worker early-exit branches must log at INFO with forensic context.
+
+    Reason: silent DEBUG-level returns make "why didn't HeyVox speak?"
+    unanswerable from herald-debug.log. DEF-120 promoted these to INFO with
+    raw_len + hook + ws so the next missing-TTS is one grep away.
+    """
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "herald", "worker.py")).read()
+    for marker in (
+        'WORKER: no <tts> block in response',
+        'WORKER: <tts> block rejected',
+        'WORKER: verbosity=skip',
+    ):
+        assert marker in src, (
+            f"DEF-120: forensic breadcrumb {marker!r} missing — silent-skip "
+            "branches must emit one INFO line so logs answer 'did the hook "
+            "fire and skip, or did it not fire at all?'"
+        )
+
+
+def test_def120_worker_logger_writes_to_herald_debug_log_under_dash_m():
+    """End-to-end: `python -m heyvox.herald.worker` with no TTS block must
+    leave a 'WORKER: no <tts> block' line in herald-debug.log.
+
+    This is the integration test that import-only unit tests miss — it
+    catches the __name__=='__main__' logger orphan that DEF-120 was about.
+    """
+    from heyvox.constants import HERALD_DEBUG_LOG
+    # Capture log size before
+    try:
+        before_size = os.path.getsize(HERALD_DEBUG_LOG)
+    except OSError:
+        before_size = 0
+    # Invoke worker as -m with no TTS block
+    result = subprocess.run(
+        [sys.executable, "-m", "heyvox.herald.worker"],
+        input="probe response with no tts block — def120 guard",
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, (
+        f"worker exit={result.returncode} stderr={result.stderr[:200]!r}"
+    )
+    # Read what was appended
+    try:
+        with open(HERALD_DEBUG_LOG) as f:
+            f.seek(before_size)
+            appended = f.read()
+    except OSError as e:
+        pytest.fail(f"could not read {HERALD_DEBUG_LOG}: {e}")
+    assert "WORKER: no <tts> block" in appended, (
+        "DEF-120: running worker as `python -m` with no TTS block did not "
+        "leave the forensic breadcrumb in herald-debug.log. Logger pin is "
+        "broken, the silent-skip INFO promotion regressed, or the file path "
+        f"differs from HERALD_DEBUG_LOG={HERALD_DEBUG_LOG!r}. "
+        f"Appended chunk: {appended[:300]!r}"
+    )
+
+
+def test_def121_hooks_route_through_find_heyvox_python():
+    """All hook shims must route through heyvox_run_worker / find_heyvox_python.
+
+    Reason: Conductor / Claude Code may prepend project-local virtualenvs
+    (Poetry, conda, venv) to PATH that don't have heyvox installed. Bare
+    `python3 -m heyvox.herald.worker` then hits ModuleNotFoundError under
+    the hook's /dev/null redirect — silent failure, accumulating TMPFILEs,
+    no TTS for that workspace.
+    """
+    import heyvox
+    hooks_dir = os.path.join(os.path.dirname(heyvox.__file__), "herald", "hooks")
+    _lib = open(os.path.join(hooks_dir, "_lib.sh")).read()
+    assert "find_heyvox_python()" in _lib, (
+        "DEF-121: _lib.sh must define find_heyvox_python()."
+    )
+    assert "heyvox_run_worker()" in _lib, (
+        "DEF-121: _lib.sh must define heyvox_run_worker() so hook shims "
+        "share one place that resolves the interpreter."
+    )
+    # Every async-spawning hook shim must NOT use bare `python3 -m heyvox`.
+    # on-ambient is sync (exec) and is allowed to use find_heyvox_python directly.
+    for sh in ("on-response.sh", "on-notify.sh",
+               "on-session-start.sh", "on-session-end.sh"):
+        body = open(os.path.join(hooks_dir, sh)).read()
+        assert "heyvox_run_worker " in body, (
+            f"DEF-121: {sh} must call heyvox_run_worker — bare "
+            f"`python3 -m heyvox.herald.worker` hits ModuleNotFoundError "
+            f"in project-virtualenv workspaces."
+        )
+        assert "python3 -m heyvox.herald.worker" not in body, (
+            f"DEF-121: {sh} still has a bare `python3 -m heyvox.herald.worker` "
+            f"call — that resolves against the inherited PATH, including "
+            f"project virtualenvs that don't have heyvox installed. Route "
+            f"through heyvox_run_worker instead."
+        )
+    # on-ambient uses exec, so it's allowed to invoke its python directly,
+    # but must still go through find_heyvox_python.
+    amb = open(os.path.join(hooks_dir, "on-ambient.sh")).read()
+    assert "find_heyvox_python" in amb, (
+        "DEF-121: on-ambient.sh must resolve python via find_heyvox_python "
+        "before exec, not use bare `python3`."
+    )
+
+
 @pytest.mark.skipif(not _shellcheck_available(), reason="shellcheck not installed")
 def test_shellcheck_all_scripts():
     """All .sh files must pass ShellCheck with no errors (P8: DEF-029).
@@ -848,4 +1136,640 @@ def test_shellcheck_all_scripts():
 
     assert not failures, (
         f"ShellCheck errors in {len(failures)} file(s):\n" + "\n\n".join(failures)
+    )
+
+
+# Real `launchctl list com.heyvox.listener` output (label-mode): a property-list
+# dict, NOT the tab-separated PID\tExit\tLabel rows of bare `launchctl list`.
+_LAUNCHCTL_RUNNING = """{
+\t"StandardOutPath" = "/tmp/heyvox.log";
+\t"Label" = "com.heyvox.listener";
+\t"OnDemand" = false;
+\t"LastExitStatus" = 0;
+\t"PID" = 14091;
+\t"Program" = "/Users/work/.pyenv/versions/3.12.12/bin/python";
+};
+"""
+
+# Loaded-but-stopped: dict has LastExitStatus but no "PID" key.
+_LAUNCHCTL_STOPPED = """{
+\t"StandardOutPath" = "/tmp/heyvox.log";
+\t"Label" = "com.heyvox.listener";
+\t"OnDemand" = false;
+\t"LastExitStatus" = 0;
+\t"Program" = "/Users/work/.pyenv/versions/3.12.12/bin/python";
+};
+"""
+
+
+def test_def130_status_parses_running_plist_dict():
+    """get_status() must read launchctl's label-mode plist-dict output.
+
+    DEF-130: get_status() ran `launchctl list <label>` (which returns a
+    plist dict) but parsed it as the tab-separated `PID\\tExit\\tLabel` rows
+    of the bare `launchctl list`. The closing "};" line had <3 tab fields,
+    so it always returned running=False — `heyvox status` reported "Stopped"
+    while the daemon was alive. Feed the real dict format and assert it's
+    read as running.
+    """
+    from unittest.mock import patch, MagicMock
+    from heyvox.setup import launchd
+
+    with patch("heyvox.setup.launchd.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_LAUNCHCTL_RUNNING)
+        status = launchd.get_status()
+
+    assert status["running"] is True, (
+        "DEF-130: a live daemon (PID present in launchctl plist dict) must "
+        f"parse as running, got {status!r}"
+    )
+    assert status["pid"] == 14091, (
+        f"DEF-130: must extract PID 14091 from the plist dict, got {status['pid']!r}"
+    )
+    assert status["loaded"] is True
+    assert status["exit_code"] == 0
+
+
+def test_def130_status_parses_stopped_plist_dict():
+    """A loaded-but-stopped job has LastExitStatus but no PID key.
+
+    DEF-130: must report running=False without a "PID" key, and still
+    surface the last exit code.
+    """
+    from unittest.mock import patch, MagicMock
+    from heyvox.setup import launchd
+
+    with patch("heyvox.setup.launchd.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_LAUNCHCTL_STOPPED)
+        status = launchd.get_status()
+
+    assert status["running"] is False, (
+        f"DEF-130: no PID key means not running, got {status!r}"
+    )
+    assert status["pid"] is None
+    assert status["loaded"] is True
+    assert status["exit_code"] == 0
+
+
+# ---------------------------------------------------------------------------
+# DEF-132: a freshly-(re)selected mic must not inherit the dead-air debt that
+# accrued during the slow reinit/HFP switch. reinit()/handle_io_error() reset
+# the AUDIO-13 timers but not ctx.last_read_time, so the main-loop no-data
+# stall guard evicted a just-switched Bluetooth headset within the same second
+# and bounced back to the built-in mic. Fix: _arm_post_switch_grace() resets
+# last_read_time + arms a longer first-packet window (mic_just_switched).
+# ---------------------------------------------------------------------------
+
+
+def test_def132_appcontext_has_switch_grace_fields():
+    """DEF-132: AppContext must declare the read-stall clock and grace flag."""
+    from heyvox.app_context import AppContext
+    fields = AppContext.__dataclass_fields__
+    assert "last_read_time" in fields, "DEF-132: last_read_time must be declared"
+    assert "mic_just_switched" in fields, "DEF-132: mic_just_switched must be declared"
+    ctx = AppContext()
+    assert ctx.mic_just_switched is False, "DEF-132: grace flag must default off"
+    assert ctx.last_read_time == 0.0
+
+
+def test_def132_recovery_paths_reset_stall_clock():
+    """DEF-132: both slow recovery tails must reset the main-loop read-stall
+    clock, or a freshly-switched BT headset is evicted before its first PCM
+    packet and bounces straight back to the built-in mic."""
+    src = _read_device_manager_src()
+    assert "def _arm_post_switch_grace" in src, (
+        "DEF-132: the _arm_post_switch_grace() helper must exist"
+    )
+    assert "self.ctx.last_read_time = time.monotonic()" in src, (
+        "DEF-132: the grace helper must reset ctx.last_read_time to monotonic()"
+    )
+    assert src.count("self._arm_post_switch_grace()") >= 2, (
+        "DEF-132: reinit() AND handle_io_error() must both call "
+        "_arm_post_switch_grace() — dropping one re-opens the bounce bug"
+    )
+
+
+def test_def132_main_loop_honors_switch_grace():
+    """DEF-132: the no-data stall guard must extend its window after a switch
+    and revert once data flows, else it never returns to the 5s guard."""
+    src = _read_main_src()
+    assert "_POST_SWITCH_STALL_SECS" in src, (
+        "DEF-132: the post-switch stall-grace constant must exist"
+    )
+    assert "ctx.mic_just_switched" in src, (
+        "DEF-132: the stall guard must branch on ctx.mic_just_switched"
+    )
+    assert "ctx.mic_just_switched = False" in src, (
+        "DEF-132: the grace flag must be cleared on the first successful read, "
+        "else the extended window never reverts to the normal 5s guard"
+    )
+
+
+def test_def132_arm_post_switch_grace_runtime():
+    """DEF-132: _arm_post_switch_grace() must reset the clock and arm the flag."""
+    pytest.importorskip("pyaudio")
+    import time as _t
+    from heyvox.app_context import AppContext
+    from heyvox.device_manager import DeviceManager
+    ctx = AppContext()
+    ctx.last_read_time = 0.0
+    ctx.mic_just_switched = False
+    dm = DeviceManager(
+        ctx=ctx, config=None,
+        log_fn=lambda *a, **k: None, hud_send=lambda *a, **k: None,
+    )
+    before = _t.monotonic()
+    dm._arm_post_switch_grace()
+    assert ctx.mic_just_switched is True, (
+        "DEF-132: a mic (re)selection must arm the first-packet grace flag"
+    )
+    assert ctx.last_read_time >= before, (
+        "DEF-132: last_read_time must be reset to ~now (monotonic) so the "
+        "freshly-switched device isn't evicted on carried-over dead-air debt"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-104: hotplug self-restart — a higher-priority mic that is live in
+# CoreAudio but absent from PortAudio's per-process cache (plugged in after
+# the daemon's first init) is invisible until restart. detect_missed_hotplug
+# is the pure detection core; the main loop self-restarts on its signal.
+# ---------------------------------------------------------------------------
+
+def test_def104_detects_priority_device_missing_from_portaudio():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # The exact 2026-06-06 case: Jabra live in CoreAudio, PortAudio only sees
+    # the built-in mic, daemon stuck on the built-in fallback.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390", "macbook pro microphone"},
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed == "Jabra Link 390", (
+        "DEF-104: a priority device live in CoreAudio but absent from PortAudio "
+        "and outranking the current mic must be flagged for a cache-clearing restart"
+    )
+
+
+def test_def104_no_restart_when_device_already_in_portaudio():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # PortAudio sees the Jabra too — the normal scan/switch handles it, no restart.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390", "macbook pro microphone"},
+        pa_input_names={"jabra link 390", "macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed is None, (
+        "DEF-104: if PortAudio already enumerates the device, restarting is "
+        "pointless churn — the normal mic switch will pick it up"
+    )
+
+
+def test_def104_no_restart_for_lower_priority_device():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # A live-but-uncached device ranking BELOW the current mic is not an upgrade.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390", "g435"},
+        pa_input_names={"g435"},
+        mic_priority=["G435", "Jabra Link 390"],
+        current_dev_name="G435",
+    )
+    assert missed is None, (
+        "DEF-104: only a HIGHER-priority missing device justifies a restart; "
+        "a lower-ranked one must not spin the daemon"
+    )
+
+
+def test_def104_no_false_fire_when_coreaudio_unavailable():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # Empty live set = CoreAudio unavailable. Must degrade to no-op.
+    missed = detect_missed_hotplug(
+        live_input_names=set(),
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed is None, (
+        "DEF-104: with no CoreAudio data the detector must never fire — a "
+        "restart on missing input would be a self-inflicted outage"
+    )
+
+
+def test_def104_detects_when_no_current_device():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # No mic in use (None) → any live-but-uncached priority device is an upgrade.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390"},
+        pa_input_names=set(),
+        mic_priority=["Jabra Link 390"],
+        current_dev_name=None,
+    )
+    assert missed == "Jabra Link 390"
+
+
+def test_def104_substring_match_like_find_best_mic():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # priority entries are substrings; the real device name may be longer.
+    missed = detect_missed_hotplug(
+        live_input_names={"jabra link 390 (hands-free)"},
+        pa_input_names=set(),
+        mic_priority=["Jabra Link 390"],
+        current_dev_name="MacBook Pro Microphone",
+    )
+    assert missed == "Jabra Link 390", (
+        "DEF-104: detection must use the same substring match as find_best_mic "
+        "so the two agree on what counts as present"
+    )
+
+
+def test_def104_empty_or_none_priority_is_noop():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    assert detect_missed_hotplug({"x"}, set(), [], None) is None
+    assert detect_missed_hotplug({"x"}, set(), None, None) is None
+
+
+def test_def104_main_loop_wires_hotplug_check():
+    # File-text inspection (no pyaudio import): the main loop must call the
+    # restart helper gated on min age, and the helper must use the live-vs-cached
+    # signal and the MIC_HOTPLUG_MISSED tag.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "_maybe_restart_for_hotplug(" in src, (
+        "DEF-104: main loop must invoke the hotplug self-restart helper"
+    )
+    assert "_HOTPLUG_MIN_AGE" in src, (
+        "DEF-104: restart must be gated on minimum daemon age to let BT HFP settle"
+    )
+    assert "get_live_input_device_names" in src
+    assert "detect_missed_hotplug" in src
+    assert "MIC_HOTPLUG_MISSED" in src
+    assert "_write_hotplug_marker" in src, (
+        "DEF-104: a cooldown marker must be written to prevent restart loops"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-101: per-mic software capture gain (BT-HFP G435 low-level workaround)
+#
+# The macOS input slider is decoupled from the Bluetooth-HFP codec gain, so a
+# BT headset (G435) captures at a very low level the slider cannot raise. The
+# fix is a per-mic `gain` in the active profile, applied on the capture hot
+# path. The `gain` config field existed long before this but was never applied
+# (dead config) — these guards ensure it actually multiplies the signal, stays
+# int16, hard-clips instead of wrapping, and no-ops cheaply when unset.
+# ---------------------------------------------------------------------------
+
+def test_def101_apply_input_gain_scales_signal():
+    import numpy as np
+    from heyvox.audio.normalize import apply_input_gain
+    src = np.array([100, -200, 300], dtype=np.int16)
+    out = apply_input_gain(src, 4.0)
+    assert out.dtype == np.int16, "gain output must stay int16 for openwakeword"
+    assert list(out) == [400, -800, 1200], "gain must be a flat multiplier"
+
+
+def test_def101_apply_input_gain_clips_no_wraparound():
+    import numpy as np
+    from heyvox.audio.normalize import apply_input_gain
+    # 20000 * 4 = 80000 would wrap to a negative int16 without clamping.
+    out = apply_input_gain(np.array([20000, -20000], dtype=np.int16), 4.0)
+    assert out.dtype == np.int16
+    assert int(out[0]) == 32767 and int(out[1]) == -32768, (
+        "DEF-101: gain must hard-clip to int16 range, never wrap around"
+    )
+
+
+def test_def101_apply_input_gain_noop_when_unset():
+    import numpy as np
+    from heyvox.audio.normalize import apply_input_gain
+    src = np.frombuffer(b"\x01\x00\x02\x00", dtype=np.int16)  # read-only view
+    # None / 1.0 / <=0 must return the SAME object (zero copy on the hot path).
+    assert apply_input_gain(src, None) is src
+    assert apply_input_gain(src, 1.0) is src
+    assert apply_input_gain(src, 0.0) is src
+    assert apply_input_gain(src, -2.0) is src
+
+
+def test_def101_main_loop_applies_profile_gain():
+    # File-text inspection (main.py imports pyaudio): the capture loop must
+    # apply the active profile's gain right after np.frombuffer.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "apply_input_gain" in src, "DEF-101: capture loop must call apply_input_gain"
+    assert "devices.active_profile.gain" in src, (
+        "DEF-101: gain must come from the active mic profile so it switches "
+        "with the device"
+    )
+
+
+def test_def101_gain_field_wired_through_profile_manager():
+    # MicProfileEntryConfig.gain was dead config before DEF-101 — ensure the
+    # profile manager copies it into the resolved entry and substring-matches.
+    import pathlib
+    import tempfile
+    from heyvox.audio.profile import MicProfileManager
+    from heyvox.config import MicProfileEntryConfig
+    mgr = MicProfileManager(
+        {"g435 bluetooth": MicProfileEntryConfig(gain=4.0)},
+        pathlib.Path(tempfile.mkdtemp()),
+    )
+    assert mgr.get_profile("G435 Bluetooth Gaming Headset").gain == 4.0, (
+        "DEF-101: per-mic gain must resolve through MicProfileManager.get_profile"
+    )
+    # A device without a matching profile gets no gain (None → no-op).
+    assert mgr.get_profile("MacBook Pro Microphone").gain is None
+    # The Lightspeed variant must NOT match the "G435 Bluetooth" key (no gain →
+    # no clipping on the healthy USB level).
+    assert mgr.get_profile("G435 Wireless Gaming Headset").gain is None
+
+
+# ---------------------------------------------------------------------------
+# DEF-147: DEF-104 hotplug self-restart must NEVER fire for a Bluetooth mic.
+#
+# A BT-HFP device is chronically "live in CoreAudio but absent from PortAudio"
+# as it flaps A2DP<->HFP, so the DEF-104 detector misread it as a USB hotplug
+# and restarted the daemon — each restart tearing the fragile SCO link apart
+# (real regression: G435 over BT died repeatedly, stable the moment HeyVox was
+# stopped). These guards ensure the BT-transport exclusion exists and is
+# consulted before the restart.
+# ---------------------------------------------------------------------------
+
+def test_def147_bluetooth_helper_returns_set():
+    # Must import and return a set even with no BT hardware (graceful
+    # degradation — empty set, never raises).
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.mic import get_bluetooth_input_device_names
+    assert isinstance(get_bluetooth_input_device_names(), set)
+
+
+def test_def147_enumerate_triples_dont_break_live_dead_helpers():
+    # _enumerate_coreaudio_inputs now yields (name, alive, transport); the
+    # live/dead helpers must still unpack without ValueError.
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.mic import (
+        get_live_input_device_names,
+        get_dead_input_device_names,
+    )
+    assert isinstance(get_live_input_device_names(), set)
+    assert isinstance(get_dead_input_device_names(), set)
+
+
+def test_def147_main_loop_excludes_bluetooth_before_restart():
+    # File-text inspection: the hotplug helper must consult the BT set and skip
+    # the restart for BT devices BEFORE writing the marker / calling execv.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "get_bluetooth_input_device_names" in src, (
+        "DEF-147: hotplug restart must consult the BT-transport set"
+    )
+    bt_idx = src.find("is a Bluetooth device")
+    marker_idx = src.find("_write_hotplug_marker(missed)")
+    assert bt_idx != -1 and marker_idx != -1 and bt_idx < marker_idx, (
+        "DEF-147: the BT exclusion must short-circuit BEFORE the restart marker/execv"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-148: output keep-alive for USB power-saving headsets (G535/Lightspeed).
+#
+# USB wireless headsets park the output path after silence; the next stream's
+# cold start (~0.7s) swallows short cues. A silent output stream held open keeps
+# the device awake → cues play immediately. MUST be gated on USB transport
+# (irrelevant on built-in/BT/virtual) and stopped on cleanup.
+# ---------------------------------------------------------------------------
+
+def test_def148_keepalive_wired_and_usb_gated():
+    pytest.importorskip("pyaudio")
+    from heyvox.config import AudioConfig
+    from heyvox.audio.keepalive import default_output_is_usb, default_output_transport
+    assert AudioConfig().output_keepalive is True, "keep-alive defaults on"
+    assert isinstance(default_output_transport(), int)
+    assert isinstance(default_output_is_usb(), bool)
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "OutputKeepAlive(" in src, "main loop must construct the keep-alive"
+    assert "config.audio.output_keepalive" in src, "keep-alive must be config-gated"
+    assert "_ka.stop()" in src, "keep-alive must be stopped in cleanup"
+
+
+def test_def148_keepalive_opens_one_stream_and_closes(monkeypatch):
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.keepalive import OutputKeepAlive
+    events = []
+
+    class FakeStream:
+        def start_stream(self):
+            events.append("start")
+
+        def stop_stream(self):
+            events.append("stop")
+
+        def close(self):
+            events.append("close")
+
+    class FakePA:
+        def open(self, **kw):
+            events.append("open")
+            return FakeStream()
+
+    ka = OutputKeepAlive(lambda m: None)
+    ka._pa = FakePA()  # inject context (DEF-153: keep-alive owns its own PA)
+    ka._open_stream()
+    ka._open_stream()  # idempotent — must NOT open a second stream
+    assert events.count("open") == 1, "DEF-148: only one silent stream at a time"
+    ka._close_stream()
+    assert "close" in events, "DEF-148: stream must be released on close"
+
+
+# ---------------------------------------------------------------------------
+# DEF-153: keep-alive wedged forever on a stale PA context after a USB flap.
+# The G535 power-cycled → CoreAudio assigned a new device ID → the PA context
+# captured at daemon start failed every reopen with -9986/-10851 (every 5 s,
+# no recovery), cues silently fell back to afplay — exactly the path the
+# device swallows (DEF-148). The keep-alive must drop its own context on an
+# open failure and recover with a freshly created one on the next tick.
+# ---------------------------------------------------------------------------
+
+def test_def153_keepalive_recreates_pa_context_after_open_failure(monkeypatch):
+    pytest.importorskip("pyaudio")
+    import pyaudio
+    from heyvox.audio.keepalive import OutputKeepAlive
+
+    created = []
+
+    class FakeStream:
+        def start_stream(self):
+            pass
+
+        def stop_stream(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakePA:
+        def __init__(self):
+            self.stale = len(created) == 0  # first context: stale after USB flap
+            self.terminated = False
+            created.append(self)
+
+        def open(self, **kw):
+            if self.stale:
+                raise OSError(-9986, "Internal PortAudio error")
+            return FakeStream()
+
+        def terminate(self):
+            self.terminated = True
+
+    monkeypatch.setattr(pyaudio, "PyAudio", FakePA)
+    ka = OutputKeepAlive(lambda m: None)
+    ka._open_stream()  # stale context → open fails
+    assert ka._stream is None
+    assert created[0].terminated, "DEF-153: stale PA context must be dropped on failure"
+    ka._open_stream()  # next tick → fresh context succeeds
+    assert ka._stream is not None, "DEF-153: fresh context must recover the stream"
+    assert len(created) == 2, "DEF-153: a new PA context must be created after the drop"
+    ka.stop()
+    assert created[1].terminated, "DEF-153: own context must be released on stop"
+
+
+# ---------------------------------------------------------------------------
+# Stop-gate quick-win 2026-06-11: ultra-confidence bypass + idle-only
+# speaker multiplier
+#
+# Log evidence 06-09/10: 78 high-confidence stop frames blocked by the
+# DEF-117/118 pre-silence gates, 60 of them >= 0.999 (53 at a flat 1.000),
+# while setups exist where the VAD never reports a silent frame
+# (last_silent=3033s observed) — every pre_silence-dependent lever is dead
+# there. Documented mid-sentence phoneme flares reach 0.982 (DEF-117) and
+# 0.997 (DEF-118), so the bypass bar must sit above BOTH.
+# ---------------------------------------------------------------------------
+
+
+def test_ultra_fast_stop_constant_above_documented_flares():
+    """_ULTRA_CONFIDENCE_FAST_STOP must exist and clear every documented
+    mid-sentence flare (0.982 DEF-117, 0.997 DEF-118) while staying below
+    1.0 so flat-1.000 real peaks pass."""
+    src = _read_main_py()
+    m = re.search(r"_ULTRA_CONFIDENCE_FAST_STOP\s*=\s*([\d.]+)", src)
+    assert m, (
+        "_ULTRA_CONFIDENCE_FAST_STOP constant missing — the no-pre-silence "
+        "bypass is the only stop path that works when the VAD never reports "
+        "silence (all DEF-096-B/117/118 levers dead)."
+    )
+    val = float(m.group(1))
+    assert 0.998 <= val < 1.0, (
+        f"_ULTRA_CONFIDENCE_FAST_STOP={val} outside [0.998, 1.0). Below "
+        f"0.998 admits documented phoneme flares (0.997, DEF-118) → "
+        f"mid-sentence false stops that ABORT AND SEND half a prompt; at "
+        f"1.0 even flat-peak real stops would need exact saturation."
+    )
+
+
+def test_ultra_fast_stop_bypasses_silence_gate_but_keeps_vad_guard():
+    """_ultra_stop must NOT require _recent_silence (that bypass is its
+    purpose) but MUST keep `not _vad_silent` (DEF-047: dead-stream silence
+    bursts must not self-stop a recording)."""
+    src = _read_main_py()
+    m = re.search(r"_ultra_stop\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _ultra_stop assignment in main.py"
+    block = m.group(1)
+    assert "_recent_silence" not in block, (
+        "_ultra_stop must not depend on _recent_silence — it exists exactly "
+        "for setups where the VAD never reports silence."
+    )
+    assert "not _vad_silent" in block, (
+        "_ultra_stop must keep the DEF-047 `not _vad_silent` guard."
+    )
+    assert "_ULTRA_CONFIDENCE_FAST_STOP" in block, (
+        "_ultra_stop must gate on _ULTRA_CONFIDENCE_FAST_STOP."
+    )
+
+
+def test_ultra_fast_stop_has_distinct_stop_path_label():
+    """[STOP_PATH] must label ultra-bypass stops distinctly ("ultra") so the
+    FP rate of the new gate bypass is measurable from logs alone — without
+    it, a false-stop regression is unattributable (P-detector-without-action
+    in reverse)."""
+    src = _read_main_py()
+    assert '"ultra" if _ultra_stop' in src, (
+        "STOP_PATH label for the ultra path missing — path=ultra counts are "
+        "the direct measure of the bypass's benefit AND its FP risk."
+    )
+
+
+def test_near_miss_fast_blocked_excludes_ultra_band():
+    """NEAR_MISS_FAST_BLOCKED must only tag scores that are actually still
+    blocked (< _ULTRA_CONFIDENCE_FAST_STOP) — tagging fired ultra-stops as
+    'blocked' would corrupt the gate-effectiveness metric the DEF-149
+    tuning relies on."""
+    src = _read_main_py()
+    m = re.search(
+        r"if\s*\(([\s\S]+?)\):\s*\n[\s\S]{0,400}?NEAR_MISS_FAST_BLOCKED", src
+    )
+    assert m is not None, "Could not find the NEAR_MISS_FAST_BLOCKED guard"
+    assert "_ULTRA_CONFIDENCE_FAST_STOP" in m.group(1), (
+        "The NEAR_MISS_FAST_BLOCKED condition must exclude scores >= "
+        "_ULTRA_CONFIDENCE_FAST_STOP (those fire via the ultra path now)."
+    )
+
+
+def test_speaker_mult_applies_idle_only():
+    """speaker_threshold_multiplier must not apply while recording: no TTS
+    plays during a recording (media paused, TTS held behind RECORDING_FLAG),
+    so the echo self-trigger it defends against can't hit the stop path —
+    while the 1.4x penalty demonstrably killed real stops (2026-06-10 20:09
+    score=0.999 vs thr=0.91)."""
+    src = _read_main_py()
+    m = re.search(r"_speaker_mult\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _speaker_mult assignment in main.py"
+    assert "not _is_rec" in m.group(1), (
+        "_speaker_mult must include `and not _is_rec` — the multiplier is an "
+        "idle-time echo defense; applying it to the stop path raises the "
+        "stop threshold to 0.91 in speaker mode for no protective benefit."
+    )
+
+
+def test_default_wake_word_loadable_on_fresh_install():
+    """DEF-159: the shipped default wake word must load on a fresh pip install
+    with no custom .onnx present. The old default `hey_vox` crashed
+    `heyvox start` with `ValueError: Could not find pretrained model for model
+    name 'hey_vox'` because that model ships nowhere yet (not bundled in the
+    wheel, no setup download — plan 14-04 unbuilt). A shipped default must be
+    an openwakeword-bundled name OR a package-bundled .onnx — never a bare
+    name openwakeword can't resolve. Re-add 'hey_vox' only once its model is
+    bundled/downloaded by setup."""
+    import os
+
+    import heyvox
+    from heyvox.config import WakeWordConfig
+
+    # openwakeword's bundled pretrained model names (no .onnx suffix needed)
+    oww_bundled = {
+        "alexa_v0.1", "hey_jarvis_v0.1", "hey_mycroft_v0.1",
+        "hey_rhasspy_v0.1", "timer_v0.1", "weather_v0.1",
+    }
+    pkg_models_dir = os.path.join(os.path.dirname(heyvox.__file__), "models")
+
+    def _resolvable(name: str) -> bool:
+        if not name:
+            return True  # empty stop is resolved to start by the validator
+        if name in oww_bundled:
+            return True
+        return os.path.exists(os.path.join(pkg_models_dir, f"{name}.onnx"))
+
+    cfg = WakeWordConfig()
+    defaults = [cfg.start, cfg.stop, *cfg.also_load]
+    unresolvable = [n for n in defaults if not _resolvable(n)]
+    assert not unresolvable, (
+        f"DEF-159: shipped default wake words {unresolvable} cannot load on a "
+        f"fresh install — not openwakeword-bundled and no .onnx in "
+        f"{pkg_models_dir}. openwakeword raises ValueError on unknown names. "
+        f"Bundle the model or keep the default to a bundled name."
     )

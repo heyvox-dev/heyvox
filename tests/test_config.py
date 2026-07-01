@@ -21,8 +21,8 @@ class TestHeyvoxConfigDefaults:
 
     def test_default_wake_words(self):
         cfg = HeyvoxConfig()
-        assert cfg.wake_words.start == "hey_vox"
-        assert cfg.wake_words.stop == "hey_vox"
+        assert cfg.wake_words.start == "hey_jarvis_v0.1"
+        assert cfg.wake_words.stop == "hey_jarvis_v0.1"
 
     def test_default_stt(self):
         cfg = HeyvoxConfig()
@@ -42,6 +42,10 @@ class TestHeyvoxConfigDefaults:
         cfg = HeyvoxConfig()
         assert cfg.push_to_talk.enabled is True
         assert cfg.push_to_talk.key == "fn"
+        # Double-tap → hands-free defaults (on, with sane timing windows).
+        assert cfg.push_to_talk.double_tap_handsfree is True
+        assert cfg.push_to_talk.tap_max_secs == 0.2
+        assert cfg.push_to_talk.double_tap_secs == 0.35
 
     def test_default_audio(self):
         cfg = HeyvoxConfig()
@@ -57,6 +61,35 @@ class TestHeyvoxConfigDefaults:
         cfg = HeyvoxConfig()
         assert "Claude" in cfg.agents
         assert "Cursor" in cfg.agents
+
+    def test_default_stt_initial_prompt(self):
+        cfg = HeyvoxConfig()
+        assert cfg.stt.local.initial_prompt == ""
+
+    def test_default_vocab_learner(self):
+        cfg = HeyvoxConfig()
+        # Privacy opt-in MUST default closed (non-negotiable 2).
+        assert cfg.vocab_learner.enabled is False
+        assert cfg.vocab_learner.provider == "subscription"
+        assert cfg.vocab_learner.model == "claude-haiku-4-5"
+        assert cfg.vocab_learner.max_terms == 30
+        assert cfg.vocab_learner.min_frequency == 2
+        assert cfg.vocab_learner.min_confidence == 0.6
+        assert "ngrid" in cfg.vocab_learner.seeds
+        assert "Herald" in cfg.vocab_learner.seeds
+
+
+class TestSTTLocalConfig:
+    """STTLocalConfig.initial_prompt field (Phase 16)."""
+
+    def test_initial_prompt_defaults_empty(self):
+        from heyvox.config import STTLocalConfig
+        assert STTLocalConfig().initial_prompt == ""
+
+    def test_initial_prompt_accepts_string(self):
+        from heyvox.config import STTLocalConfig
+        c = STTLocalConfig(initial_prompt="Claude Xero Herald")
+        assert c.initial_prompt == "Claude Xero Herald"
 
 
 class TestWakeWordConfig:
@@ -144,7 +177,7 @@ class TestLoadConfig:
         cfg = load_config(f)
         assert cfg.threshold == 0.8
         assert cfg.cooldown_secs == 3.0
-        assert cfg.wake_words.start == "hey_vox"  # default preserved
+        assert cfg.wake_words.start == "hey_jarvis_v0.1"  # default preserved
 
     def test_nested_yaml_override(self, tmp_path):
         f = tmp_path / "config.yaml"
@@ -166,6 +199,8 @@ class TestLoadConfig:
             "  pause_media: true\n"
             "push_to_talk:\n"
             "  key: right_cmd\n"
+            "  double_tap_handsfree: false\n"
+            "  tap_max_secs: 0.3\n"
         )
         cfg = load_config(f)
         assert cfg.wake_words.start == "hey_vox"
@@ -174,6 +209,8 @@ class TestLoadConfig:
         assert cfg.target_mode == "last-agent"
         assert cfg.tts.pause_media is True
         assert cfg.push_to_talk.key == "right_cmd"
+        assert cfg.push_to_talk.double_tap_handsfree is False
+        assert cfg.push_to_talk.tap_max_secs == 0.3
 
     def test_invalid_yaml_exits(self, tmp_path):
         f = tmp_path / "config.yaml"
@@ -245,3 +282,26 @@ class TestAppProfileNewFields:
         assert p.supports_ax_verify is True
         assert p.has_session_detection is False
         assert abs(p.ax_settle_before_verify - 0.1) < 1e-6
+
+
+class TestYamlEscapeRoundTrip:
+    """WR-03: _yaml_escape must escape control chars so values survive a YAML reload.
+
+    A literal newline in a double-quoted scalar previously spanned multiple lines
+    and YAML folded it back to a single space — silent value corruption."""
+
+    def test_newline_and_tab_value_round_trips(self):
+        import yaml
+
+        from heyvox.config import _yaml_escape
+
+        value = "line one\nline two\twith tab"
+        escaped = _yaml_escape(value)
+        loaded = yaml.safe_load(f"key: {escaped}\n")
+        assert loaded["key"] == value
+
+    def test_plain_value_unquoted(self):
+        from heyvox.config import _yaml_escape
+
+        # No special chars → returned bare (unchanged behavior).
+        assert _yaml_escape("ClaudeXeroHerald") == "ClaudeXeroHerald"

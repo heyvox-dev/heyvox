@@ -1,0 +1,22 @@
+{
+  "_note": "001b CEILING — extraction by a strong model (Opus, this agent) over the same 300-entry eval_sample, following the SAME task/prompt given to the local arm (seed list included HeyVox/Vox). Hand-produced as the quality upper bound, NOT a re-derivation of ground_truth.",
+  "model": "opus-ceiling (agent)",
+  "glossary": [
+    {"wrong": "Cloud", "right": "Claude", "kind": "public", "count": 7, "avg_conf": 0.85},
+    {"wrong": "zero", "right": "Xero", "kind": "public", "count": 3, "avg_conf": 0.8},
+    {"wrong": "Contactor", "right": "Conductor", "kind": "public", "count": 1, "avg_conf": 0.9},
+    {"wrong": "Kontaktor", "right": "Conductor", "kind": "public", "count": 2, "avg_conf": 0.9},
+    {"wrong": "CROAD", "right": "Conductor", "kind": "public", "count": 1, "avg_conf": 0.55},
+    {"wrong": "Harold", "right": "Herald", "kind": "private", "count": 2, "avg_conf": 0.85},
+    {"wrong": "hash", "right": "Hush", "kind": "private", "count": 1, "avg_conf": 0.65},
+    {"wrong": "Engrid", "right": "ngrid", "kind": "private", "count": 1, "avg_conf": 0.75},
+    {"wrong": "Mermet", "right": "Mermaid", "kind": "public", "count": 1, "avg_conf": 0.7},
+    {"wrong": "Heybox", "right": "HeyVox", "kind": "private", "count": 1, "avg_conf": 0.8},
+    {"wrong": "Haywax", "right": "HeyVox", "kind": "private", "count": 1, "avg_conf": 0.7},
+    {"wrong": "APox", "right": "HeyVox", "kind": "private", "count": 1, "avg_conf": 0.6},
+    {"wrong": "Hey box", "right": "HeyVox", "kind": "private", "count": 5, "avg_conf": 0.7},
+    {"wrong": "Hey Wox", "right": "HeyVox", "kind": "private", "count": 2, "avg_conf": 0.7},
+    {"wrong": "Hey Wux", "right": "HeyVox", "kind": "private", "count": 2, "avg_conf": 0.65},
+    {"wrong": "Haywalk", "right": "HeyVox", "kind": "private", "count": 1, "avg_conf": 0.6}
+  ]
+}

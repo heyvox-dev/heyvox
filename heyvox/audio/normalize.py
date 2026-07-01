@@ -129,3 +129,35 @@ def normalize_samples_float32(
     # Clamp and convert back to float32
     scaled = np.clip(scaled, -32768, 32767)
     return scaled / 32767.0
+
+
+# ---------------------------------------------------------------------------
+# Live capture gain (per-mic, applied on the hot path)
+# ---------------------------------------------------------------------------
+
+def apply_input_gain(samples: "np.ndarray", gain: float | None) -> "np.ndarray":
+    """Apply a flat per-mic capture gain to int16 PCM, hard-clipped to int16.
+
+    Unlike the RMS normalizers above (which target a loudness and skip silence),
+    this is a constant multiplier for the LIVE capture path: it lifts the whole
+    signal — noise floor included — by a fixed factor. It exists for devices
+    whose level the macOS input slider can't raise: Bluetooth-HFP headsets like
+    the G435 (DEF-101) deliver a low level, and the OS input slider is decoupled
+    from the HFP codec gain, so a software multiplier is the only in-process
+    lever.
+
+    Returns ``samples`` unchanged (same object, zero copy) when ``gain`` is
+    None, <= 0, or ~1.0 — so the hot path pays nothing when no gain is set.
+    Otherwise returns a NEW int16 array (the ``np.frombuffer`` view is
+    read-only) scaled by ``gain`` and hard-clipped to [-32768, 32767] to
+    prevent overflow wraparound. Apply once, right after ``np.frombuffer``, so
+    every downstream consumer (level tracking, calibration/VAD, wake word,
+    recording, STT) sees the same boosted audio.
+    """
+    import numpy as np
+
+    if gain is None or gain <= 0 or abs(gain - 1.0) < 1e-3:
+        return samples
+    scaled = samples.astype(np.float32) * gain
+    np.clip(scaled, -32768.0, 32767.0, out=scaled)
+    return scaled.astype(np.int16)

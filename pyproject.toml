@@ -27,6 +27,7 @@ dependencies = [
     "openwakeword>=0.6.0",
     "pyaudio>=0.2.14",
     "numpy>=1.24.0",
+    "soundfile>=0.12",
     "PyYAML>=6.0",
     "pydantic>=2.0",
     "platformdirs>=4.0",
@@ -56,6 +57,9 @@ tts = [
 ]
 aec = [
     "livekit>=1.0.0",
+]
+learn-vocab = [
+    "anthropic>=0.84,<1",
 ]
 chrome = [
     "websockets>=13.0",

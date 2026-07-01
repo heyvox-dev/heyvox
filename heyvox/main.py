@@ -21,9 +21,12 @@ from heyvox.config import load_config, HeyvoxConfig, CONFIG_DIR
 from heyvox.app_context import AppContext
 from heyvox.device_manager import DeviceManager
 from heyvox.audio.profile import MicProfileManager
+from heyvox.audio.normalize import apply_input_gain
+from heyvox.audio.keepalive import OutputKeepAlive
 from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
+    HOTPLUG_RESTART_MARKER,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
@@ -65,8 +68,18 @@ _INJECT_DEDUP_SECS = 2.0    # Suppress duplicate injections within this window
 _ZOMBIE_FAIL_THRESHOLD = 2  # Force reinit after N consecutive failed recordings
 _BUSY_TIMEOUT = 60.0        # Force-reset busy after this many seconds
 _DEAD_MIC_TIMEOUT = 30.0    # Force reinit after this many seconds of silence
+_POST_SWITCH_STALL_SECS = 12.0  # DEF-132: first-packet grace for a freshly-switched mic (BT A2DP→HFP cold-start) before the no-data stall guard evicts it
 _HUD_RECONNECT_INTERVAL = 1.0  # Retry every 1s (fast reconnect after overlay startup)
 _HUD_LEVEL_INTERVAL = 0.05    # 20fps throttle for audio_level messages
+
+
+# ---------------------------------------------------------------------------
+# [WW_LATENCY] t1 threading: set by _run_loop just before recording.start(),
+# consumed once by RecordingStateMachine.start() to pass into audio_cue().
+# Both reset to 0.0 after use so stale values don't leak across activations.
+# ---------------------------------------------------------------------------
+_ww_t1: float = 0.0       # perf_counter at trigger commit (t1)
+_ww_detect_ms: float = 0.0  # (t1-t0)*1000 — pre-computed for the log line
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +246,124 @@ def _release_singleton():
                 os.unlink(_PID_FILE)
     except (OSError, ValueError):
         pass
+
+
+def _read_hotplug_marker():
+    """Return ``(epoch, device_name)`` from the DEF-104 restart marker, or None."""
+    try:
+        with open(HOTPLUG_RESTART_MARKER) as f:
+            ts, _, dev = f.read().partition("\n")
+        return float(ts), dev.strip()
+    except (OSError, ValueError):
+        return None
+
+
+def _write_hotplug_marker(device: str) -> None:
+    """Stamp the restart marker so the post-restart process can detect a loop."""
+    try:
+        with open(HOTPLUG_RESTART_MARKER, "w") as f:
+            f.write(f"{time.time()}\n{device}")
+    except OSError:
+        pass
+
+
+def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
+    """DEF-104: self-restart if a higher-priority mic is live in CoreAudio but
+    missing from PortAudio's cached enumeration.
+
+    A device hotplugged after the daemon's first PortAudio init is invisible to
+    every PortAudio code path (scan, find_best_mic, the hotplug watcher) until
+    the process restarts — PortAudio's process-global HAL cache survives
+    ``pa.terminate()`` + re-init. CoreAudio's live HAL still sees it, so the
+    mismatch is the detection signal. The only reliable in-process fix is a
+    full restart (the documented manual ``launchctl kickstart`` workaround,
+    automated here via the same ``os.execv`` path the memory watchdog uses).
+
+    Caller must gate on idle (not recording / not busy) and minimum daemon age.
+    This adds the loop guard: if we already restarted for this same device
+    within ``cooldown`` seconds and it's STILL missing, we stop — a device that
+    stays invisible even after a restart is a different problem and must not
+    spin the daemon.
+    """
+    try:
+        from heyvox.audio.mic import (
+            get_live_input_device_names,
+            _enumerate_pa_signature,
+        )
+        from heyvox.audio.device_handle import detect_missed_hotplug
+    except Exception as e:  # pragma: no cover - import guard
+        log(f"[hotplug] import failed (skipping check): {e}")
+        return
+
+    try:
+        live = get_live_input_device_names()
+        if not live:
+            return  # CoreAudio unavailable — degrade to no-op, never false-fire
+        pa_names = {
+            n.lower()
+            for _i, n, c in _enumerate_pa_signature(devices.pa)
+            if c > 0
+        }
+    except Exception as e:
+        log(f"[hotplug] enumeration failed (skipping check): {e}")
+        return
+
+    missed = detect_missed_hotplug(
+        live, pa_names, config.mic_priority, devices.dev_name
+    )
+    if not missed:
+        return
+
+    # DEF-147: never self-restart for a Bluetooth mic. A BT-HFP device is
+    # chronically "live in CoreAudio but absent from PortAudio" as it flaps
+    # A2DP<->HFP, so detect_missed_hotplug misreads it as a USB cache-miss
+    # hotplug — and each restart tears the fragile SCO link apart (observed:
+    # G435 over BT died repeatedly until HeyVox was stopped). BT has its own
+    # A2DP->HFP path (_bt_trigger_hfp_switch) and never needs a process restart;
+    # DEF-104 is strictly for USB devices the PortAudio cache missed.
+    try:
+        from heyvox.audio.mic import get_bluetooth_input_device_names
+        bt_names = get_bluetooth_input_device_names()
+        if any(missed.lower() in n for n in bt_names):
+            log(
+                f"MIC_HOTPLUG_MISSED: '{missed}' is a Bluetooth device — "
+                f"NOT self-restarting (DEF-147; BT has its own A2DP->HFP path)"
+            )
+            return
+    except Exception as e:
+        log(f"[hotplug] BT-transport check failed (proceeding): {e}")
+
+    marker = _read_hotplug_marker()
+    if marker is not None:
+        ts, dev = marker
+        age = time.time() - ts
+        if dev == missed and age < cooldown:
+            log(
+                f"MIC_HOTPLUG_MISSED: '{missed}' still absent from PortAudio "
+                f"{age:.0f}s after a restart — not looping (cooldown {cooldown:.0f}s)"
+            )
+            return
+
+    log(
+        f"MIC_HOTPLUG_MISSED: '{missed}' is live in CoreAudio but absent from "
+        f"PortAudio's cache (DEF-104 hotplug) — self-restarting to clear it"
+    )
+    try:
+        hud_send({"type": "error", "text": f"New mic '{missed}' — restarting"})
+    except Exception:
+        pass
+    _write_hotplug_marker(missed)
+    time.sleep(0.3)
+    _release_singleton()
+    try:
+        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+    except Exception as exc:
+        log(f"[hotplug] execv failed ({exc}), falling back to subprocess restart")
+        import subprocess as _sp
+        _sp.Popen(
+            [sys.executable, "-m", "heyvox.main"], start_new_session=True
+        )
+        ctx.shutdown.set()
 
 
 def _stop_tts_from_escape(hud_send_fn) -> None:
@@ -442,6 +573,8 @@ def _setup(config: HeyvoxConfig):
             language=config.stt.local.language,
             threads=config.stt.local.threads,
             log_fn=log,
+            initial_prompt=config.stt.local.initial_prompt,   # Phase 16
+            unload_secs=config.stt.local.unload_secs,
         )
 
     # Build adapter and create RecordingStateMachine
@@ -450,19 +583,39 @@ def _setup(config: HeyvoxConfig):
 
     recording = RecordingStateMachine(ctx=ctx, config=config, log_fn=log, hud_send=hud_send)
 
+    # Pre-roll ring buffer: ~500ms of audio captured while idle and prepended
+    # to a recording so the first words aren't clipped. Lives on ctx so the PTT
+    # callbacks (built here in _setup) and the fill/consume sites (in _run_loop)
+    # share one buffer. A held key starts recording ~tap_max_secs late (gesture
+    # detection); snapshotting this buffer back-fills that window so no speech
+    # is lost.
+    from collections import deque
+    _PREROLL_CHUNKS = max(1, int(0.5 * config.audio.sample_rate / config.audio.chunk_size))
+    ctx.preroll_buffer = deque(maxlen=_PREROLL_CHUNKS)
+
     # Start push-to-talk listener if enabled
     if config.push_to_talk.enabled:
         from heyvox.input.ptt import start_ptt_listener
 
         def _stop_wake_via_ptt():
             # DEF-116: mark the recording as PTT-interrupted so the end-trim
-            # is skipped (no stop-wake-word at the end to remove).
+            # is skipped (no stop-wake-word at the end to remove). Also serves
+            # as the hands-free toggle-off stop (handsfree zeroes both trims).
             ctx.stopped_via_ptt_mid_recording = True
-            recording.stop()
+            recording.stop(reason="ptt_interrupt")
 
         ptt_callbacks = {
-            "on_start": lambda: recording.start(ptt=True),
-            "on_stop": lambda: recording.stop(),
+            # Snapshot the idle pre-roll so the ~tap_max_secs hold-detection
+            # delay doesn't clip the user's opening words (Variant A latency).
+            "on_start": lambda: recording.start(ptt=True, preroll=list(ctx.preroll_buffer)),
+            "on_stop": lambda: recording.stop(reason="ptt"),
+            # Double-tap → hands-free: ends on silence / stop wake word / Escape
+            # like a wake-word recording (triggered_by_ptt stays False so the
+            # main-loop watchdogs run), but with no spoken wake word, so the
+            # stop() trim is skipped via ctx.handsfree.
+            "on_start_handsfree": lambda: recording.start(
+                handsfree=True, preroll=list(ctx.preroll_buffer)
+            ),
             "on_stop_wake_via_ptt": _stop_wake_via_ptt,
             "on_cancel_transcription": lambda: ctx.cancel_transcription.set(),
             "on_cancel_recording": lambda: recording.cancel(),
@@ -473,7 +626,12 @@ def _setup(config: HeyvoxConfig):
                 os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
             ),
         }
-        start_ptt_listener(config.push_to_talk.key, ptt_callbacks, log_fn=log)
+        start_ptt_listener(
+            config.push_to_talk.key, ptt_callbacks, log_fn=log,
+            double_tap=config.push_to_talk.double_tap_handsfree,
+            tap_max_secs=config.push_to_talk.tap_max_secs,
+            double_tap_secs=config.push_to_talk.double_tap_secs,
+        )
 
     # Load wake word models
     from heyvox.audio.wakeword import load_models
@@ -496,6 +654,16 @@ def _setup(config: HeyvoxConfig):
     devices = DeviceManager(ctx=ctx, config=config, log_fn=log, hud_send=hud_send,
                             profile_manager=profile_manager)
     devices.init()
+
+    # DEF-104 diagnostic: USB hotplug watcher polls PA device list every 10s
+    # and logs [USB_HOTPLUG] on changes. Catches the moment of re-enumeration
+    # that strands HeyVox on a stale PA index, instead of finding out minutes
+    # later via the next AUDIO-13 reinit side-effect.
+    try:
+        from heyvox.audio.mic import start_pa_hotplug_watcher
+        start_pa_hotplug_watcher(lambda: devices.pa, interval_secs=10.0)
+    except Exception as e:
+        log(f"PA hotplug watcher init failed (continuing): {e}")
 
     # ECHO-05: Initialize WebRTC AEC if configured and in speaker mode
     _aec_active = False
@@ -544,6 +712,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # Threaded audio read: protects against stream.read() blocking after AUHAL errors
     import concurrent.futures as _cf
     _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
+
+    # DEF-148: output keep-alive for USB power-saving headsets (G535 over
+    # Lightspeed). Holds a silent output stream open ONLY while the default
+    # output is USB, so the device never parks and swallows short cues' cold
+    # start. No-op on built-in/BT/virtual outputs. Stopped in main()'s finally.
+    # DEF-153: owns its own PA context (NOT devices.pa) — a captured shared
+    # context goes stale after a USB flap and wedges the keep-alive forever.
+    if config.audio.output_keepalive and getattr(devices, "keepalive", None) is None:
+        try:
+            devices.keepalive = OutputKeepAlive(log)
+            devices.keepalive.start()
+        except Exception as _ka_e:
+            log(f"[keepalive] failed to start (skipping): {_ka_e}")
 
     # Local aliases for frequently read config values (avoid attribute lookups in hot loop)
     threshold = config.threshold
@@ -596,17 +777,22 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         log(f"Training collector enabled → {training_base} (max {config.wake_words.negatives_max_clips} clips/category)")
         log("  Categories: tp/ fp/ tn/ fn/")
 
-    # Pre-roll ring buffer: captures ~500ms of audio before wake word trigger
-    # so the first words of the command aren't clipped.
-    from collections import deque
-    _PREROLL_CHUNKS = max(1, int(0.5 * sample_rate / chunk_size))  # ~500ms
-    _preroll_buffer: deque = deque(maxlen=_PREROLL_CHUNKS)
-
     # Memory watchdog
     _MEM_WARN_MB = 2000
     _MEM_CRITICAL_MB = 2500
     _last_mem_check = time.time()
     _MEM_CHECK_INTERVAL = 15.0
+
+    # DEF-104: hotplug self-restart. Detect a higher-priority mic that's live in
+    # CoreAudio but missing from PortAudio's per-process cache (plugged in after
+    # startup) and restart to clear the cache. Min-age lets the startup scan +
+    # BT A2DP→HFP settle before any restart; cooldown (in the marker) prevents a
+    # loop if a device stays invisible even after restarting.
+    _HOTPLUG_CHECK_INTERVAL = 15.0
+    _HOTPLUG_RESTART_COOLDOWN = 300.0
+    _HOTPLUG_MIN_AGE = 90.0
+    _last_hotplug_check = time.time()
+    _hotplug_start_time = time.time()
 
     # SIGKILL-proof heartbeat
     _HEARTBEAT_FILE = HEYVOX_HEARTBEAT_FILE
@@ -685,6 +871,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # unchanged (the consecutive+hard-reset path remains authoritative
     # for idle-mic noise rejection).
     _HIGH_CONFIDENCE_FAST_STOP = 0.92
+    # Ultra-confidence single-frame stop: fires WITHOUT the DEF-117/118
+    # pre-silence gate. Rationale: setups exist where the VAD never sees a
+    # silent frame (2026-06-10 20:09: last_silent=3033s, ambient level above
+    # silence_threshold) — fast-path, window-path AND the DEF-096-B discount
+    # are all dead there, so a lone 0.999 peak dies even though the model is
+    # as sure as it ever gets. Log evidence 06-09/10: 78 high-confidence
+    # frames blocked by the silence gate, 60 of them >= 0.999 (53 at a flat
+    # 1.000). The bar must clear every documented mid-sentence phoneme
+    # flare: 0.982 (DEF-117) and 0.997 (DEF-118) — hence 0.999, NOT lower.
+    # FP-rate of this bypass is measurable via STOP_PATH path=ultra lines.
+    _ULTRA_CONFIDENCE_FAST_STOP = 0.999
     _STOP_WINDOW_FRAMES = 4
     _STOP_WINDOW_HITS_REQUIRED = 2
     _stop_hit_window: dict[str, "collections.deque[int]"] = {}
@@ -694,7 +891,11 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _consecutive_hits: dict[str, int] = {}  # ww_name → count of consecutive above-threshold frames
     # DEF-063: timestamp of the first confirmed hit in the current accumulation run.
     # Used to report wake→recording.start latency so future slowdowns are measurable.
-    _first_hit_time: float = 0.0
+    # [WW_LATENCY] t0 = perf_counter at the first above-threshold frame (proxy for
+    # "last frame containing the wake word"). Renamed to _t0_wakeword for clarity;
+    # _first_hit_time alias kept to avoid touching stop-word paths accidentally.
+    _t0_wakeword: float = 0.0
+    _first_hit_time: float = 0.0  # alias — set together with _t0_wakeword
     # VAD gate multiplier: skip wake-word eval when idle and audio level is below
     # silence_threshold * this factor. Prevents silence-driven false triggers.
     _VAD_GATE_MULT = 0.8
@@ -722,7 +923,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     #      speech with no natural pauses.
     _was_vad_silent: bool = False
     _last_silent_frame_time: float = 0.0
-    _PRE_SILENCE_DISCOUNT_WINDOW = 0.5  # seconds since last silent frame
+    # DEF-149: widened 0.5 -> 1.0s. The pre-silence window must cover the brief
+    # pause PLUS the spoken "Hey Vox" itself (~0.5s): the stop-trigger fires at
+    # the END of "Hey Vox", so by then the pause is already ~0.5-0.7s old.
+    # At 0.5s that consistently just-missed (observed last_silent=0.56s blocked),
+    # forcing the slow consecutive path and repeated tries. 1.0s catches the
+    # natural "...sentence. Hey Vox" cadence while still expiring fast enough to
+    # keep mid-sentence protection (DEF-043 flares have no preceding silence).
+    _PRE_SILENCE_DISCOUNT_WINDOW = 1.0  # seconds since last silent frame
     _PRE_SILENCE_THRESHOLD_FACTOR = 0.85  # 15 % discount post-pause
 
     # User-effort metric: timestamps of every above-threshold wake attempt while
@@ -732,6 +940,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # days. Cleared on every recording.start.
     _recent_wake_attempts: list[float] = []
     _USER_EFFORT_WINDOW = 10.0
+    # DEF-151: one spoken "Hey Vox" produces 2+ consecutive trigger-frames
+    # ~30-100 ms apart; each used to count as a separate "attempt", inflating
+    # USER_EFFORT ~2x (the attempts=2 window=0.1s artifact class — 75 of 87
+    # events on 2026-06-10 were this). A real repeat requires re-saying the
+    # phrase (>= ~0.6 s), so frames closer than this gap are one utterance.
+    _USER_EFFORT_DEDUP_GAP = 0.5
 
     def _flush_user_effort() -> None:
         """Emit [USER_EFFORT] if multiple wake attempts piled up before start."""
@@ -791,7 +1005,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # delivers in 1024-frame periods (< chunk_size 1280)
                     # but stream.read() accumulates internally.
                     _stall = time.monotonic() - ctx.last_read_time
-                    if _stall > 5.0:
+                    # DEF-132: a freshly-(re)selected mic — especially Bluetooth
+                    # after an A2DP→HFP renegotiation — can take several seconds
+                    # to deliver its first PCM packet. Grant a longer first-read
+                    # window so the just-chosen device isn't evicted before it
+                    # warms up; reverts to 5 s the moment any data flows (flag
+                    # cleared on the successful-read path below).
+                    _stall_limit = _POST_SWITCH_STALL_SECS if ctx.mic_just_switched else 5.0
+                    if _stall > _stall_limit:
                         log(f"WARNING: No audio data for {_stall:.1f}s, forcing mic recovery")
                         try:
                             print(f"[mic] No audio data for {_stall:.1f}s, recovering", file=sys.stderr, flush=True)
@@ -830,8 +1051,21 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     ctx.last_read_time = time.monotonic()
                     continue
                 audio = np.frombuffer(_raw, dtype=np.int16)
+                # DEF-101: per-mic software capture gain. BT-HFP devices (G435
+                # etc.) deliver a low level the macOS input slider can't lift
+                # (slider is decoupled from the HFP codec gain). A per-mic
+                # `gain` in the active profile boosts the signal HERE — before
+                # level tracking, calibration, wake word, recording and STT —
+                # so every consumer sees the same lifted audio. No-op (zero
+                # copy) when gain is None/1.0; switches with the active profile.
+                if devices.active_profile is not None and devices.active_profile.gain:
+                    audio = apply_input_gain(audio, devices.active_profile.gain)
                 consecutive_errors = 0
                 ctx.last_read_time = time.monotonic()
+                if ctx.mic_just_switched:
+                    # DEF-132: first PCM packet after a switch arrived — drop the
+                    # extended first-read grace, back to the normal 5 s stall guard.
+                    ctx.mic_just_switched = False
 
                 # AUDIO-13: track last time we saw real audio (level >= 10).
                 # Also tally zero vs low-level chunks since the last reset so
@@ -924,7 +1158,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     ctx.audio_buffer.append(audio.copy())
                 elif not _is_rec and not _is_busy:
                     # Feed pre-roll buffer when idle -- captures audio before wake word
-                    _preroll_buffer.append(audio.copy())
+                    ctx.preroll_buffer.append(audio.copy())
 
             # Reset first-speech tracker and model reset timer when recording starts
             if _is_rec and not _was_rec:
@@ -967,6 +1201,33 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     model.reset()  # Clear corrupted wake word state (AUDIO-12)
                     consecutive_errors = 0
 
+                # DEF-104: hotplug self-restart check (idle-gated by this block,
+                # plus min daemon age + cooldown marker inside the helper).
+                if (now - _last_hotplug_check >= _HOTPLUG_CHECK_INTERVAL
+                        and now - _hotplug_start_time >= _HOTPLUG_MIN_AGE):
+                    _last_hotplug_check = now
+                    _maybe_restart_for_hotplug(
+                        devices, config, log, hud_send, ctx,
+                        cooldown=_HOTPLUG_RESTART_COOLDOWN,
+                    )
+
+                # DEF-163: keepalive PA staleness watchdog — auto-restart when
+                # the output stream can't reopen for 2min.
+                _ka = getattr(devices, "keepalive", None)
+                if _ka is not None and _ka.stale.is_set():
+                    log("WATCHDOG: keepalive PA context stale for 2min — auto-restarting to clear it")
+                    hud_send({"type": "error", "text": "Cues silent — restarting"})
+                    time.sleep(0.5)
+                    _release_singleton()
+                    try:
+                        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+                    except Exception as _ka_exc:
+                        log(f"WATCHDOG: execv failed ({_ka_exc}), falling back to subprocess restart")
+                        import subprocess as _sp
+                        _sp.Popen([sys.executable, "-m", "heyvox.main"],
+                                  start_new_session=True)
+                        ctx.shutdown.set()
+
                 # Memory watchdog -- check RSS every 60s
                 if now - _last_mem_check >= _MEM_CHECK_INTERVAL:
                     _last_mem_check = now
@@ -988,6 +1249,45 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     elif rss_mb > _MEM_WARN_MB:
                         log(f"WARNING: Memory usage high: {rss_mb:.0f} MB (threshold: {_MEM_WARN_MB} MB)")
                         hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
+
+                    # System-wide RAM pressure -> menu-bar banner. Distinct from
+                    # the self-RSS watchdog above (that restarts heyvox); this is
+                    # read-only and watches the WHOLE machine, because RAM pressure
+                    # is what forces MLX Whisper cold-reloads that silently slow STT.
+                    # Surfaced via HUDSurface (same banner primitive as mic-zombie).
+                    _mem_cfg = getattr(config, "memory", None)
+                    if _mem_cfg is None or _mem_cfg.monitor_system_ram:
+                        try:
+                            from heyvox import ram_pressure as _ram_pressure
+                            _ram_pressure.check_and_surface(
+                                warn_mb=(_mem_cfg.system_ram_warn_mb if _mem_cfg else 2048),
+                                crit_mb=(_mem_cfg.system_ram_critical_mb if _mem_cfg else 1024),
+                                log=log,
+                            )
+                        except Exception as _ram_exc:
+                            log(f"RAM-pressure check error: {_ram_exc}")
+
+                    # Volume-zero guard: warn whenever system output is near zero
+                    # so the user sees it in the menu bar / overlay before TTS arrives.
+                    # Skip while TTS is actively ducking (3% is intentional, not broken).
+                    # TTL 20s (slightly > 15s interval) so the banner persists
+                    # between ticks but auto-expires if the daemon dies.
+                    if not os.path.exists(TTS_PLAYING_FLAG):
+                        try:
+                            from heyvox.herald.coreaudio import get_system_volume_cached
+                            from heyvox.hud.surface import HUDSurface as _HUDSurface
+                            _vol = get_system_volume_cached(ttl=1.0)
+                            if _vol <= 0.05:
+                                _HUDSurface.banner(
+                                    "warn", "vol-zero",
+                                    f"Volume {int(round(_vol * 100))}% — TTS muted",
+                                    ttl_secs=20.0,
+                                )
+                                log(f"[VOL-ZERO] vol={_vol:.2f} — TTS will be inaudible")
+                            else:
+                                _HUDSurface.clear("vol-zero")
+                        except Exception:
+                            pass
 
             # Overlay health: relaunch if dead, kill duplicates
             _now_scan = time.time()
@@ -1028,7 +1328,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 elapsed = time.time() - ctx.recording_start_time
                 if elapsed > max_recording_secs:
                     log(f"Max recording duration ({max_recording_secs}s) reached, stopping")
-                    recording.stop()
+                    recording.stop(reason="max_duration")
                     continue
 
             # Track when user first starts speaking during recording
@@ -1088,7 +1388,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             quiet_pct = quiet_count / len(recent_chunks)
                             if quiet_pct >= 0.85:
                                 log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet), transcribing")
-                                recording.stop()
+                                recording.stop(reason="silence_timeout")
                                 continue
 
             if _is_busy:
@@ -1200,10 +1500,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     model.reset()
                     _last_model_reset = time.time()
                 _was_vad_silent = _vad_silent
-                # DEF-096-B: track most recent silent-frame timestamp so the
-                # threshold-discount block below can recognise the
-                # pause-then-Hey-Vox pattern.
-                if _vad_silent:
+                # DEF-096-B / DEF-149: track the most recent RAW silent-frame
+                # timestamp so the pre-silence discount recognises the
+                # "...sentence. [brief pause] Hey Vox" stop pattern. This MUST
+                # use _raw_vad_silent (instantaneous level < gate), NOT
+                # _vad_silent — the latter carries the DEF-053 grace (~0.5 s),
+                # which delays silence recognition by exactly as long as the
+                # pre-silence window (_PRE_SILENCE_DISCOUNT_WINDOW = 0.5 s), so
+                # the two never line up: _last_silent_frame_time stayed unset
+                # (silent=True count = 0), the discount + fast/window stop paths
+                # were blocked, and the user had to repeat "Hey Vox" 3x. The
+                # grace still governs the VAD eval-gate and the DEF-096-A model
+                # reset above; only the pre-silence clock reads the raw level.
+                if _raw_vad_silent:
                     _last_silent_frame_time = time.time()
             else:
                 _vad_silent = _raw_vad_silent
@@ -1241,10 +1550,17 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 )
                 _training_collector.save_tn(_neg_max_score)
 
-            # ECHO-02: Dynamic threshold in speaker mode
+            # ECHO-02: Dynamic threshold in speaker mode — IDLE ONLY. During
+            # a recording no TTS is playing (media paused via Hush, new TTS
+            # held behind RECORDING_FLAG, active TTS interrupted on wake), so
+            # the speaker-echo self-trigger this multiplier defends against
+            # cannot hit the stop path; echo suppression additionally mutes
+            # the mic during speaker-mode TTS. Keeping the 1.4x penalty while
+            # recording cost real stops: 2026-06-10 20:09 score=0.999 vs
+            # thr=0.91 (0.65 x 1.4) died as a single blocked frame.
             _speaker_mult = (
                 config.echo_suppression.speaker_threshold_multiplier
-                if not devices.headset_mode else 1.0
+                if (not devices.headset_mode and not _is_rec) else 1.0
             )
 
             # Cooldown is shorter during recording
@@ -1272,6 +1588,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             for ww_name, score in model.prediction_buffer.items():
                 s = score[-1]
+                # DEF-155: track the recording's peak score for stop-miss
+                # diagnostics — saved into fn_stop/tp_stop clip filenames so
+                # model-blind misses (peak≈0) and gate-blocked misses (peak
+                # near threshold) are distinguishable without log archaeology.
+                if _is_rec and s > ctx.rec_stop_score_max:
+                    ctx.rec_stop_score_max = s
                 base_thr = _model_thresholds.get(ww_name, threshold)
                 # Cap at 0.95 — openwakeword scores are in [0, 1], so any higher
                 # threshold makes triggering physically impossible. Prevents the
@@ -1335,7 +1657,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                             t for t in _recent_wake_attempts
                             if _now_attempt - t < _USER_EFFORT_WINDOW
                         ]
-                        _recent_wake_attempts.append(_now_attempt)
+                        # DEF-151: collapse trigger-frames of the same
+                        # utterance into one attempt (see constant above).
+                        if (
+                            not _recent_wake_attempts
+                            or _now_attempt - _recent_wake_attempts[-1]
+                            > _USER_EFFORT_DEDUP_GAP
+                        ):
+                            _recent_wake_attempts.append(_now_attempt)
 
                     # Dedicated tags for log-health digest grep:
                     # WAKE_VAD_DROP — model triggered but VAD post-filter killed
@@ -1374,7 +1703,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     # DEF-063: capture the moment the run of consecutive hits
                     # started, so wake→start latency can be measured below.
                     if prev == 0 and not _is_rec:
-                        _first_hit_time = time.time()
+                        _t0_wakeword = time.perf_counter()
+                        _first_hit_time = _t0_wakeword  # keep alias in sync
                     # DEF-103-B: append this frame to the per-ww sliding window
                     # used for the 2-of-4 stop-trigger path. Only relevant
                     # while recording; idle hits are ignored to avoid
@@ -1438,13 +1768,28 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     and not _vad_silent
                     and _recent_silence
                 )
+                # Ultra-confidence bypass: a single frame at >= 0.999 may
+                # stop WITHOUT the pre-silence gate (see constant rationale
+                # above — covers setups where the VAD never reports silence
+                # and every pre_silence-dependent lever is dead). Keeps the
+                # DEF-047 VAD-silent guard: dead-stream silence bursts must
+                # not self-stop the recording.
+                _ultra_stop = (
+                    _is_rec
+                    and triggered
+                    and s >= _ULTRA_CONFIDENCE_FAST_STOP
+                    and not _vad_silent
+                )
                 # Forensic tag: high-confidence stop-wake that the silence
                 # gate REJECTED. Pairs with the existing NEAR_MISS tag for
-                # idle-state borderline scores; same triage idea.
+                # idle-state borderline scores; same triage idea. Scores
+                # >= _ULTRA_CONFIDENCE_FAST_STOP no longer count as blocked
+                # — the ultra path fires for them.
                 if (
                     _is_rec
                     and triggered
                     and s > _HIGH_CONFIDENCE_FAST_STOP
+                    and s < _ULTRA_CONFIDENCE_FAST_STOP
                     and not _vad_silent
                     and not _recent_silence
                 ):
@@ -1460,33 +1805,92 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
                         f"last_silent={_silent_age} window={_PRE_SILENCE_DISCOUNT_WINDOW}s"
                     )
+                # DEF-118: extend DEF-117's silence-gate to the window-path.
+                # 2026-05-27 08:01:40 false stop fired with win=2/2 hits=2/2
+                # pre_silence=False on "Ich denke der Grund ist ein..." — two
+                # consecutive high-score frames in continuous German speech
+                # without any pause. Window was deliberately left ungated in
+                # DEF-117 on the assumption "sustained hits ... naturally
+                # more resistant to single-burst FPs"; field evidence on
+                # German speech-flow showed two-frame bursts occur there too.
+                # Shares _PRE_SILENCE_DISCOUNT_WINDOW with DEF-096-B and
+                # DEF-117 so all three knobs use the same time horizon.
                 _window_stop = (
                     _is_rec
                     and len(_stop_hit_window.get(ww_name, ()))
                     >= _STOP_WINDOW_HITS_REQUIRED
+                    and _recent_silence
                 )
+                # DEF-118 forensic: window-path that would have fired but
+                # the silence gate rejected it. Pattern P-detector-without-action.
+                if (
+                    _is_rec
+                    and len(_stop_hit_window.get(ww_name, ()))
+                    >= _STOP_WINDOW_HITS_REQUIRED
+                    and not _recent_silence
+                ):
+                    if _last_silent_frame_time > 0.0:
+                        _silent_age = (
+                            f"{_now_for_pre_silence - _last_silent_frame_time:.2f}s ago"
+                        )
+                    else:
+                        _silent_age = "never"
+                    log(
+                        f"[NEAR_MISS_WINDOW_BLOCKED] [{ww_name}] score={s:.3f} "
+                        f"thr={active_threshold:.2f} "
+                        f"vad={_vad_level}/{int(silence_threshold * _VAD_GATE_MULT)} "
+                        f"win={len(_stop_hit_window.get(ww_name, ()))}"
+                        f"/{_STOP_WINDOW_HITS_REQUIRED} "
+                        f"last_silent={_silent_age} window={_PRE_SILENCE_DISCOUNT_WINDOW}s"
+                    )
 
-                if _consec_trigger or _fast_stop or _window_stop:
+                if _consec_trigger or _fast_stop or _window_stop or _ultra_stop:
                     now = time.time()
                     if now - last_trigger > active_cooldown:
                         # DEF-063: wake→trigger latency (first hit → accumulation complete).
                         # Does not include model feature-window lag (~500 ms) or afplay
                         # subprocess spawn, but gives an apples-to-apples number for
                         # regressions inside the consecutive-frame gate.
-                        if not _is_rec and _first_hit_time > 0:
-                            log(f"[TIMING] wake→trigger: {(now - _first_hit_time) * 1000:.0f}ms "
-                                f"({active_frames_required} frames)")
+                        if not _is_rec and _t0_wakeword > 0:
+                            _t1_wakeword = time.perf_counter()
+                            _detect_ms = (_t1_wakeword - _t0_wakeword) * 1000
+                            log(
+                                f"[WW_LATENCY] detect={_detect_ms:.0f}ms "
+                                f"frames={active_frames_required} score={s:.3f}"
+                            )
                             _first_hit_time = 0.0
+                            _t0_wakeword = 0.0
+                        else:
+                            _t1_wakeword = 0.0
+                            _detect_ms = 0.0
                         # DEF-103: surface which trigger path fired so a
                         # follow-up regression in stop reliability can be
                         # attributed (consec / fast / window). Recording
                         # path only — start-wake always uses consec.
                         if _is_rec:
+                            # "ultra" labels stops ONLY the gate-bypass made
+                            # possible (fast would have fired anyway when
+                            # pre_silence was present) — its count is the
+                            # direct measure of the bypass's benefit, and
+                            # any FP-stop complaints trace back to it.
                             _path = (
                                 "fast" if _fast_stop
+                                else "ultra" if _ultra_stop
                                 else "window" if _window_stop
                                 else "consec"
                             )
+                            # DEF-151 observability: log the silent-frame age on
+                            # SUCCESSFUL stops too, so its distribution can be
+                            # compared against the *_BLOCKED tags' last_silent
+                            # — that comparison is what justified DEF-149's
+                            # 0.5->1.0s window and will justify (or veto) any
+                            # future re-tune without guesswork.
+                            if _last_silent_frame_time > 0.0:
+                                _silent_age_ok = (
+                                    f"{_now_for_pre_silence - _last_silent_frame_time:.2f}s"
+                                )
+                            else:
+                                _silent_age_ok = "never"
                             log(
                                 f"[STOP_PATH] [{ww_name}] path={_path} "
                                 f"score={s:.3f} "
@@ -1494,7 +1898,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 f"/{_STOP_WINDOW_HITS_REQUIRED} "
                                 f"hits={_consecutive_hits.get(ww_name, 0)}"
                                 f"/{active_frames_required} "
-                                f"pre_silence={_recent_silence}"
+                                f"pre_silence={_recent_silence} "
+                                f"last_silent={_silent_age_ok}"
                             )
                         # Training data: save TP-start and reclassify recent TN→FN
                         if _training_collector is not None and not _is_rec:
@@ -1519,23 +1924,43 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         elif use_separate_words:
                             if start_word in ww_name and not _is_rec:
                                 _flush_user_effort()
-                                recording.start(preroll=_preroll_buffer)
+                                # [WW_LATENCY] thread t1/detect_ms to recording.start via module globals
+                                import heyvox.main as _self_mod
+                                _self_mod._ww_t1 = _t1_wakeword
+                                _self_mod._ww_detect_ms = _detect_ms
+                                recording.start(preroll=ctx.preroll_buffer)
                             elif stop_word in ww_name and _is_rec:
                                 # Warmup: ignore stop-word in first _STOP_WARMUP_SECS
                                 # to prevent user's own speech from self-stopping.
                                 if time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                     log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
                                 else:
-                                    recording.stop()
+                                    recording.stop(reason="stop_wake")
                         else:
                             if not _is_rec:
                                 _flush_user_effort()
-                                recording.start(preroll=_preroll_buffer)
+                                # [WW_LATENCY] thread t1/detect_ms to recording.start via module globals
+                                import heyvox.main as _self_mod
+                                _self_mod._ww_t1 = _t1_wakeword
+                                _self_mod._ww_detect_ms = _detect_ms
+                                recording.start(preroll=ctx.preroll_buffer)
                             elif time.time() - _rec_started_at < _STOP_WARMUP_SECS:
                                 # Warmup: ignore self-trigger in first _STOP_WARMUP_SECS
                                 log(f"[wakeword] stop-trigger suppressed (warmup: {time.time() - _rec_started_at:.1f}s < {_STOP_WARMUP_SECS}s)")
                             else:
-                                recording.stop()
+                                recording.stop(reason="stop_wake")
+                    else:
+                        # DEF-151 observability: a full trigger swallowed by the
+                        # wake-cooldown was silent until now — the log showed
+                        # ">>> TRIGGER" with no recording.start and no reason
+                        # (observed 2026-06-10 07:53:33: two full-score triggers
+                        # vanished, user repeated and filed USER_EFFORT). Tagged
+                        # so log-health can attribute "heard but ignored" misses.
+                        log(
+                            f"[WAKE_COOLDOWN_DROP] [{ww_name}] score={s:.3f} "
+                            f"since_last={now - last_trigger:.1f}s "
+                            f"cooldown={active_cooldown:.1f}s is_rec={_is_rec}"
+                        )
                     model.reset()
 
     except KeyboardInterrupt:
@@ -1559,6 +1984,19 @@ def main() -> None:
     ensure_run_dirs()
     config = load_config()
 
+    # Telemetry: only start the background thread when the user has opted in.
+    # No-op when telemetry.enabled is False — the thread checks the flag each
+    # cycle, so a runtime toggle takes effect within one batch interval.
+    telemetry_started = False
+    try:
+        if config.telemetry.enabled:
+            from heyvox.telemetry.sender import start_background as _tm_start
+            _tm_start()
+            telemetry_started = True
+            log("Telemetry thread started")
+    except Exception as exc:
+        log(f"Telemetry init failed (continuing): {exc}")
+
     ctx, devices, recording, model, use_separate_words, hud_send, aec_active, profile_manager = _setup(config)
 
     from heyvox.audio.tts import shutdown as _shutdown_tts
@@ -1568,6 +2006,12 @@ def main() -> None:
                   profile_manager=profile_manager)
     finally:
         log("Cleaning up...")
+        if telemetry_started:
+            try:
+                from heyvox.telemetry.sender import stop_background as _tm_stop
+                _tm_stop(timeout=2.0)
+            except Exception:
+                pass
         cleanup_ipc_files(herald_too=False)
         if ctx.hud_client:
             ctx.hud_client.close()
@@ -1578,6 +2022,9 @@ def main() -> None:
         if config.tts.enabled:
             _shutdown_tts()
             log("TTS worker stopped")
+        _ka = getattr(devices, "keepalive", None)
+        if _ka is not None:
+            _ka.stop()
         devices.cleanup()
         log("Shutdown complete.")
 

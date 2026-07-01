@@ -1,0 +1,27 @@
+{
+  "_note": "Evidence-based reference, curated by hand from the 300-entry eval_sample + corpus-wide counts (3960 entries). 'corpus_count' = entries containing the WRONG form across the full transcripts.jsonl.",
+  "canonical_set": ["Claude", "Xero", "Conductor", "Herald", "Hush", "ngrid", "Mermaid"],
+  "content_corrections": [
+    {"right": "Claude", "wrong_forms": ["cloud", "cloud md", "cloudmd", "cloud code", "cloud cloud"], "kind": "public-tool", "corpus_count": 83, "in_sample": true,
+     "note": "Biggest content error. 'Cloud' 83x vs 'Claude' 24x correct. Needs domain context (Claude Code / CLAUDE.md)."},
+    {"right": "Xero", "wrong_forms": ["zero"], "kind": "public-brand", "corpus_count": 56, "in_sample": true,
+     "note": "Accounting SaaS. 'zero' 56x; some are the literal number, most are Xero in this finance-heavy corpus."},
+    {"right": "Conductor", "wrong_forms": ["contactor", "kontaktor", "croad", "reset contact"], "kind": "app-name", "corpus_count": 7, "in_sample": true},
+    {"right": "Herald", "wrong_forms": ["harold"], "kind": "private-project", "corpus_count": 12, "in_sample": true,
+     "note": "Mis-transcribed MORE often (12x) than correct (7x)."},
+    {"right": "Hush", "wrong_forms": ["hash"], "kind": "private-project", "corpus_count": 7, "in_sample": true,
+     "note": "Ambiguous: 'hash' is also a real word; needs context (audio/media)."},
+    {"right": "ngrid", "wrong_forms": ["engrid", "in grid", "and grid"], "kind": "private-project", "corpus_count": 2, "in_sample": true,
+     "note": "Canonical 'ngrid' NEVER spelled correctly (0x). 100% error rate, low volume."},
+    {"right": "Mermaid", "wrong_forms": ["mermet", "mermay"], "kind": "public-tool", "corpus_count": 1, "in_sample": true, "note": "Marginal, low volume."}
+  ],
+  "names_low_confidence": {
+    "_note": "Person names — canonical spelling UNKNOWN to a generic model; only correctable with a user seed list. Excluded from strict scoring.",
+    "examples": ["Muslima/Muslim/M.S.S./MSS", "NEM/Nam", "Marco", "Aaron", "Steven", "Andrew", "Ben"]
+  },
+  "out_of_scope_wakeword_leakage": {
+    "_note": "DOMINANT error class (686/3960 entries ~17%). MUST be EXCLUDED from the initial_prompt glossary: biasing Whisper toward 'Hey Vox' would INCREASE false wake-word emission. Already handled downstream by strip_wake_words().",
+    "corpus_count": 686,
+    "variants_seen": ["Hey Vox", "Hey box", "Hey Wox", "Hey Wux", "Hey Wops", "Hey Wax", "Hey walk", "Hey works", "Hey folks", "Hey John", "Hey Jarvis", "Hey Travis", "Hey Chavis", "Hey Charvis", "Hey Chuck", "Hey ciao", "Hey job", "APox", "Heybox", "Haywax", "Haywalk", "HEMBOX", "HR", "HRVS", "hand box", "hoi box"]
+  }
+}

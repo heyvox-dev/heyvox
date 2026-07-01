@@ -8,8 +8,11 @@ Uses CoreAudio to filter out paired-but-disconnected Bluetooth devices.
 
 import ctypes
 import ctypes.util
+import hashlib
+import threading
 import time
 from contextlib import contextmanager
+from typing import Callable
 
 import numpy as np
 import pyaudio
@@ -17,7 +20,7 @@ import pyaudio
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 
 # Re-export for use by hotplug scan in main.py
-__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch"]
+__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch", "start_pa_hotplug_watcher", "stop_pa_hotplug_watcher"]
 
 
 def _log(msg: str) -> None:
@@ -40,22 +43,25 @@ def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
         yield
         return
 
-    _saved_vol = None
+    _was_muted = None
     try:
-        from heyvox.herald.coreaudio import get_system_volume, set_system_volume
-        _saved_vol = get_system_volume()
-        set_system_volume(0.0)
+        from heyvox.herald.coreaudio import is_system_muted, set_system_muted
+        _was_muted = is_system_muted()
+        if not _was_muted:
+            _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' muting output")
+            set_system_muted(True)
     except Exception:
         pass
 
     try:
         yield
     finally:
-        if _saved_vol is not None:
+        if _was_muted is False:
             time.sleep(settle_secs)
             try:
-                from heyvox.herald.coreaudio import set_system_volume
-                set_system_volume(_saved_vol)
+                from heyvox.herald.coreaudio import set_system_muted
+                set_system_muted(False)
+                _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' unmuted")
             except Exception:
                 pass
 
@@ -116,26 +122,31 @@ _kAudioObjectPropertyElementMain = 0
 _kAudioObjectPropertyName = _fourcc("lnam")
 _kAudioDevicePropertyDeviceIsAlive = _fourcc("livn")
 _kAudioDevicePropertyStreams = _fourcc("stm#")
+_kAudioDevicePropertyTransportType = _fourcc("tran")
+_kAudioDeviceTransportTypeBluetooth = _fourcc("blue")
+_kAudioDeviceTransportTypeBluetoothLE = _fourcc("blea")
 _kCFStringEncodingUTF8 = 0x08000100
 
 
-def get_dead_input_device_names() -> set[str]:
-    """Return names of CoreAudio input devices that are not alive.
+def _enumerate_coreaudio_inputs() -> list[tuple[str, bool, int]]:
+    """Return ``[(device_name, is_alive, transport)]`` for every CoreAudio
+    device that has input streams. ``transport`` is the CoreAudio transport-type
+    four-char-code (e.g. 'blue' = Bluetooth) used to exclude BT from DEF-104.
 
-    macOS keeps paired-but-disconnected Bluetooth devices in the audio device
-    list. PyAudio still enumerates them and can even open streams that return
-    low-level noise, causing find_best_mic to select a phantom device.
+    Hits the **live** CoreAudio HAL directly via ctypes, bypassing PortAudio's
+    per-process device cache. That cache is the root of DEF-104: a device
+    hotplugged after the daemon's first PortAudio init is invisible to every
+    PortAudio code path (``get_device_count``, ``find_best_mic``, the hotplug
+    watcher) until the process restarts — but it shows up here immediately.
+    ``get_live_input_device_names`` uses this to detect that exact mismatch.
 
-    This function queries CoreAudio's kAudioDevicePropertyDeviceIsAlive to
-    identify dead devices so they can be skipped during mic selection.
-
-    Returns an empty set if CoreAudio is unavailable (graceful degradation).
+    Returns ``[]`` if CoreAudio is unavailable (graceful degradation).
     """
     try:
         ca_path = ctypes.util.find_library("CoreAudio")
         cf_path = ctypes.util.find_library("CoreFoundation")
         if not ca_path or not cf_path:
-            return set()
+            return []
 
         ca = ctypes.cdll.LoadLibrary(ca_path)
         cf = ctypes.cdll.LoadLibrary(cf_path)
@@ -192,7 +203,7 @@ def get_dead_input_device_names() -> set[str]:
             for i in range(device_count)
         ]
 
-        dead_names = set()
+        results: list[tuple[str, bool, int]] = []
         for did in device_ids:
             # Check if device has input streams
             stream_addr = _AudioObjectPropertyAddress(
@@ -223,32 +234,105 @@ def get_dead_input_device_names() -> set[str]:
             )
             if status != 0:
                 continue
+            is_alive = alive_val.value != 0
 
-            if alive_val.value == 0:
-                # Device is dead — get its name
-                name_addr = _AudioObjectPropertyAddress(
-                    _kAudioObjectPropertyName,
-                    _kAudioObjectPropertyScopeGlobal,
-                    _kAudioObjectPropertyElementMain,
-                )
-                cfstr = ctypes.c_void_p(0)
-                name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
-                status = ca.AudioObjectGetPropertyData(
-                    ctypes.c_uint32(did), ctypes.byref(name_addr),
-                    ctypes.c_uint32(0), None, ctypes.byref(name_size),
-                    ctypes.byref(cfstr),
-                )
-                if status == 0 and cfstr.value:
-                    name = cfstr_to_str(cfstr.value)
-                    cf.CFRelease(cfstr)
-                    if name:
-                        dead_names.add(name.lower())
-                        _log(f"  CoreAudio: '{name}' is not alive (disconnected)")
+            # Fetch the name for EVERY input device (the original code only
+            # named dead ones; live detection needs names for live ones too).
+            name_addr = _AudioObjectPropertyAddress(
+                _kAudioObjectPropertyName,
+                _kAudioObjectPropertyScopeGlobal,
+                _kAudioObjectPropertyElementMain,
+            )
+            cfstr = ctypes.c_void_p(0)
+            name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
+            status = ca.AudioObjectGetPropertyData(
+                ctypes.c_uint32(did), ctypes.byref(name_addr),
+                ctypes.c_uint32(0), None, ctypes.byref(name_size),
+                ctypes.byref(cfstr),
+            )
+            if status == 0 and cfstr.value:
+                name = cfstr_to_str(cfstr.value)
+                cf.CFRelease(cfstr)
+                if name:
+                    # Transport type (four-char-code) — used to exclude
+                    # Bluetooth mics from the DEF-104 self-restart (DEF-147).
+                    transport = 0
+                    trans_addr = _AudioObjectPropertyAddress(
+                        _kAudioDevicePropertyTransportType,
+                        _kAudioObjectPropertyScopeGlobal,
+                        _kAudioObjectPropertyElementMain,
+                    )
+                    trans_val = ctypes.c_uint32(0)
+                    trans_size = ctypes.c_uint32(4)
+                    if ca.AudioObjectGetPropertyData(
+                        ctypes.c_uint32(did), ctypes.byref(trans_addr),
+                        ctypes.c_uint32(0), None, ctypes.byref(trans_size),
+                        ctypes.byref(trans_val),
+                    ) == 0:
+                        transport = trans_val.value
+                    results.append((name, is_alive, transport))
 
-        return dead_names
+        return results
     except Exception as e:
-        _log(f"  CoreAudio alive check failed: {e}")
-        return set()
+        _log(f"  CoreAudio enumeration failed: {e}")
+        return []
+
+
+def get_dead_input_device_names() -> set[str]:
+    """Return names (lowercase) of CoreAudio input devices that are NOT alive.
+
+    macOS keeps paired-but-disconnected Bluetooth devices in the audio device
+    list. PyAudio still enumerates them and can even open streams that return
+    low-level noise, causing find_best_mic to select a phantom device. Querying
+    CoreAudio's kAudioDevicePropertyDeviceIsAlive lets find_best_mic skip them.
+
+    Returns an empty set if CoreAudio is unavailable (graceful degradation).
+    """
+    dead: set[str] = set()
+    for name, alive, _transport in _enumerate_coreaudio_inputs():
+        if not alive:
+            dead.add(name.lower())
+            _log(f"  CoreAudio: '{name}' is not alive (disconnected)")
+    return dead
+
+
+def get_live_input_device_names() -> set[str]:
+    """Return names (lowercase) of CoreAudio input devices that ARE alive.
+
+    The live-HAL view used to detect DEF-104 hotplugs that PortAudio's cached
+    enumeration misses: a device present here but absent from PortAudio's
+    ``get_device_count()`` was plugged in after the daemon started and stays
+    invisible to every PortAudio code path until the process restarts. Empty
+    set if CoreAudio is unavailable (graceful degradation — detection simply
+    no-ops rather than false-firing a restart).
+    """
+    return {name.lower() for name, alive, _t in _enumerate_coreaudio_inputs() if alive}
+
+
+def get_bluetooth_input_device_names() -> set[str]:
+    """Return names (lowercase) of CoreAudio input devices on a Bluetooth
+    transport (classic BT or BLE).
+
+    DEF-147: the DEF-104 hotplug self-restart must NEVER fire for a Bluetooth
+    mic. A BT-HFP device is chronically "live in CoreAudio but absent from
+    PortAudio" as it flaps between A2DP (output-only) and HFP (bidirectional),
+    so the DEF-104 detector misreads it as a fresh USB hotplug and restarts the
+    daemon — and each restart tears the fragile SCO link apart, killing the mic
+    (the exact regression a user hit: G435 over BT died repeatedly, then was
+    stable the moment HeyVox was stopped). BT has its own A2DP->HFP path
+    (``_bt_trigger_hfp_switch``) and never needs a process restart. Empty set if
+    CoreAudio is unavailable (graceful degradation — the BT exclusion simply
+    doesn't apply, leaving DEF-104's prior behaviour intact).
+    """
+    bt_types = {
+        _kAudioDeviceTransportTypeBluetooth,
+        _kAudioDeviceTransportTypeBluetoothLE,
+    }
+    return {
+        name.lower()
+        for name, _alive, transport in _enumerate_coreaudio_inputs()
+        if transport in bt_types
+    }
 
 
 def force_os_default_input(name_substr: str) -> bool:
@@ -469,16 +553,21 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         result = {"level": 0, "err": None, "stream": None}
         done = threading.Event()
 
-        # Save system volume up front so the outer thread can restore it even
-        # if we abandon the probe worker mid-mute.
-        saved_vol = None
+        # Mute output while probing to hide the A2DP→HFP pop. Use the OS mute
+        # flag rather than setting volume=0 so Bluetooth headsets in HFP mode
+        # do not receive a volume=0 HFP command (which the G435 and similar
+        # headsets remember and later re-report, causing macOS to reset the
+        # system volume to 0).
+        _probe_was_muted = None
         if not is_builtin_mic(name):
             try:
-                from heyvox.herald.coreaudio import get_system_volume, set_system_volume
-                saved_vol = get_system_volume()
-                set_system_volume(0.0)
+                from heyvox.herald.coreaudio import is_system_muted, set_system_muted
+                _probe_was_muted = is_system_muted()
+                if not _probe_was_muted:
+                    _log(f"[VOL] probe_level mute: device='{name}' muting output")
+                    set_system_muted(True)
             except Exception:
-                saved_vol = None
+                _probe_was_muted = None
 
         def _probe() -> None:
             try:
@@ -528,11 +617,12 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                     s.close()
                 except Exception:
                     pass
-            if saved_vol is not None:
+            if _probe_was_muted is False:
                 time.sleep(0.8)
                 try:
-                    from heyvox.herald.coreaudio import set_system_volume
-                    set_system_volume(saved_vol)
+                    from heyvox.herald.coreaudio import set_system_muted
+                    set_system_muted(False)
+                    _log(f"[VOL] probe_level unmute: device='{name}'")
                 except Exception:
                     pass
 
@@ -787,3 +877,127 @@ def clear_device_cooldowns() -> None:
     _device_failure_counts.clear()
     if count:
         _log(f"Device cooldowns cleared ({count} device(s) released)")
+
+
+# ---------------------------------------------------------------------------
+# USB hotplug watcher — DEF-104 diagnostic
+# ---------------------------------------------------------------------------
+#
+# Background thread that polls the PortAudio device list and logs a
+# [USB_HOTPLUG] tag whenever the (index, name, max_input_channels) tuple-set
+# changes. Catches the moment of USB re-enumeration that strands HeyVox on a
+# stale PA index (G435 0→1 drift in DEF-104). Without this watcher, the drift
+# is only logged as a side-effect during the next AUDIO-13 reinit — minutes
+# after the actual hotplug event.
+#
+# Cost: one short PA enumeration every interval (~5–20 ms). Safe to run while
+# the DeviceManager owns its own PA instance — we use a getter callback rather
+# than a captured reference so the watcher always queries the *current* PA
+# (DeviceManager rebuilds its PA on reinit; a captured ref would go stale).
+
+_pa_hotplug_thread: threading.Thread | None = None
+_pa_hotplug_stop = threading.Event()
+
+
+def _enumerate_pa_signature(pa: pyaudio.PyAudio) -> list[tuple[int, str, int]]:
+    """Return [(index, name, max_input_channels), ...] for all PA devices.
+
+    Used by the hotplug watcher and only logs structure, not levels, so it's
+    safe to call as often as needed.
+    """
+    out: list[tuple[int, str, int]] = []
+    try:
+        n = pa.get_device_count()
+    except Exception:
+        return out
+    for i in range(n):
+        try:
+            d = pa.get_device_info_by_index(i)
+            out.append((
+                i,
+                str(d.get("name", "")),
+                int(d.get("maxInputChannels", 0)),
+            ))
+        except Exception:
+            continue
+    return out
+
+
+def _hash_pa_signature(sig: list[tuple[int, str, int]]) -> str:
+    """Short stable hash of the device signature for change detection."""
+    s = "|".join(f"{i}:{n}:{c}" for i, n, c in sig)
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
+
+
+def _pa_hotplug_loop(get_pa: Callable[[], pyaudio.PyAudio | None], interval_secs: float) -> None:
+    """Poll PA device list; log [USB_HOTPLUG] on every change."""
+    last_sig: list[tuple[int, str, int]] = []
+    last_hash = ""
+    started = False
+    while not _pa_hotplug_stop.is_set():
+        try:
+            pa = get_pa()
+            if pa is None:
+                # DeviceManager rebuilding — skip this tick, try again later
+                if _pa_hotplug_stop.wait(interval_secs):
+                    break
+                continue
+            cur_sig = _enumerate_pa_signature(pa)
+            cur_hash = _hash_pa_signature(cur_sig)
+            if not started:
+                _log(
+                    f"[USB_HOTPLUG] watcher started: {len(cur_sig)} devices, "
+                    f"hash={cur_hash}"
+                )
+                started = True
+                last_sig, last_hash = cur_sig, cur_hash
+            elif cur_hash != last_hash:
+                old_set = {(i, n, c) for i, n, c in last_sig}
+                new_set = {(i, n, c) for i, n, c in cur_sig}
+                added = sorted(new_set - old_set)
+                removed = sorted(old_set - new_set)
+                _log(
+                    f"[USB_HOTPLUG] device list changed: "
+                    f"{last_hash} -> {cur_hash} "
+                    f"(+{len(added)}/-{len(removed)}) "
+                    f"added={added!r} removed={removed!r}"
+                )
+                last_sig, last_hash = cur_sig, cur_hash
+        except Exception as e:
+            _log(f"[USB_HOTPLUG] watcher error (continuing): {e}")
+        if _pa_hotplug_stop.wait(interval_secs):
+            break
+
+
+def start_pa_hotplug_watcher(
+    get_pa: Callable[[], pyaudio.PyAudio | None],
+    interval_secs: float = 10.0,
+) -> None:
+    """Start the USB hotplug watcher thread (idempotent).
+
+    Args:
+        get_pa: Callable returning the current PortAudio instance (or None
+            during a transient rebuild). Use a closure over DeviceManager
+            rather than capturing a reference — DeviceManager rebuilds its
+            PA on reinit and stale refs would silently report old state.
+        interval_secs: Poll interval. 10s is a reasonable default — fine-grained
+            enough to bracket a slow speaker, cheap enough at ~5–20 ms per poll.
+
+    Requirement: DEF-104 diagnostic instrumentation.
+    """
+    global _pa_hotplug_thread
+    if _pa_hotplug_thread is not None and _pa_hotplug_thread.is_alive():
+        return
+    _pa_hotplug_stop.clear()
+    _pa_hotplug_thread = threading.Thread(
+        target=_pa_hotplug_loop,
+        args=(get_pa, interval_secs),
+        name="pa-hotplug-watcher",
+        daemon=True,
+    )
+    _pa_hotplug_thread.start()
+
+
+def stop_pa_hotplug_watcher() -> None:
+    """Signal the watcher to exit. No-op if not started."""
+    _pa_hotplug_stop.set()

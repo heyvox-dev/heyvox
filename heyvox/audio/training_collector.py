@@ -37,6 +37,35 @@ logger = logging.getLogger(__name__)
 _MIN_SPEECH_RMS = 300
 _MIC_TAG_MAX_LEN = 40
 
+# Subtype prefix inside a category dir, e.g. "fn_stop_..." / "tp_start_...".
+# Used by _prune to balance deletions across subtypes (DEF-157).
+_SUBTYPE_RE = re.compile(r"^(?:tp|fp|tn|fn)_(start|stop)_")
+
+
+def classify_stop_outcome(
+    stop_reason: str, end_stripped: bool, has_text: bool
+) -> str | None:
+    """Decide the training label for a finished recording's audio tail.
+
+    Returns "tp", "fn", or None (don't collect). Centralised so the
+    labeling rules are unit-testable away from the recording pipeline:
+
+    - A recording ended BY the stop wake word is a confirmed detection →
+      "tp". This includes transcripts that still needed a text-level
+      wake-word strip — that is the DEF-091 imperfect-audio-trim case,
+      NOT a miss (mislabeling it as FN was DEF-155).
+    - A recording ended any other way (silence_timeout, ptt_interrupt,
+      max_duration) whose transcript had a wake word stripped from its
+      END is a proven miss → "fn": the user audibly spoke the stop word
+      (STT heard it) but the detector never fired.
+    - A start-only strip proves nothing about the stop detector and a
+      stop_wake recording with no usable text is likely a false trigger
+      (the FP paths handle it) → None.
+    """
+    if stop_reason == "stop_wake":
+        return "tp" if has_text else None
+    return "fn" if end_stripped else None
+
 
 def _sanitize_mic_tag(name: str) -> str:
     """Turn a device name into a filesystem-safe kebab-case tag."""
@@ -159,8 +188,15 @@ class TrainingCollector:
         return 0
 
     def save_tp_stop(self, audio_chunks: list, sample_rate: int, score: float = 0.0) -> bool:
-        """Save a confirmed stop-trigger positive from recording tail."""
-        audio = self._extract_tail(audio_chunks, sample_rate)
+        """Save a confirmed stop-trigger positive from recording tail.
+
+        Callers must pass the UN-trimmed tail: the wake-word audio trim
+        removes ~0.5s from the end, which is most of the spoken stop word —
+        clips cut from trimmed audio contain no wake word at all and are
+        worthless as positives (DEF-156). `score` is the stop-trigger /
+        observed-max score so clip quality is gradeable from the filename.
+        """
+        audio = self._extract_speech_tail(audio_chunks, sample_rate)
         if audio is None:
             return False
         return self._save("tp", audio, score, suffix="stop")
@@ -214,16 +250,23 @@ class TrainingCollector:
     # FN: False Negatives
     # ------------------------------------------------------------------
 
-    def save_fn_stop(self, audio_chunks: list, sample_rate: int) -> bool:
+    def save_fn_stop(
+        self, audio_chunks: list, sample_rate: int, score: float = 0.0
+    ) -> bool:
         """Save a false negative — STT proved wake word was in recording tail.
 
-        Called when strip_wake_words() removes text from the transcription,
-        meaning the model failed to detect the wake word during recording.
+        Call only when classify_stop_outcome() returns "fn" (recording NOT
+        ended by the stop-wake path + end-strip proof — DEF-155). Pass the
+        UN-trimmed tail; a silence-timeout recording carries ~timeout secs
+        of silence after the missed wake word, which _extract_speech_tail
+        skips. `score` is the highest stop-score the model produced during
+        the recording, so model-blind misses (score≈0) and gate-blocked
+        misses (score near threshold) are distinguishable from the filename.
         """
-        audio = self._extract_tail(audio_chunks, sample_rate)
+        audio = self._extract_speech_tail(audio_chunks, sample_rate)
         if audio is None:
             return False
-        return self._save("fn", audio, 0.0, suffix="stop")
+        return self._save("fn", audio, score, suffix="stop")
 
     def reclassify_fn_start(self) -> int:
         """Reclassify recent TN saves as FN if a trigger follows within the window.
@@ -273,6 +316,43 @@ class TrainingCollector:
             return None
         return audio
 
+    def _extract_speech_tail(
+        self, audio_chunks: list, sample_rate: int
+    ) -> np.ndarray | None:
+        """Extract a ~2s window ending just after the LAST speech activity.
+
+        Unlike _extract_tail (verbatim last 2s), this skips trailing
+        silence first. A recording ended by silence-timeout carries
+        ~timeout seconds of silence after the missed stop wake word — the
+        verbatim tail is pure silence and the RMS gate discards exactly
+        the FN clips we most need (DEF-155). Falls back to _extract_tail
+        when no speech-level frame is found.
+        """
+        if not audio_chunks:
+            return None
+        try:
+            full = np.concatenate(audio_chunks)
+        except (ValueError, TypeError):
+            return None
+        frame = max(1, int(0.05 * sample_rate))
+        n = (len(full) // frame) * frame
+        if n == 0:
+            return None
+        frames = full[:n].reshape(-1, frame).astype(np.float64)
+        rms_per_frame = np.sqrt((frames**2).mean(axis=1))
+        speech_idx = np.nonzero(rms_per_frame >= _MIN_SPEECH_RMS)[0]
+        if len(speech_idx) == 0:
+            return self._extract_tail(audio_chunks, sample_rate)
+        # End the window ~0.25s after the last speech frame so the final
+        # word's decay isn't clipped.
+        end = min(len(full), (int(speech_idx[-1]) + 1) * frame + int(0.25 * sample_rate))
+        clip_samples = int(2.0 * sample_rate)
+        audio = full[max(0, end - clip_samples):end]
+        rms = int(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        if rms < _MIN_SPEECH_RMS:
+            return None
+        return audio
+
     def _save(self, category: str, audio: np.ndarray, score: float,
               suffix: str = "", return_path: bool = False):
         """Save a clip to the given category directory."""
@@ -309,14 +389,32 @@ class TrainingCollector:
         return True
 
     def _prune(self, category: str) -> None:
-        """Remove oldest clips in a category if over limit."""
+        """Remove oldest clips (by mtime) when a category exceeds the limit.
+
+        Deletions come from the LARGEST subtype group (fn_stop vs fn_start
+        etc.) so a high-volume subtype cannot evict a rarer one. The old
+        `sorted(glob)` sorted alphabetically: "tp_start_*" < "tp_stop_*"
+        meant every tp_start clip — regardless of age — was deleted before
+        any tp_stop, silently erasing the whole subtype (DEF-157).
+        """
         cat_dir = self._dirs[category]
-        clips = sorted(cat_dir.glob("*.wav"))
-        if len(clips) <= self._max_clips:
+        clips = list(cat_dir.glob("*.wav"))
+        excess = len(clips) - self._max_clips
+        if excess <= 0:
             return
-        for clip in clips[: len(clips) - self._max_clips]:
+        groups: dict[str, list[Path]] = {}
+        for clip in clips:
+            m = _SUBTYPE_RE.match(clip.name)
+            groups.setdefault(m.group(1) if m else "", []).append(clip)
+        for group in groups.values():
+            # Newest first so .pop() removes the oldest.
+            group.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for _ in range(excess):
+            largest = max(groups.values(), key=len)
+            if not largest:
+                break
             try:
-                clip.unlink()
+                largest.pop().unlink()
             except OSError:
                 pass
 

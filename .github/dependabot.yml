@@ -1,0 +1,21 @@
+# Dependabot — automated dependency-update PRs.
+# Python deps are floating (>=) with no lockfile, and several (mlx-whisper,
+# kokoro) are pre-1.0 / fast-moving; this surfaces upstream bumps as reviewable
+# PRs instead of silent breakage on the next fresh install.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

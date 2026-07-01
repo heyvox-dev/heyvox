@@ -45,7 +45,13 @@ def get_cues_dir(config_cues_dir: str = "") -> str:
     return resolved
 
 
-def audio_cue(name: str, cues_dir: str | None = None) -> None:
+def audio_cue(
+    name: str,
+    cues_dir: str | None = None,
+    *,
+    t1: float = 0.0,
+    detect_ms: float = 0.0,
+) -> None:
     """Play an audio cue by name and set wake word suppression window.
 
     Uses afplay (macOS built-in) to play the file asynchronously.
@@ -55,6 +61,12 @@ def audio_cue(name: str, cues_dir: str | None = None) -> None:
     Args:
         name: Cue name without extension (e.g. "listening", "ok", "paused").
         cues_dir: Directory containing .aiff files. Defaults to package cues/.
+        t1: perf_counter timestamp at trigger commit (from wake-word path). When
+            non-zero, logs [WW_LATENCY] feedback/total lines at t2 dispatch point.
+            Keyword-only so existing call sites are unaffected (default 0.0).
+        detect_ms: Pre-computed (t1-t0)*1000 from the wake-word path. Passed in
+            so the total latency line can be emitted here without needing t0.
+            Keyword-only, default 0.0.
     """
     global _cue_suppress_until
 
@@ -65,10 +77,34 @@ def audio_cue(name: str, cues_dir: str | None = None) -> None:
     if not os.path.exists(cue_file):
         return
 
+    # [WW_LATENCY] t2: dispatch timestamp, captured after file-existence check but
+    # before the suppression window update and before any Popen/stream call. This
+    # measures from trigger commit (t1) to the moment afplay/stream is invoked.
+    if t1 > 0.0:
+        t2 = time.perf_counter()
+        feedback_ms = (t2 - t1) * 1000
+        total_ms = detect_ms + feedback_ms
+        print(
+            f"[WW_LATENCY] feedback={feedback_ms:.0f}ms total={total_ms:.0f}ms cue={name}",
+            flush=True,
+        )
+
     # Estimate cue duration for suppression window (safe default for short files)
     duration = 1.0
     with _suppress_lock:
         _cue_suppress_until = time.time() + duration + 0.5
+
+    # DEF-150: on a USB power-saving output (G535 over Lightspeed) a fresh
+    # afplay process opens a cold stream and its short cue is swallowed. Route
+    # the cue through the already-warm keep-alive stream instead. Returns False
+    # on built-in/BT/virtual outputs (no keep-alive stream is held there) — then
+    # fall back to afplay, which has no cold-start problem on those devices.
+    try:
+        from heyvox.audio.keepalive import play_cue_via_stream
+        if play_cue_via_stream(name, cue_file):
+            return
+    except Exception:
+        pass
 
     subprocess.Popen(
         ["afplay", cue_file],

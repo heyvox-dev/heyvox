@@ -27,12 +27,227 @@ _PTT_KEY_FLAGS = {
 ESCAPE_KEYCODE = 53
 
 
-def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], None] | None = None) -> threading.Thread | None:
+class GestureRecognizer:
+    """Turns raw PTT-key down/up edges into recording actions.
+
+    Quartz-free and deterministic so it can be unit-tested without an event
+    tap. ``start_ptt_listener`` builds one of these and feeds it ``on_key_down``
+    / ``on_key_up`` from the CGEventTap callback.
+
+    Three gestures on a single key:
+
+    * **Hold** → push-to-talk. The key going down arms a one-shot timer of
+      ``tap_max_secs``; if the key is still held when it fires, we commit to PTT
+      (``start_ptt``) and stop on release (``stop_ptt``). Recording therefore
+      starts ~``tap_max_secs`` after the press — the caller hides this latency
+      by passing the idle pre-roll buffer to ``start_ptt`` so no speech is lost.
+    * **Double-tap** → hands-free. Two quick taps (each shorter than
+      ``tap_max_secs``, gap ≤ ``double_tap_secs``) fire ``start_handsfree``. The
+      recording then runs until the main loop stops it on silence / stop wake
+      word, or the user taps once more (toggle-off).
+    * **Tap while recording** → ``stop_other``. A single tap during an active
+      wake-word OR hands-free recording stops it (the legacy DEF-116 behavior,
+      now also the hands-free toggle-off).
+
+    A single isolated tap is a no-op — strictly better than the old behavior
+    where a quick tap started+discarded a sub-``min_recording_secs`` recording.
+
+    When ``double_tap_enabled`` is False the key reverts to classic instant
+    push-to-talk: down starts immediately, up stops, no timer, no latency.
+
+    Args:
+        actions: callables ``start_ptt``, ``stop_ptt``, ``start_handsfree``,
+            ``stop_other``. Missing keys are treated as no-ops.
+        queries: callables ``is_busy`` / ``is_recording`` returning bool.
+        double_tap_enabled: enable the double-tap → hands-free gesture.
+        tap_max_secs: max press duration counted as a "tap"; also the hold
+            promotion delay.
+        double_tap_secs: max gap between the two taps.
+        timer_factory: ``f(delay, callback) -> obj`` with ``.start()`` /
+            ``.cancel()``. Defaults to ``threading.Timer``; tests inject a fake.
+        clock: monotonic-ish time source (defaults to ``time.time``).
+        log: optional ``callable(str)``.
+    """
+
+    def __init__(
+        self,
+        *,
+        actions: dict,
+        queries: dict,
+        double_tap_enabled: bool = True,
+        tap_max_secs: float = 0.2,
+        double_tap_secs: float = 0.35,
+        timer_factory=None,
+        clock=time.time,
+        log: Callable[[str], None] | None = None,
+    ) -> None:
+        self._actions = actions
+        self._queries = queries
+        self._double_tap_enabled = double_tap_enabled
+        self._tap_max_secs = tap_max_secs
+        self._double_tap_secs = double_tap_secs
+
+        def _default_timer(delay, cb):
+            return threading.Timer(delay, cb)
+
+        self._timer_factory = timer_factory or _default_timer
+        self._clock = clock
+        self._log = log
+
+        self._lock = threading.Lock()
+        self._held = False
+        # "idle" | "ptt" | "handsfree" — the mode of the recording WE started.
+        # A wake-word recording shows up via queries.is_recording() while _mode
+        # stays "idle"; that's intentional (a tap then toggles it off).
+        self._mode = "idle"
+        self._last_tap_up = 0.0
+        self._hold_timer = None
+        self._awaiting_hf_release = False
+
+    # -- helpers ---------------------------------------------------------
+    def _q(self, name: str) -> bool:
+        fn = self._queries.get(name)
+        try:
+            return bool(fn()) if fn else False
+        except Exception:
+            return False
+
+    def _act(self, name: str) -> None:
+        fn = self._actions.get(name)
+        if fn:
+            fn()
+
+    def _log_msg(self, msg: str) -> None:
+        if self._log:
+            self._log(msg)
+
+    def _cancel_hold_timer(self) -> None:
+        if self._hold_timer is not None:
+            try:
+                self._hold_timer.cancel()
+            except Exception:
+                pass
+            self._hold_timer = None
+
+    def _arm_hold_timer(self) -> None:
+        self._cancel_hold_timer()
+        self._hold_timer = self._timer_factory(self._tap_max_secs, self._on_hold_timeout)
+        self._hold_timer.start()
+
+    def _sync_mode(self) -> None:
+        """Reconcile _mode with reality.
+
+        Silence-timeout, stop wake word, and Escape-cancel all end the
+        recording by calling recording.stop()/cancel() directly — the
+        recognizer never sees it. Without this, a stale _mode ("ptt" or
+        "handsfree") would swallow the next gesture.
+        """
+        if self._mode in ("ptt", "handsfree") and not self._q("is_recording"):
+            self._mode = "idle"
+            self._awaiting_hf_release = False
+
+    # -- event entry points ---------------------------------------------
+    def on_key_down(self) -> None:
+        with self._lock:
+            self._held = True
+            if self._q("is_busy"):
+                return  # mid-transcription: ignore presses entirely
+            self._sync_mode()
+
+            # Tap during an active recording (wake-word or hands-free) → stop.
+            # PTT recordings are NOT stopped here (they stop on release).
+            if self._mode != "ptt" and self._q("is_recording"):
+                self._cancel_hold_timer()
+                self._mode = "idle"
+                self._awaiting_hf_release = False
+                self._last_tap_up = 0.0
+                self._log_msg("PTT key tapped during recording, stopping")
+                self._act("stop_other")
+                return
+
+            if self._mode == "ptt":
+                return  # already holding; ignore duplicate down
+
+            # Idle, nothing recording.
+            if not self._double_tap_enabled:
+                self._mode = "ptt"
+                self._log_msg("PTT key pressed, starting recording")
+                self._act("start_ptt")
+                return
+
+            now = self._clock()
+            if self._last_tap_up > 0.0 and (now - self._last_tap_up) <= self._double_tap_secs:
+                # Second tap of a double-tap → hands-free recording.
+                self._cancel_hold_timer()
+                self._last_tap_up = 0.0
+                self._mode = "handsfree"
+                self._awaiting_hf_release = True
+                self._log_msg("Double-tap detected, starting hands-free recording")
+                self._act("start_handsfree")
+                return
+
+            # First press: arm the hold timer. Commit to PTT only if still held
+            # when it fires; a quick release before then makes this a tap.
+            self._arm_hold_timer()
+
+    def on_key_up(self) -> None:
+        with self._lock:
+            if not self._held:
+                return
+            self._held = False
+            self._sync_mode()
+
+            if self._mode == "ptt":
+                self._mode = "idle"
+                self._log_msg("PTT key released, stopping recording")
+                self._act("stop_ptt")
+                return
+
+            if self._mode == "handsfree":
+                # Release of the second tap that armed hands-free — keep
+                # recording. Later releases (key never re-pressed) won't reach
+                # here because _held is already False.
+                self._awaiting_hf_release = False
+                return
+
+            # Idle: this was a short tap. Cancel the pending hold timer (it was
+            # not a hold) and open the double-tap window.
+            self._cancel_hold_timer()
+            if self._double_tap_enabled:
+                self._last_tap_up = self._clock()
+
+    def _on_hold_timeout(self) -> None:
+        with self._lock:
+            self._hold_timer = None
+            if (
+                self._held
+                and self._mode == "idle"
+                and not self._q("is_busy")
+                and not self._q("is_recording")
+            ):
+                self._mode = "ptt"
+                self._log_msg("PTT key held, starting recording")
+                self._act("start_ptt")
+
+
+def start_ptt_listener(
+    ptt_key: str,
+    callbacks: dict,
+    log_fn: Callable[[str], None] | None = None,
+    *,
+    double_tap: bool = True,
+    tap_max_secs: float = 0.2,
+    double_tap_secs: float = 0.35,
+) -> threading.Thread | None:
     """Start push-to-talk using Quartz CGEventTap.
 
+    Key-edge events are translated into a `GestureRecognizer`, which decides
+    between hold (push-to-talk), double-tap (hands-free), and tap-to-stop.
+
     Creates an event tap that:
-    - On PTT key press: calls callbacks["on_start"]()
-    - On PTT key release: calls callbacks["on_stop"]()
+    - On PTT key hold: calls callbacks["on_start"]() / ["on_stop"]()
+    - On PTT key double-tap: calls callbacks["on_start_handsfree"]()
+    - On PTT key tap during a recording: calls callbacks["on_stop_wake_via_ptt"]()
     - On Escape (busy): calls callbacks["on_cancel_transcription"]()
     - On Escape (recording): calls callbacks["on_cancel_recording"]()
     - On Escape (speaking): calls callbacks["on_cancel_tts"]()
@@ -40,8 +255,12 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     Args:
         ptt_key: Key name from _PTT_KEY_FLAGS (e.g. "fn", "right_cmd").
         callbacks: Dict with keys:
-            - "on_start": callable() — PTT key pressed, start recording
+            - "on_start": callable() — hold confirmed, start PTT recording
             - "on_stop": callable() — PTT key released, stop recording
+            - "on_start_handsfree": callable() — double-tap, start hands-free
+              recording (falls back to "on_start" if not provided)
+            - "on_stop_wake_via_ptt": callable() — tap during an active
+              recording, stop it (falls back to "on_stop" if not provided)
             - "on_cancel_transcription": callable() — Escape during transcription
             - "on_cancel_recording": callable() — Escape during recording
             - "on_cancel_tts": callable() — Escape during TTS playback
@@ -49,6 +268,9 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             - "is_recording": callable() -> bool — is recording active?
             - "is_speaking": callable() -> bool — is TTS playing?
         log_fn: Optional callable(str) for log output.
+        double_tap: enable the double-tap → hands-free gesture.
+        tap_max_secs: max press duration counted as a tap (also hold delay).
+        double_tap_secs: max gap between the two taps.
 
     Returns:
         Background thread running the CFRunLoop, or None if setup failed.
@@ -66,10 +288,31 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
         _log(f"WARNING: PTT key '{ptt_key}' not supported for Quartz mode, disabling PTT")
         return None
 
-    ptt_held = False
+    # Gesture FSM — all recording-mode logic lives here; the Quartz callback
+    # below only does edge detection and forwards on_key_down / on_key_up.
+    recognizer = GestureRecognizer(
+        actions={
+            "start_ptt": callbacks.get("on_start", lambda: None),
+            "stop_ptt": callbacks.get("on_stop", lambda: None),
+            "start_handsfree": callbacks.get(
+                "on_start_handsfree", callbacks.get("on_start", lambda: None)
+            ),
+            "stop_other": callbacks.get(
+                "on_stop_wake_via_ptt", callbacks.get("on_stop", lambda: None)
+            ),
+        },
+        queries={
+            "is_busy": callbacks.get("is_busy", lambda: False),
+            "is_recording": callbacks.get("is_recording", lambda: False),
+        },
+        double_tap_enabled=double_tap,
+        tap_max_secs=tap_max_secs,
+        double_tap_secs=double_tap_secs,
+        log=_log,
+    )
+
+    ptt_held = False  # Quartz-level edge tracking (debounce duplicate flags)
     _last_keydown_time = 0.0  # suppress false fn-release after keyDown events
-    _stop_lock = threading.Lock()
-    _stop_in_progress = False  # prevent duplicate stop calls
 
     # DEF-087: Track actual event flow so the watchdog can distinguish
     # "tap enabled but dead" from "tap working but user is idle". The old
@@ -82,7 +325,7 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
     _last_event_at = time.time()
 
     def callback(proxy, event_type, event, refcon):
-        nonlocal ptt_held, _last_keydown_time, _stop_in_progress
+        nonlocal ptt_held, _last_keydown_time
         nonlocal _event_count, _first_event_logged, _last_event_at
 
         # DEF-087: touch the flow counters on every delivery. Cheap (two
@@ -106,7 +349,7 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
             return event  # pass event through on error
 
     def _callback_inner(proxy, event_type, event, refcon):
-        nonlocal ptt_held, _last_keydown_time, _stop_in_progress
+        nonlocal ptt_held, _last_keydown_time
 
         # Handle Escape key — consume it (return None) when HeyVox acts on it,
         # so it doesn't propagate to the foreground app (e.g. exit fullscreen).
@@ -154,47 +397,18 @@ def start_ptt_listener(ptt_key: str, callbacks: dict, log_fn: Callable[[str], No
         flags = Quartz.CGEventGetFlags(event)
         fn_down = bool(flags & flag_mask)
 
+        # Edge detection only — all gesture/recording logic lives in the
+        # recognizer. We still debounce duplicate flag events (ptt_held) and
+        # suppress false releases that fire within 50 ms of a real keyDown
+        # (chord typing flips the modifier briefly).
         if fn_down and not ptt_held:
             ptt_held = True
-            is_busy = callbacks.get("is_busy", lambda: False)()
-            is_rec = callbacks.get("is_recording", lambda: False)()
-            if is_busy:
-                return event
-            if is_rec:
-                # Recording active (wake-word-triggered) — FN tap stops it.
-                # DEF-116: use on_stop_wake_via_ptt (when registered) so the
-                # recorder knows this is NOT a stop-wake-word event and skips
-                # the wake-word end-trim. Falls back to plain on_stop for
-                # backward compat with callers that don't register the new key.
-                _log("PTT key pressed during wake-word recording, stopping")
-                on_stop = callbacks.get("on_stop_wake_via_ptt") or callbacks.get("on_stop")
-                if on_stop:
-                    on_stop()
-                return event
-            _log("PTT key pressed, starting recording")
-            on_start = callbacks.get("on_start")
-            if on_start:
-                on_start()
-
+            recognizer.on_key_down()
         elif not fn_down and ptt_held:
-            # Ignore false releases caused by other key events (within 50ms)
             if time.time() - _last_keydown_time < 0.05:
                 return event
             ptt_held = False
-            with _stop_lock:
-                if _stop_in_progress:
-                    return event
-                if callbacks.get("is_recording", lambda: False)():
-                    _stop_in_progress = True
-            if _stop_in_progress:
-                try:
-                    _log("PTT key released, stopping recording")
-                    on_stop = callbacks.get("on_stop")
-                    if on_stop:
-                        on_stop()
-                finally:
-                    with _stop_lock:
-                        _stop_in_progress = False
+            recognizer.on_key_up()
 
         return event
 

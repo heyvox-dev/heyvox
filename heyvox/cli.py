@@ -492,21 +492,78 @@ def _cmd_log_health(args):
     vad_drops = [ln for ln in main_lines_all if "[WAKE_VAD_DROP]" in ln]
     near_misses = [ln for ln in main_lines_all if "[NEAR_MISS]" in ln]
     user_efforts = [ln for ln in main_lines_all if "[USER_EFFORT]" in ln]
+    # DEF-151: pre-dedup logs double-counted trigger-frames of one utterance
+    # as attempts=2 window<0.3s. Split those legacy artifacts out so the
+    # headline number reflects real "user had to repeat" events.
+    real_efforts = []
+    for ln in user_efforts:
+        m = re.search(r"attempts=(\d+) window=([\d.]+)s", ln)
+        if m and int(m.group(1)) == 2 and float(m.group(2)) < 0.3:
+            continue
+        real_efforts.append(ln)
+    # DEF-117/118 forensic tags: stop-wake at full confidence rejected by the
+    # pre-silence gate. last_silent <= 2s is the suspect band (a real
+    # "...pause. Hey Vox" whose pause fell just outside the window — the
+    # DEF-149 class); larger ages are speech-flow FPs blocked as designed.
+    gate_blocks = [
+        ln for ln in main_lines_all
+        if "[NEAR_MISS_FAST_BLOCKED]" in ln or "[NEAR_MISS_WINDOW_BLOCKED]" in ln
+    ]
+    suspect_blocks = []
+    for ln in gate_blocks:
+        m = re.search(r"last_silent=([\d.]+)s ago", ln)
+        if m and float(m.group(1)) <= 2.0:
+            suspect_blocks.append(ln)
+    cooldown_drops = [ln for ln in main_lines_all if "[WAKE_COOLDOWN_DROP]" in ln]
+    stop_missed = [ln for ln in main_lines_all if "[STOP_MISSED]" in ln]
 
     _say("\n## Wake word (current rotation of heyvox.log)")
     _say(f"  Triggers fired:        {triggers}")
     _say(f"  VAD drops (lost):      {len(vad_drops)}")
     _say(f"  Near-misses (sub-thr): {len(near_misses)}")
-    _say(f"  USER_EFFORT events:    {len(user_efforts)}")
+    _say(
+        f"  USER_EFFORT events:    {len(real_efforts)}"
+        + (
+            f"  ({len(user_efforts) - len(real_efforts)} frame-doubling artifacts filtered)"
+            if len(user_efforts) != len(real_efforts) else ""
+        )
+    )
+    _say(
+        f"  Stop-gate blocks:      {len(gate_blocks)}"
+        f"  ({len(suspect_blocks)} suspect: last_silent <= 2s)"
+    )
+    _say(f"  Cooldown drops:        {len(cooldown_drops)}")
+    _say(f"  Missed stops (STT-confirmed): {len(stop_missed)}")
 
-    if user_efforts:
+    if real_efforts:
         _say("\n  Recent USER_EFFORT (user had to repeat 'Hey Vox'):")
-        for ln in user_efforts[-5:]:
+        for ln in real_efforts[-5:]:
             ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
             n_match = re.search(r"attempts=(\d+) window=([\d.]+)s", ln)
             ts = ts_match.group(1) if ts_match else "??:??:??"
             if n_match:
                 _say(f"    {ts}  {n_match.group(1)} attempts in {n_match.group(2)}s")
+
+    if stop_missed:
+        _say("\n  Recent STOP_MISSED (user said it, STT heard it, detector didn't):")
+        for ln in stop_missed[-5:]:
+            ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
+            detail = re.search(r"reason=(\S+) tail='([^']*)'", ln)
+            ts = ts_match.group(1) if ts_match else "??:??:??"
+            if detail:
+                _say(f"    {ts}  ended_by={detail.group(1)}  tail='{detail.group(2)}'")
+
+    if suspect_blocks:
+        _say("\n  Recent suspect stop-gate blocks (full score, pause just outside window):")
+        for ln in suspect_blocks[-5:]:
+            ts_match = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", ln)
+            sc = re.search(r"score=([\d.]+)", ln)
+            ls = re.search(r"last_silent=([\d.]+)s", ln)
+            ts = ts_match.group(1) if ts_match else "??:??:??"
+            _say(
+                f"    {ts}  score={sc.group(1) if sc else '?'} "
+                f"last_silent={ls.group(1) if ls else '?'}s"
+            )
 
     if vad_drops:
         _say("\n  Recent WAKE_VAD_DROP (model heard it, VAD killed it):")
@@ -521,11 +578,18 @@ def _cmd_log_health(args):
     stt_finals = [ln for ln in stt_lines_all if '"label": "_final"' in ln or '"label":"_final"' in ln]
     stt_durations: list[float] = []
     stt_times: list[float] = []
+    stt_models: dict[str, int] = {}
+    stt_cold = 0
     for ln in stt_lines_all:
         if '"label": "_stt_result"' in ln or '"label":"_stt_result"' in ln:
             d = re.search(r'"stt_time_s":\s*([\d.]+)', ln)
             if d:
                 stt_times.append(float(d.group(1)))
+            m = re.search(r'"stt_model":\s*"([^"]+)"', ln)
+            if m:
+                stt_models[m.group(1)] = stt_models.get(m.group(1), 0) + 1
+            if re.search(r'"stt_warm":\s*false', ln):
+                stt_cold += 1
         d = re.search(r'"duration_s":\s*([\d.]+)', ln)
         if d:
             stt_durations.append(float(d.group(1)))
@@ -538,6 +602,15 @@ def _cmd_log_health(args):
         stt_p50 = stt_times[len(stt_times) // 2]
         stt_p99 = stt_times[min(len(stt_times) - 1, int(len(stt_times) * 0.99))]
         _say(f"  STT time p50/p99:      {stt_p50:.2f}s / {stt_p99:.2f}s")
+    if stt_models:
+        models_str = ", ".join(
+            f"{k}×{v}" for k, v in sorted(stt_models.items(), key=lambda kv: -kv[1])
+        )
+        _say(f"  STT model(s):          {models_str}")
+        if len(stt_models) > 1:
+            _say("  WARN: multiple STT models in window — a model swap shifts p50/p99 (see DEF-137)")
+    if stt_times:
+        _say(f"  Cold loads (warm=false): {stt_cold}  (each pays full model-load latency)")
     if stt_durations:
         stt_durations.sort()
         p50 = stt_durations[len(stt_durations) // 2]
@@ -678,12 +751,19 @@ def _cmd_log_health(args):
                 "triggers": triggers,
                 "vad_drops": len(vad_drops),
                 "near_misses": len(near_misses),
-                "user_efforts": len(user_efforts),
+                "user_efforts": len(real_efforts),
+                "user_effort_artifacts": len(user_efforts) - len(real_efforts),
+                "stop_gate_blocks": len(gate_blocks),
+                "stop_gate_blocks_suspect": len(suspect_blocks),
+                "cooldown_drops": len(cooldown_drops),
+                "stop_missed": len(stop_missed),
             },
             "stt": {
                 "finals": len(stt_finals),
                 "stt_time_p50": stt_p50,
                 "stt_time_p99": stt_p99,
+                "models": stt_models,
+                "cold_loads": stt_cold,
             },
             "herald": {
                 "lines": len(herald_lines),
@@ -722,9 +802,48 @@ def _cmd_doctor(args):
 
 
 def _cmd_bugreport(args):
-    """Generate a structured bug report for GitHub Issues."""
-    from heyvox.doctor import run_bugreport
-    report = run_bugreport()
+    """Generate a structured bug report for GitHub Issues.
+
+    Two modes:
+    * default — Markdown text summary to clipboard (paste into issue body).
+    * ``--bundle`` — full zip with logs + config + diagnostics in
+      ``~/Downloads/``; optionally opens a pre-filled GitHub Issue.
+    """
+    from heyvox.reporting.text_report import run_bugreport
+    from heyvox.reporting.bundle import (
+        BundleOptions,
+        build_bundle,
+        summarize_bundle,
+    )
+    from heyvox.reporting.issue import (
+        build_issue_url,
+        open_in_browser,
+        reveal_in_finder,
+    )
+
+    comment = getattr(args, "comment", "") or ""
+
+    if getattr(args, "bundle", False):
+        opts = BundleOptions(
+            comment=comment,
+            include_transcripts=getattr(args, "include_transcripts", False),
+        )
+        zip_path = build_bundle(opts)
+        print(f"Bundle written: {zip_path}")
+        print(summarize_bundle(zip_path))
+
+        if getattr(args, "open_issue", False):
+            body = run_bugreport(comment)
+            title = "[Bug] " + (comment.splitlines()[0][:80] if comment else "")
+            url = build_issue_url(title, body, bundle_path=zip_path)
+            open_in_browser(url)
+            reveal_in_finder(zip_path)
+            print("Opened GitHub Issue in your browser and revealed the bundle in Finder.")
+            print("Drag the .zip into the issue comment box before submitting.")
+        return
+
+    # Default: text report → clipboard
+    report = run_bugreport(comment)
     if getattr(args, "clipboard", True):
         try:
             import subprocess
@@ -735,6 +854,64 @@ def _cmd_bugreport(args):
             print(report)
     else:
         print(report)
+
+
+def _cmd_telemetry(args):
+    """Inspect or toggle anonymous telemetry.
+
+    Subcommands: status (default), enable, disable, preview, reset-id.
+    """
+    from heyvox.telemetry import consent
+    from heyvox.telemetry import events as evmod
+
+    action = getattr(args, "telemetry_action", None) or "status"
+
+    if action == "enable":
+        consent.enable()
+        print(f"Telemetry enabled. Anonymous ID: {consent.get_anon_id()}")
+        print("Run `heyvox telemetry preview` to see what gets sent.")
+        return
+
+    if action == "disable":
+        consent.disable()
+        print("Telemetry disabled.")
+        return
+
+    if action == "reset-id":
+        new_id = consent.reset_anon_id()
+        print(f"New anonymous ID: {new_id}")
+        return
+
+    if action == "preview":
+        print(evmod.preview())
+        return
+
+    # status (default)
+    from pathlib import Path
+    from heyvox.constants import (
+        TELEMETRY_QUEUE_DIR,
+        TELEMETRY_LAST_BATCH_FILE,
+    )
+
+    print(f"Telemetry enabled : {consent.is_enabled()}")
+    aid = consent.get_anon_id(create_if_missing=False)
+    print(f"Anonymous ID      : {aid or '(not yet generated)'}")
+    try:
+        from heyvox.config import load_config
+        cfg = load_config().telemetry
+        print(f"Endpoint          : {cfg.endpoint}")
+        print(f"Batch interval    : {cfg.batch_secs}s")
+    except Exception as exc:
+        print(f"Config read failed: {exc}")
+    queued = list(Path(TELEMETRY_QUEUE_DIR).glob("batch-*.json")) if Path(TELEMETRY_QUEUE_DIR).exists() else []
+    print(f"Queued batches    : {len(queued)}")
+    last = Path(TELEMETRY_LAST_BATCH_FILE)
+    if last.exists():
+        import time as _t
+        age = int(_t.time() - last.stat().st_mtime)
+        print(f"Last attempt      : {age}s ago")
+    else:
+        print("Last attempt      : never")
 
 
 def _cmd_register(args):
@@ -945,6 +1122,74 @@ def _cmd_calibrate(args):
         pa.terminate()
 
 
+def _cmd_learn_vocab(args):
+    """Learn the STT vocabulary glossary from transcript history (Phase 16).
+
+    Off the hot path: runs the offline extractor over ~/.local/share/heyvox/transcripts.jsonl,
+    merges into vocab_store.json, renders the top-N (<=223 whisper tokens) into
+    stt.local.initial_prompt, and writes it to config.yaml. Manual or nightly (launchd).
+    Requires config.vocab_learner.enabled = true (opt-in, default off).
+    """
+    from heyvox.config import load_config, update_config
+    from heyvox.audio import vocab_learner
+
+    config = load_config()
+    summary = vocab_learner.learn_vocab(
+        cfg=config.vocab_learner,
+        dry_run=getattr(args, "dry_run", False),
+        run_eval=getattr(args, "eval", False),
+        model_override=getattr(args, "model", None),
+        max_terms_override=getattr(args, "max_terms", None),
+        min_frequency_override=getattr(args, "min_frequency", None),
+        reset=getattr(args, "reset", False),
+    )
+
+    if not summary.get("enabled", False):
+        print("vocab_learner is disabled. Enable it in config.yaml:")
+        print("  vocab_learner:\n    enabled: true")
+        return
+
+    # Monitoring summary (AI-SPEC §7): surface counts + token usage vs the 223 cap.
+    print(f"Extracted {summary.get('extracted', 0)} items, "
+          f"dropped {summary.get('dropped', 0)} malformed, "
+          f"skipped {summary.get('skipped_batches', 0)} batches.")
+    print(f"Promoted {summary.get('promoted', 0)} terms "
+          f"({summary.get('token_count', 0)}/223 whisper tokens).")
+    if summary.get("promoted", 0) == 0:
+        print("WARNING: 0 terms promoted — extractor may be broken or all entries gated.")
+    if summary.get("token_count", 0) >= 220:
+        print("WARNING: glossary hit the token cap — lower-frequency terms were dropped.")
+
+    # --eval: report deterministic recall/precision of the promoted glossary against
+    # the bundled ground-truth fixture (key present only when --eval was passed).
+    ev = summary.get("eval")
+    if ev is not None:
+        if ev.get("available") is False:
+            print(f"[eval] reference fixture unavailable — eval skipped ({ev.get('reason', '')}).")
+        elif "error" in ev:
+            print(f"[eval] scoring failed: {ev['error']}")
+        else:
+            print(f"[eval] vs ground_truth: recall={ev['recall']:.2f} precision={ev['precision']:.2f} "
+                  f"(content={ev['content']}, fp={ev['fp']}, wake={ev['wake']}).")
+
+    rendered = summary.get("prompt", "")
+    if getattr(args, "dry_run", False):
+        print(f"\n[dry-run] would write initial_prompt:\n  {rendered!r}")
+        return
+
+    # Persist the rendered glossary where init_local_stt reads it. update_config takes
+    # **kwargs; the dotted key has dots so splat it from a dict (NOT a positional arg).
+    # It returns False if the write was skipped (e.g. config.yaml lacks an stt.local
+    # section), so only claim success when it actually wrote (WR-04).
+    wrote = update_config(**{"stt.local.initial_prompt": rendered})
+    if wrote:
+        print("Wrote stt.local.initial_prompt to config.yaml. Restart heyvox to apply.")
+    else:
+        print("WARNING: could not write stt.local.initial_prompt — config.yaml is missing the "
+              "'stt:' / 'local:' section.")
+        print("  Add a 'local:' block under 'stt:' and re-run, or STT biasing stays off.")
+
+
 def main():
     from heyvox import __version__
 
@@ -1133,10 +1378,46 @@ def main():
         dest="clipboard",
         action="store_false",
         default=True,
-        help="Print to stdout instead of copying to clipboard",
+        help="Print to stdout instead of copying to clipboard (text mode only)",
+    )
+    sub_bugreport.add_argument(
+        "--bundle",
+        action="store_true",
+        help="Build a full zip bundle (logs + config + diagnostics) in ~/Downloads/",
+    )
+    sub_bugreport.add_argument(
+        "--open-issue",
+        dest="open_issue",
+        action="store_true",
+        help="With --bundle: also open a pre-filled GitHub Issue in your browser",
+    )
+    sub_bugreport.add_argument(
+        "--include-transcripts",
+        dest="include_transcripts",
+        action="store_true",
+        help="With --bundle: also include the last 20 transcripts (private text)",
+    )
+    sub_bugreport.add_argument(
+        "--comment", "-m",
+        default="",
+        help="Short description of the problem (included in the report body)",
     )
     sub_bugreport.set_defaults(func=_cmd_bugreport)
 
+
+    # telemetry — opt-in anonymous telemetry
+    sub_telemetry = subparsers.add_parser(
+        "telemetry",
+        help="Inspect or toggle anonymous telemetry (opt-in)",
+    )
+    sub_telemetry.add_argument(
+        "telemetry_action",
+        nargs="?",
+        default="status",
+        choices=["status", "enable", "disable", "preview", "reset-id"],
+        help="Action: status (default), enable, disable, preview, reset-id",
+    )
+    sub_telemetry.set_defaults(func=_cmd_telemetry)
 
     # register — register MCP server with AI agents
     sub_register = subparsers.add_parser("register", help="Register HeyVox MCP server with AI coding agents")
@@ -1147,6 +1428,48 @@ def main():
         help="Filter by agent name (e.g. 'cursor'). Registers all detected if omitted.",
     )
     sub_register.set_defaults(func=_cmd_register)
+
+    # learn-vocab — batch vocabulary extractor for STT initial_prompt (Phase 16)
+    sub_learn_vocab = subparsers.add_parser(
+        "learn-vocab",
+        help="Learn vocabulary glossary from dictation history (STT biasing, Phase 16)",
+    )
+    sub_learn_vocab.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run extraction but do not write the store or initial_prompt file",
+    )
+    sub_learn_vocab.add_argument(
+        "--reset",
+        action="store_true",
+        help="Start with an empty store (discards accumulated vocabulary)",
+    )
+    sub_learn_vocab.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run the post-extraction evaluation harness",
+    )
+    sub_learn_vocab.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help="Override the extraction model (e.g. claude-opus-4-8)",
+    )
+    sub_learn_vocab.add_argument(
+        "--max-terms",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap how many terms enter initial_prompt (default: from config)",
+    )
+    sub_learn_vocab.add_argument(
+        "--min-frequency",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Minimum corpus frequency to include a term (default: from config)",
+    )
+    sub_learn_vocab.set_defaults(func=_cmd_learn_vocab)
 
     # calibrate -- calibrate mic noise floor and silence threshold (AUDIO-01, D-04)
     sub_calibrate = subparsers.add_parser(

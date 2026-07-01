@@ -282,10 +282,31 @@ async function pauseAllTabs() {
   const nowPlaying = await findPlayingTabs(tabs);
 
   const paused = [];
+  // DEF-125: per-tab content-script diagnostic, keyed by tab.id, captured
+  // here and merged into the final pauseDiag below so the native host log
+  // sees (total, paused, skipped, host, frame) — explains tab-mute fallbacks
+  // without requiring a page-DevTools console.
+  const csDiagByTab = new Map();
   await Promise.allSettled(
     nowPlaying.map(async (tab) => {
       let method = 'content-script';
-      const count = await sendToContentScript(tab.id, { action: 'pause-media' });
+      const result = await sendToContentScript(tab.id, { action: 'pause-media' });
+      // DEF-125: result is now {count, total, skipped, host, frame} (object)
+      // for any responding content script. Legacy number return (or null on
+      // unreachable tabs) falls through the typeof check.
+      let count = 0;
+      if (result && typeof result === 'object') {
+        count = Number(result.count) || 0;
+        csDiagByTab.set(tab.id, {
+          cs_total: result.total,
+          cs_paused: count,
+          cs_skipped: result.skipped,
+          cs_host: result.host,
+          cs_frame: result.frame,
+        });
+      } else if (typeof result === 'number') {
+        count = result;
+      }
       if (count > 0) {
         // Content script successfully paused media elements
       } else if (tab.audible) {
@@ -293,7 +314,7 @@ async function pauseAllTabs() {
         // Fall back to tab muting — silences audio without affecting playback state
         await chrome.tabs.update(tab.id, { muted: true });
         method = 'tab-mute';
-      } else if (count === null) {
+      } else if (result === null) {
         // Couldn't confirm but attempted — treat as paused
       } else {
         // Nothing to pause in this tab
@@ -314,6 +335,7 @@ async function pauseAllTabs() {
     tabId: t.id,
     method: pausedTabs.get(t.id)?.method ?? 'unknown',
     audible: t.audible === true,
+    ...(csDiagByTab.get(t.id) ?? {}),
   }));
   console.log('[Hush] pause diagnostic:', JSON.stringify(pauseDiag));
   const resp = buildStatusResponse('paused');
@@ -336,8 +358,17 @@ async function resumeAllPausedTabs(rewindSecs = 0, fadeInMs = 0) {
   const settled = await Promise.allSettled(
     entries.map(async ([tabId, info]) => {
       if (info.method === 'tab-mute') {
+        // DEF-119: tab.muted=true on YouTube triggers MediaSession-pause on
+        // the player itself; unmuting alone leaves the video paused. Send a
+        // play-if-paused to the content script after the unmute. If the
+        // content script can't reach the media (Shadow DOM still hostile),
+        // we at least leave the diagnostic in the response so the regression
+        // is visible in hush.log instead of a silent stuck pause.
         await chrome.tabs.update(tabId, { muted: false }).catch(() => {});
-        return { tabId, method: 'tab-mute', played: 1, failed: 0 };
+        const playDiag = await sendToContentScript(tabId, {
+          action: 'play-if-paused',
+        });
+        return { tabId, method: 'tab-mute', unmuted: true, play_diag: playDiag };
       }
       const diag = await sendToContentScript(tabId, {
         action: 'resume-media',
@@ -398,7 +429,9 @@ async function resumeSingleTab(tabId, rewindSecs = 0, fadeInMs = 0) {
   }
 
   if (info.method === 'tab-mute') {
+    // DEF-119: see resumeAllPausedTabs comment.
     await chrome.tabs.update(tabId, { muted: false }).catch(() => {});
+    await sendToContentScript(tabId, { action: 'play-if-paused' });
   } else {
     await sendToContentScript(tabId, {
       action: 'resume-media',

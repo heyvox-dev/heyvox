@@ -31,12 +31,26 @@ import time
 
 
 def _log(msg: str) -> None:
-    """Write to main vox log file (same as main.py's log())."""
+    """Write to main vox log file (same as main.py's log()).
+
+    DEF-126: prefer the config-resolved log_file path. main.py uses
+    `load_config().log_file` (e.g. /tmp/heyvox.log on this host), but this
+    module used to fall back to LOG_FILE_DEFAULT which resolves to
+    $TMPDIR/heyvox.log — so every [media] line landed in a parallel file and
+    was invisible to anyone tailing the main log. Pattern P-log-path-split.
+    """
     from heyvox.constants import LOG_FILE_DEFAULT
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [media] {msg}\n"
+    path = os.environ.get("HEYVOX_LOG_FILE")
+    if not path:
+        try:
+            from heyvox.config import load_config
+            path = load_config().log_file or LOG_FILE_DEFAULT
+        except Exception:
+            path = LOG_FILE_DEFAULT
     try:
-        with open(os.environ.get("HEYVOX_LOG_FILE", LOG_FILE_DEFAULT), "a") as f:
+        with open(path, "a") as f:
             f.write(line)
     except OSError:
         pass
@@ -235,23 +249,17 @@ def pause_media() -> bool:
             _log(f"pause_media: paused {paused_count} browser tab(s) via Hush ({time.time()-t0:.2f}s)")
             return True
         _log("pause_media: Hush available but no browser media playing")
-        # DEF-110 / P-success-after-clear / P-detector-without-action: Hush
-        # responded (extension alive) but pausedCount=0. Most of the time
-        # this means "no browser audio playing" — silent and correct. But
-        # the cluster around DEF-105 / DEF-112 shows the same shape when
-        # the extension actually IS broken (MV3 SW suspended, race-loser
-        # socket, etc.). Surface a low-noise info banner so the user has
-        # a chance to spot a regression without grepping logs.
-        try:
-            from heyvox.hud.surface import HUDSurface
-            HUDSurface.banner(
-                level="info",
-                source="hush-noop",
-                text="Hush: no browser media paused",
-                ttl_secs=20,
-            )
-        except Exception:
-            pass
+        # DEF-128: The previous `hush-noop` info banner ("Hush: no browser
+        # media paused") fired on every TTS event where no browser tab had
+        # active media. That is the *normal* steady state, not a degraded
+        # state, and surfacing it as an info banner cluttered the menu bar
+        # with non-actionable content (P-new-visibility inverted — a non-
+        # state-change rendered as a state-change). The triage signal it
+        # was meant to provide (DEF-105 / DEF-112 broken-extension cluster
+        # shows the same pausedCount=0 shape) is still recoverable from
+        # the [media] log line below; the menu bar is the wrong surface
+        # for it. Removed entirely — see [media] log + heyvox-debug.log
+        # for the same forensic signal without UI cost.
     elif not glob.glob(_HUSH_SOCK_GLOB) and not _hush_missing_banner_shown:
         _hush_missing_banner_shown = True
         _log(

@@ -1,0 +1,62 @@
+name: Bug report
+description: File a bug report for HeyVox
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report.
+
+        If you generated this report from the HeyVox menu ("Report Issue…")
+        or via `heyvox bugreport --bundle`, drag the generated `.zip`
+        from `~/Downloads/` into a comment below — it carries the logs and
+        diagnostics we need to debug.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: One or two sentences. What did you expect, what happened instead.
+      placeholder: |
+        Wake word fires but the recording never starts.
+        Expected the recording indicator to flash and the mic to listen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If you can reproduce it, list the steps. If it's intermittent, say so.
+      placeholder: |
+        1. Say "Hey Vox"
+        2. Recording indicator flashes
+        3. Speak — nothing transcribed
+    validations:
+      required: false
+
+  - type: input
+    id: heyvox-version
+    attributes:
+      label: HeyVox version
+      description: Output of `heyvox status` first line (e.g. `HeyVox v0.4.2`)
+      placeholder: HeyVox v0.4.2
+    validations:
+      required: false
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version + Mac model
+      placeholder: macOS 26.5 / MacBook Pro M3 Max
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: attached
+    attributes:
+      label: Bundle attached?
+      options:
+        - label: I attached the `heyvox-report-*.zip` from `~/Downloads/`
+        - label: I'm filing without a bundle (logs may be requested)

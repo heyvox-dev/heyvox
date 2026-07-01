@@ -2,7 +2,13 @@
 MCP voice server for heyvox.
 
 Exposes voice control tools to LLM agents via the Model Context Protocol.
-Run as: python -m heyvox.mcp.server  (stdio transport, registered by heyvox setup)
+
+Run as:
+    python -m heyvox.mcp.server
+        stdio transport — one sidecar process per agent session
+    python -m heyvox.mcp.server --transport streamable-http [--host H] [--port P]
+        shared HTTP server on localhost — ONE process serves all sessions
+        (register with: claude mcp add -s user -t http vox http://127.0.0.1:8014/mcp)
 
 MCP tools:
 - voice_speak(text, verbosity)    -- speak text via Kokoro TTS
@@ -43,32 +49,30 @@ sys.stdout = sys.stderr
 # ---------------------------------------------------------------------------
 # MCP server setup
 # ---------------------------------------------------------------------------
-from contextlib import asynccontextmanager  # noqa: E402
-from collections.abc import AsyncIterator  # noqa: E402
-
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+# stateless_http: tools keep no per-session server state (verbosity/style/mute
+# live in shared files), so requests need no session pinning. Clients survive
+# server restarts without a session re-handshake. Ignored by stdio transport.
+mcp = FastMCP("heyvox", stateless_http=True)
 
-@asynccontextmanager
-async def lifespan(server: FastMCP) -> AsyncIterator[None]:
-    """Start TTS worker on server startup; shut down cleanly on exit."""
-    from heyvox.audio.tts import start_worker, shutdown as tts_shutdown
+
+def _init_tts() -> None:
+    """Initialize TTS settings once per server process.
+
+    Deliberately NOT in the FastMCP lifespan: the lowlevel server enters the
+    lifespan once per MCP session (per request with stateless_http), and
+    start_worker() resets the shared verbosity/style files to config defaults
+    — that must happen once per process, not on every new agent session.
+    """
+    from heyvox.audio.tts import start_worker
     from heyvox.config import load_config
-    config = load_config()
     try:
-        start_worker(config)
-    except ImportError as exc:
-        # kokoro or sounddevice not installed — server still starts.
-        # voice_speak calls will fail gracefully at call time with a clear error.
-        print(f"vox MCP server: TTS worker not started ({exc}). "
-              "Install kokoro + sounddevice for TTS support.", file=sys.stderr)
-    try:
-        yield
-    finally:
-        tts_shutdown()
-
-
-mcp = FastMCP("heyvox", lifespan=lifespan)
+        start_worker(load_config())
+    except Exception as exc:
+        # Degraded start beats a launchd crash loop: tools still respond,
+        # voice_speak fails gracefully at call time.
+        print(f"vox MCP server: TTS init failed ({exc})", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +197,29 @@ def voice_config(action: str = "get", key: str = "", value: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Restore original stdout for FastMCP's stdio transport framing.
-    # During module import and tool execution, rogue prints went to stderr.
-    # Now we hand stdout back to the MCP protocol layer.
+    import argparse
+
+    parser = argparse.ArgumentParser(description="heyvox MCP voice server")
+    parser.add_argument(
+        "--transport", choices=["stdio", "streamable-http"], default="stdio",
+        help="stdio: per-session sidecar (default). "
+             "streamable-http: shared localhost server for all sessions.",
+    )
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="bind host for streamable-http (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8014,
+                        help="bind port for streamable-http (default: 8014)")
+    args = parser.parse_args()
+
+    _init_tts()
+
+    # Restore original stdout. stdio needs it for JSON-RPC framing; for
+    # streamable-http it is just regular process output (launchd log).
     sys.stdout = _original_stdout
-    mcp.run(transport="stdio")
+
+    if args.transport == "streamable-http":
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run(transport="stdio")

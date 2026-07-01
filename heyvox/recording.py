@@ -328,8 +328,9 @@ class RecordingStateMachine:
         self._log = log_fn
         self._hud_send = hud_send
         self.training_collector = None  # Set by main.py when collect_negatives is enabled
+        self._quiet_streak = 0  # consecutive too-quiet recordings; banner only after ≥2
 
-    def start(self, ptt: bool = False, preroll=None) -> None:
+    def start(self, ptt: bool = False, preroll=None, handsfree: bool = False) -> None:
         """Begin a recording session.
 
         Sets is_recording flag, signals TTS to pause, plays listening cue,
@@ -339,6 +340,11 @@ class RecordingStateMachine:
             ptt: True if triggered by push-to-talk (affects auto-send behavior).
             preroll: Iterable of audio chunks captured before the wake word trigger.
                 Prepended to the audio buffer so the first words aren't clipped.
+            handsfree: True if triggered by a PTT-key double-tap (continuous
+                mode). Ends like a wake-word recording (silence/stop-word/Escape
+                via the main-loop watchdogs, which require triggered_by_ptt to be
+                False), but stop() skips the wake-word audio trim because there
+                is no spoken wake word to remove. Mutually exclusive with ptt.
         """
         if self.config is None:
             return
@@ -357,9 +363,16 @@ class RecordingStateMachine:
                 return
             self.ctx.is_recording = True
             self.ctx.recording_start_time = time.time()
+            # DEF-155: fresh score horizon for this recording's stop-miss
+            # diagnostics (written by the main loop, read by stop()).
+            self.ctx.rec_stop_score_max = 0.0
             # Pre-roll: prepend recent audio so first words aren't clipped
             self.ctx.audio_buffer = list(preroll) if preroll else []
             self.ctx.triggered_by_ptt = ptt
+            # handsfree (double-tap) keeps triggered_by_ptt False so the main
+            # loop's silence/stop-word watchdogs run, but flags itself so stop()
+            # skips the wake-word trim (no spoken wake word to remove).
+            self.ctx.handsfree = handsfree and not ptt
             self.ctx.stopped_via_ptt_mid_recording = False  # DEF-116: reset per-recording
             self.ctx.recording_target = None  # Will be filled by background snapshot
             # DEF-078: Seed tts-during-recording flag from the current TTS flag
@@ -381,7 +394,19 @@ class RecordingStateMachine:
         # === Instant feedback FIRST — before any blocking work ===
         from heyvox.audio.cues import audio_cue, get_cues_dir
         cues_dir = get_cues_dir(self.config.cues_dir)
-        audio_cue("listening", cues_dir)
+        # [WW_LATENCY] consume t1/detect_ms set by _run_loop just before this call.
+        # Reset to 0.0 immediately so stale values don't leak to the next activation.
+        # PTT and handsfree paths leave these at 0.0 (no wake-word timing to report).
+        try:
+            import heyvox.main as _main_mod
+            _ww_t1 = _main_mod._ww_t1
+            _ww_detect_ms = _main_mod._ww_detect_ms
+            _main_mod._ww_t1 = 0.0
+            _main_mod._ww_detect_ms = 0.0
+        except Exception:
+            _ww_t1 = 0.0
+            _ww_detect_ms = 0.0
+        audio_cue("listening", cues_dir, t1=_ww_t1, detect_ms=_ww_detect_ms)
         self._hud_send({"type": "state", "state": "listening"})
         self._log("Recording started. Waiting for stop wake word.")
 
@@ -458,11 +483,19 @@ class RecordingStateMachine:
         except (BrokenPipeError, OSError):
             pass
 
-    def stop(self) -> None:
+    def stop(self, reason: str = "other") -> None:
         """End a recording session and dispatch transcription.
 
         Checks minimum recording duration, plays feedback cue, and starts
         the transcription thread.
+
+        Args:
+            reason: What ended the session — "stop_wake" (stop wake word),
+                "silence_timeout", "max_duration", "ptt", "ptt_interrupt"
+                (user gave up waiting for the stop wake word, DEF-116) or
+                "other". Forwarded to _send_local so the wake-word strip can
+                emit [STOP_MISSED] when a spoken stop word survived into the
+                transcript without having ended the recording (DEF-151).
         """
         if self.config is None:
             return
@@ -478,6 +511,7 @@ class RecordingStateMachine:
             # Capture PTT flag and recording target under lock — _send_local runs on
             # a daemon thread and must not read ctx fields that could be overwritten.
             ptt_snapshot = self.ctx.triggered_by_ptt
+            handsfree_snapshot = self.ctx.handsfree
             target_snapshot = self.ctx.recording_target
 
         # If background snapshot hasn't finished yet, wait briefly (usually <1s)
@@ -551,6 +585,25 @@ class RecordingStateMachine:
                     "raw_rms_dbfs": round(raw_rms_db, 1),
                 }, log_fn=self._log)
 
+                # DEF-155/156: snapshot the UN-trimmed tail for training
+                # collection before the wake-word trim below removes the very
+                # audio the collector needs. Long enough to reach back past a
+                # full silence-timeout to a missed stop wake word. The observed
+                # stop-score travels with it so saved fn/tp clips distinguish
+                # model-blind misses from gate-blocked ones in the filename.
+                _raw_tail: list = []
+                _observed_stop_score = 0.0
+                if self.training_collector:
+                    _tail_chunk_count = int(
+                        (self.config.silence_timeout_secs + 3.0)
+                        * self.config.audio.sample_rate
+                        / self.config.audio.chunk_size
+                    ) + 1
+                    _raw_tail = list(recorded_chunks[-_tail_chunk_count:])
+                    _observed_stop_score = getattr(
+                        self.ctx, "rec_stop_score_max", 0.0
+                    )
+
                 if not ptt_snapshot:
                     # Wake word audio trim -- remove wake word from both ends so
                     # Whisper never sees it. This is the primary defense; the text-level
@@ -565,8 +618,19 @@ class RecordingStateMachine:
                     # to remove, and 480 ms of trim would clip the user's last
                     # word(s). Start-trim still applies — the recording was
                     # started by wake-word, so the start wake-word IS there.
-                    ww_start_trim_secs = 1.5
-                    ww_end_trim_secs = 0.0 if self.ctx.stopped_via_ptt_mid_recording else 0.5
+                    #
+                    # Hands-free (double-tap) recordings have NO spoken wake word
+                    # at either end, so both trims are zeroed — any start-trim
+                    # would clip the user's opening words. A stop wake word, if
+                    # the user spoke one, is removed at the text level by
+                    # strip_wake_words() below, so dropping the audio end-trim
+                    # here is safe.
+                    if handsfree_snapshot:
+                        ww_start_trim_secs = 0.0
+                        ww_end_trim_secs = 0.0
+                    else:
+                        ww_start_trim_secs = 1.5
+                        ww_end_trim_secs = 0.0 if self.ctx.stopped_via_ptt_mid_recording else 0.5
                     start_trim_chunks = int(
                         ww_start_trim_secs * self.config.audio.sample_rate / self.config.audio.chunk_size
                     )
@@ -629,7 +693,9 @@ class RecordingStateMachine:
                     target=self._send_local,
                     args=(duration, recorded_chunks, raw_rms_db),
                     kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot,
-                            "stop_time": _stop_t0},
+                            "stop_time": _stop_t0, "stop_reason": reason,
+                            "raw_tail": _raw_tail,
+                            "observed_stop_score": _observed_stop_score},
                     daemon=True,
                 ).start()
         except Exception as e:
@@ -671,6 +737,9 @@ class RecordingStateMachine:
         ptt: bool = False,
         recording_target=None,
         stop_time: float = 0.0,
+        stop_reason: str = "other",
+        raw_tail: list | None = None,
+        observed_stop_score: float = 0.0,
     ) -> None:
         """Transcribe locally and inject text into target app."""
         import subprocess as _subprocess
@@ -690,34 +759,37 @@ class RecordingStateMachine:
             # DEF-101: per-mic threshold from config.mic_profiles[<mic>].min_audio_dbfs.
             min_dbfs = _resolve_min_audio_dbfs(self.config)
             if raw_rms_db < min_dbfs:
+                self._quiet_streak += 1
                 self._log(
                     f"Recording too quiet ({raw_rms_db:.1f} dBFS < {min_dbfs} dBFS), skipping STT"
+                    f" [streak={self._quiet_streak}]"
                 )
-                # DEF-101: surface silent-skip to user via HUDSurface banner.
-                # HUD overlay reads HUDSurface.top_active() and prepends a
-                # level-appropriate marker to the bar title until TTL expires.
-                # Patterns P-new + P-detector-without-action.
-                try:
-                    from heyvox.hud.surface import HUDSurface
-                    from heyvox.constants import MIC_WARN_TTL_SECS
-                    _mic_name = ""
+                # DEF-101: surface silent-skip via HUDSurface banner — but only
+                # after 2 consecutive quiet recordings so a single wake-word false
+                # positive (background noise briefly triggers the model) doesn't
+                # show a misleading "mic too quiet" warning to the user.
+                if self._quiet_streak >= 2:
                     try:
-                        from heyvox.constants import ACTIVE_MIC_FILE
-                        _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
-                    except OSError:
+                        from heyvox.hud.surface import HUDSurface
+                        from heyvox.constants import MIC_WARN_TTL_SECS
+                        _mic_name = ""
+                        try:
+                            from heyvox.constants import ACTIVE_MIC_FILE
+                            _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
+                        except OSError:
+                            pass
+                        _warn = (
+                            f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
+                            + (f" — {_mic_name}" if _mic_name else "")
+                        )
+                        HUDSurface.banner(
+                            level="warn",
+                            source="recording-quiet",
+                            text=_warn,
+                            ttl_secs=MIC_WARN_TTL_SECS,
+                        )
+                    except Exception:
                         pass
-                    _warn = (
-                        f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
-                        + (f" — {_mic_name}" if _mic_name else "")
-                    )
-                    HUDSurface.banner(
-                        level="warn",
-                        source="recording-quiet",
-                        text=_warn,
-                        ttl_secs=MIC_WARN_TTL_SECS,
-                    )
-                except Exception:
-                    pass
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
                     if self.training_collector.reclassify_tp_start_as_fp(
@@ -740,12 +812,18 @@ class RecordingStateMachine:
             _t_stt_start = time.time()
             if stop_time:
                 self._log(f"[TIMING] stop→STT start: {_t_stt_start - stop_time:.2f}s")
+            self._quiet_streak = 0
             self._log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
             try:
                 print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
             except (BrokenPipeError, OSError):
                 pass
             t0 = time.time()
+            # Capture warm/cold BEFORE transcribe: warm=False means this STT pays
+            # the cold model-load cost (force-unload under RAM pressure or 10min idle).
+            # Tagging it makes model-swap + cold-reload latency regressions greppable.
+            from heyvox.audio.stt import model_loaded as _mlx_model_loaded
+            _stt_was_warm = _mlx_model_loaded()
             text = transcribe_audio(
                 audio_chunks,
                 engine=self.config.stt.local.engine,
@@ -774,8 +852,16 @@ class RecordingStateMachine:
             except (ImportError, Exception) as e:
                 self._log(f"Post-STT memory check error: {e}")
             _t_stt_done = time.time()
+            # Short model id for log tagging: mlx-community/whisper-large-v3-turbo → large-v3-turbo
+            _stt_model_short = (
+                self.config.stt.local.mlx_model.split("/")[-1]
+                .replace("whisper-", "").replace("-mlx", "")
+            )
             if stop_time:
-                self._log(f"[TIMING] stop→STT done: {_t_stt_done - stop_time:.2f}s (STT={elapsed:.1f}s)")
+                self._log(
+                    f"[TIMING] stop→STT done: {_t_stt_done - stop_time:.2f}s "
+                    f"(STT={elapsed:.1f}s model={_stt_model_short} warm={_stt_was_warm})"
+                )
             self._log(
                 f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}"
             )
@@ -784,6 +870,8 @@ class RecordingStateMachine:
             _save_debug_audio("_stt_result", [], self.config.audio.sample_rate, {
                 "stt_raw": text[:200],
                 "stt_engine": self.config.stt.local.engine,
+                "stt_model": _stt_model_short,
+                "stt_warm": _stt_was_warm,
                 "stt_time_s": round(elapsed, 2),
             }, log_fn=self._log)
 
@@ -832,21 +920,58 @@ class RecordingStateMachine:
                 self.config.wake_words.stop,
             )
             _wake_word_stripped = text != pre_strip_text
+            _end_stripped = False
             if _wake_word_stripped:
                 self._log(
                     f"Wake word strip: '{pre_strip_text[:80]}' -> '{text[:80]}'"
                 )
-                if self.training_collector and _training_chunks:
-                    self.training_collector.save_fn_stop(
-                        _training_chunks, _training_sr
-                    )
-            elif (
-                self.training_collector and _training_chunks
-                and text and text.strip()
-            ):
-                self.training_collector.save_tp_stop(
-                    _training_chunks, _training_sr
+                # DEF-151 observability: trailing wake words in the transcript
+                # of a recording that was NOT ended by the stop-wake path are
+                # ground truth for missed stops — the user audibly said
+                # "Hey Vox" (STT heard it!) but the detector/gates dropped
+                # every attempt and a timeout/PTT/cap ended the session.
+                # End-strip is detected via common-prefix: a start-only strip
+                # changes the head of the text, an end-strip keeps it.
+                # reason == "stop_wake" with a stripped tail is the normal
+                # DEF-091 imperfect-trim case and stays untagged.
+                _pre_n = pre_strip_text.strip()
+                _post_n = text.strip()
+                _end_stripped = (
+                    len(_pre_n) > len(_post_n)
+                    and _pre_n.lower().startswith(_post_n.lower())
                 )
+                if _end_stripped and stop_reason != "stop_wake":
+                    self._log(
+                        f"[STOP_MISSED] reason={stop_reason} "
+                        f"tail='{_pre_n[len(_post_n):].strip()[:60]}'"
+                    )
+            # DEF-155/156: label the recording tail for wake-word training.
+            # Labeling rules live in classify_stop_outcome (unit-tested):
+            # fn = proven miss (end-strip on a non-stop_wake recording),
+            # tp = confirmed stop_wake detection (strip or not — DEF-091
+            # trim leftovers are TPs, the old code filed them as FN).
+            # Clips cut from the UN-trimmed raw_tail so the spoken wake
+            # word is actually in them; the trimmed _training_chunks
+            # (wake word removed) remain for the FP paths below.
+            if self.training_collector:
+                from heyvox.audio.training_collector import classify_stop_outcome
+                _label = classify_stop_outcome(
+                    stop_reason,
+                    end_stripped=_end_stripped,
+                    has_text=bool(text and text.strip()),
+                )
+                _tail_for_training = raw_tail if raw_tail else _training_chunks
+                if _label and _tail_for_training:
+                    if _label == "fn":
+                        self.training_collector.save_fn_stop(
+                            _tail_for_training, _training_sr,
+                            score=observed_stop_score,
+                        )
+                    else:
+                        self.training_collector.save_tp_stop(
+                            _tail_for_training, _training_sr,
+                            score=observed_stop_score,
+                        )
 
             # Quality filter: discard garbled/nonsensical STT output.
             # DEF-076 + DEF-081: surface the discard to the user with a HUD
@@ -866,6 +991,32 @@ class RecordingStateMachine:
                         _raw_for_reverify = _last_raw_wav
                 except NameError:
                     pass
+                # DEF-133: the large-v3 recovery needs a raw WAV, but
+                # _save_debug_audio only writes one when STT_DEBUG_DIR exists.
+                # With debug capture off (the default), persist *this* garbled
+                # recording on-demand so the reverify still runs — and the
+                # failure stays provable on disk. Only fires on the rare garbled
+                # path, so it never bloats the per-recording hot path.
+                if _raw_for_reverify is None and audio_chunks:
+                    try:
+                        import wave as _wave
+                        import tempfile as _tempfile
+                        _gfd, _gpath = _tempfile.mkstemp(
+                            prefix="heyvox-garbled-", suffix=".wav"
+                        )
+                        os.close(_gfd)
+                        _gaudio = np.concatenate(audio_chunks)
+                        with _wave.open(_gpath, "wb") as _gwf:
+                            _gwf.setnchannels(1)
+                            _gwf.setsampwidth(2)  # int16
+                            _gwf.setframerate(self.config.audio.sample_rate)
+                            _gwf.writeframes(_gaudio.tobytes())
+                        _raw_for_reverify = _gpath
+                        self._log(
+                            f"FILTER (garbled): raw audio captured on-demand for reverify at {_gpath}"
+                        )
+                    except Exception as _ge:
+                        self._log(f"FILTER (garbled): on-demand raw save failed: {_ge}")
                 # P-stochastic-stt: whisper-small can hallucinate repetition on
                 # a clean recording; re-run large-v3 in the background and copy
                 # any clean recovery to the clipboard. No auto-paste — by the

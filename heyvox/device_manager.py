@@ -175,11 +175,30 @@ class DeviceManager:
         except OSError:
             pass
 
+    def _arm_post_switch_grace(self) -> None:
+        """Reset the main-loop read-stall clock after a mic (re)selection.
+
+        DEF-132. main.py's no-data stall guard evicts the active device after
+        ~5 s of ``stream.get_read_available() < 1``. A reinit / IO-recovery
+        switch runs a slow PA-terminate → 0.5 s sleep → find_best_mic → open
+        sequence — and for Bluetooth an A2DP→HFP renegotiation — during which
+        no read happens. Without resetting the clock here, the freshly-selected
+        device inherits that dead-air debt and the guard evicts it before its
+        first PCM packet, bouncing a just-chosen BT headset straight back to the
+        built-in mic. Reset the clock and flag the switch so the guard grants a
+        longer first-packet window (main.py clears the flag on the first read).
+
+        Uses time.monotonic() to match main.py's ``_stall`` computation; the
+        AUDIO-13 timers next to the call sites stay on time.time() by design.
+        """
+        self.ctx.last_read_time = time.monotonic()
+        self.ctx.mic_just_switched = True
+
     # -------------------------------------------------------------------------
     # Reinit
     # -------------------------------------------------------------------------
 
-    def reinit(self, require_audio: bool = False) -> bool:
+    def reinit(self, require_audio: bool = False, expected: bool = False) -> bool:
         """Reinitialize the audio stack after a zombie stream is detected.
 
         Closes the existing stream and PyAudio instance, sleeps briefly, then
@@ -188,6 +207,17 @@ class DeviceManager:
 
         IMPORTANT: The caller must ensure ``not ctx.is_recording and not ctx.busy``
         before calling this method.
+
+        Args:
+            require_audio: If True, prefer devices that actually produce audio.
+            expected: DEF-124. True when the caller knows the reinit is the
+                deliberate consequence of an in-progress user action (e.g. the
+                BT HFP probe-fallback after the user clicked a new headset in
+                the HUD menu). Suppresses the "Mic zombie: reinitializing"
+                error toast and the mic-silent warn banner — those signals
+                exist to surface *unexpected* dead-mic events to the user,
+                and firing them during an expected cache flush misleads the
+                user into thinking their current built-in mic just died.
 
         Returns:
             True if recovery succeeded, False if no mic could be found.
@@ -201,7 +231,8 @@ class DeviceManager:
             print("[mic] Zombie stream detected, forcing reinit...", file=sys.stderr, flush=True)
         except (BrokenPipeError, OSError):
             pass
-        self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
+        if not expected:
+            self._hud_send({"type": "error", "text": "Mic zombie: reinitializing"})
         self._mic_pinned = False
 
         # Remember the failing device so we can detect "same device re-selected"
@@ -216,17 +247,35 @@ class DeviceManager:
         # mute (G435 mute button, Jabra hardware gate, etc.) — only the user
         # can. Patterns P-new + P-detector-without-action: silent state changes
         # need a visible signal. Banner auto-expires after MIC_WARN_TTL_SECS.
-        try:
-            from heyvox.hud.surface import HUDSurface
-            from heyvox.constants import MIC_WARN_TTL_SECS
-            HUDSurface.banner(
-                level="warn",
-                source="mic-zombie",
-                text=f"Mic silent — check mute ({self.dev_name[:30]})",
-                ttl_secs=MIC_WARN_TTL_SECS,
-            )
-        except Exception:
-            pass
+        #
+        # DEF-124: skip the banner when this reinit is an *expected* HFP-probe
+        # cache flush (user just clicked a new headset). Also, tailor the hint
+        # to the mic type — "check mute" makes sense for headsets with a mute
+        # button (G435, Jabra) but is misleading for built-in mics where no
+        # such button exists. For built-ins, point the user at the likely
+        # actual causes: macOS Microphone permission, another app holding the
+        # device exclusively, or a USB/HAL glitch (DEF-104).
+        if not expected:
+            try:
+                from heyvox.hud.surface import HUDSurface
+                from heyvox.constants import MIC_WARN_TTL_SECS
+                from heyvox.audio.mic import is_builtin_mic
+                if is_builtin_mic(self.dev_name):
+                    _hint_text = (
+                        f"Mic silent — check Microphone permission or "
+                        f"another app holding the device "
+                        f"({self.dev_name[:30]})"
+                    )
+                else:
+                    _hint_text = f"Mic silent — check mute ({self.dev_name[:30]})"
+                HUDSurface.banner(
+                    level="warn",
+                    source="mic-zombie",
+                    text=_hint_text,
+                    ttl_secs=MIC_WARN_TTL_SECS,
+                )
+            except Exception:
+                pass
 
         try:
             self.stream.stop_stream()
@@ -327,6 +376,17 @@ class DeviceManager:
                 print(f"[mic] Zombie reinit recovered: [{dev_index}] {self.dev_name}", file=sys.stderr, flush=True)
             except (BrokenPipeError, OSError):
                 pass
+            # DEF-124: recovery succeeded onto a different device, so the
+            # mic-silent warn banner (written upstream in this same reinit)
+            # is now stale. Clear it explicitly instead of letting it linger
+            # for the remainder of MIC_WARN_TTL_SECS — leaving "Mic silent"
+            # in the menu bar after the mic actually became live again was
+            # the second of the three DEF-124 UX defects.
+            try:
+                from heyvox.hud.surface import HUDSurface
+                HUDSurface.clear("mic-zombie")
+            except Exception:
+                pass
 
         self.stream = open_mic_stream(
             self.pa, dev_index,
@@ -342,6 +402,7 @@ class DeviceManager:
         self.ctx.last_good_audio_time = time.time()  # AUDIO-13: reset timeout
         self.ctx.dead_mic_zero_chunks = 0
         self.ctx.dead_mic_low_chunks = 0
+        self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
         return True
 
     # -------------------------------------------------------------------------
@@ -498,6 +559,7 @@ class DeviceManager:
         self._write_active_mic(self.dev_name)
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+        self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
         return True
 
     # -------------------------------------------------------------------------
@@ -664,7 +726,13 @@ class DeviceManager:
             self._bt_hfp_pin_mode = False
             # scan() guards on (not is_recording and not busy), so reinit()
             # is safe here without additional checks.
-            if self.reinit(require_audio=True):
+            # DEF-124: pass expected=True — this reinit is the *intentional*
+            # PortAudio HAL cache flush triggered by the user's HUD-menu
+            # headset switch, not an unexpected zombie. Suppresses the
+            # "Mic silent — check mute (MacBook Pro Microphone)" warn banner
+            # and the "Mic zombie: reinitializing" error toast, both of
+            # which misled the user during the 2026-05-28 G435 plug-in case.
+            if self.reinit(require_audio=True, expected=True):
                 # After reinit the device list is fresh; if the BT input
                 # landed, self.dev_name will now be the target and we're
                 # done. Otherwise emit the original give-up log.
@@ -720,6 +788,15 @@ class DeviceManager:
             _probe_pa.terminate()
 
         if candidate_name and candidate_name == self.dev_name:
+            # Probe rejected target_name (silent mic) — register cooldown so
+            # scan() skips it next round instead of retrying every 3s.
+            # DEF-158: without this, a silent BT mic causes an infinite probe
+            # loop that mutes the system output for ~2s every 3s.
+            if target_name.lower() not in self.dev_name.lower():
+                add_device_cooldown(target_name)
+                self._log(
+                    f"Probe: '{target_name}' silent — cooldown registered, skipping upgrade"
+                )
             # No actual change — don't close/reopen/cue, stay on current stream
             return False
 
@@ -955,6 +1032,50 @@ class DeviceManager:
                     )
                     device_change_cue(_cur_out_name, "output")
                     self._hud_send({"type": "state", "text": f"Speaker: {_cur_out_name}"})
+                    # DEF-127: When the system default output switches to a BT
+                    # headset that doesn't yet show as an input device (A2DP-only
+                    # mode), auto-trigger the HFP probe — same mechanism the
+                    # manual HUD-menu pin uses. Previously the user had to click
+                    # the headset by hand even though the OS already knew which
+                    # device they wanted. The trigger fires only when:
+                    #   1. New output isn't already the active input
+                    #   2. New output isn't a built-in device (speakers don't
+                    #      have mics)
+                    #   3. No PyAudio device with this name has input channels
+                    #      yet (A2DP-only signal — BT profile hasn't switched)
+                    #   4. No probe already running for some other target
+                    try:
+                        from heyvox.audio.mic import is_builtin_mic as _is_builtin
+                        if (
+                            _cur_out_name.lower() != (self.dev_name or "").lower()
+                            and not _is_builtin(_cur_out_name)
+                            and not self._bt_hfp_target
+                        ):
+                            _has_input = False
+                            for _i in range(self.pa.get_device_count()):
+                                _info = self.pa.get_device_info_by_index(_i)
+                                if (
+                                    _info['name'].lower() == _cur_out_name.lower()
+                                    and _info['maxInputChannels'] > 0
+                                ):
+                                    _has_input = True
+                                    break
+                            if not _has_input:
+                                self._log(
+                                    f"[DEF-127] Output '{_cur_out_name}' has no "
+                                    f"input enumeration yet (likely A2DP-only), "
+                                    f"auto-triggering HFP probe — no manual "
+                                    f"HUD-menu click needed"
+                                )
+                                self._bt_trigger_hfp_switch(
+                                    _cur_out_name, sample_rate, chunk_size,
+                                )
+                                self._bt_hfp_target = _cur_out_name
+                                self._bt_hfp_trigger_time = time.time()
+                                self._bt_hfp_attempts = 0
+                                self._bt_hfp_pin_mode = False
+                    except Exception as _auto_hfp_err:
+                        self._log(f"[DEF-127] Auto-HFP-probe error: {_auto_hfp_err}")
                 self._last_output_device = _cur_out_name
             except Exception:
                 pass

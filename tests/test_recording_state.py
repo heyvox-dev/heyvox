@@ -264,3 +264,72 @@ def test_send_local_exception_path_clears_cancel_transcription(rsm_and_ctx, isol
             stop_time=0.0,
         )
     assert ctx.cancel_transcription.is_set() is False
+
+
+# ---------------------------------------------------------------------------
+# Hands-free (double-tap) recordings: stop() skips the wake-word audio trim
+# ---------------------------------------------------------------------------
+
+class _SyncThread:
+    """threading.Thread stand-in that runs the target synchronously on start()."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+
+def _run_stop_and_count_chunks(handsfree):
+    """Drive stop() and return how many audio chunks reached _send_local.
+
+    Uses 100 chunks at 16000/1280 (12.5 chunks/s). A wake-word recording trims
+    1.5 s off the front (18 chunks) and 0.5 s off the back (6 chunks) → 76. A
+    hands-free recording has no spoken wake word, so both trims are zeroed → 100.
+    """
+    import numpy as np
+
+    ctx = AppContext()
+    config = MagicMock()
+    config.min_recording_secs = 0.5
+    config.cues_dir = None
+    config.stt.backend = "local"
+    config.audio.sample_rate = 16000
+    config.audio.chunk_size = 1280
+
+    captured = {}
+
+    def fake_send_local(duration, chunks, raw_rms_db, **kw):
+        captured["n"] = len(chunks)
+
+    rsm = RecordingStateMachine(
+        ctx=ctx, config=config, log_fn=lambda s: None, hud_send=lambda m: None
+    )
+    ctx.is_recording = True
+    ctx.recording_start_time = time.time() - 5.0
+    ctx.triggered_by_ptt = False
+    ctx.handsfree = handsfree
+    ctx.recording_target = object()  # non-None → stop() won't wait for snapshot
+    ctx.audio_buffer = [np.full(1280, 800, dtype=np.int16) for _ in range(100)]
+
+    with patch.object(rsm, "_send_local", side_effect=fake_send_local), \
+         patch("heyvox.recording.threading.Thread", _SyncThread), \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.ipc.update_state"):
+        rsm.stop()
+    return captured.get("n")
+
+
+def test_handsfree_recording_skips_wakeword_trim(isolate_flags):
+    """Double-tap (hands-free) recordings have no spoken wake word, so the
+    1.5 s front trim must NOT run — it would clip the user's opening words."""
+    assert _run_stop_and_count_chunks(handsfree=True) == 100
+
+
+def test_wakeword_recording_still_applies_trim(isolate_flags):
+    """Guard the control case: a normal wake-word recording is still trimmed."""
+    assert _run_stop_and_count_chunks(handsfree=False) == 76

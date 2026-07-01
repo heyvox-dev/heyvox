@@ -1,18 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.3
-milestone_name: Robustness Sweep
-status: shipped
-stopped_at: v1.3 shipped — 5 quick tasks merged + pushed
-last_updated: "2026-05-25T22:30:00.000Z"
-last_activity: 2026-05-25 -- DEF-080 closed via Stufe 1 of voice-resume-wip triage (herald CLI pinned to sys.executable -m); 6 quick tasks in v1.3 sweep
+milestone: v1.2
+milestone_name: Paste Injection Reliability
+status: executing
+stopped_at: Phase 14 context gathered
+last_updated: "2026-06-11T18:23:37.000Z"
+last_activity: 2026-06-11
 progress:
-  total_phases: 15
-  completed_phases: 8
-  total_plans: 25
-  completed_plans: 43
-  total_quick_tasks: 11
-  completed_quick_tasks: 11
+  total_phases: 16
+  completed_phases: 9
+  total_plans: 29
+  completed_plans: 50
   percent: 100
 ---
 
@@ -23,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 15 complete — Paste Target Lock shipped
+**Current focus:** Phase 16 — stt-auto-glossary
 
 ## Current Position
 
-Phase: 15
-Plan: All 7 plans complete
-Status: Ready to execute
-Last activity: 2026-05-11 -- Phase 14 planning complete
+Phase: 16
+Plan: Not started
+Status: Executing Phase 16
+Last activity: 2026-06-11
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
 
@@ -38,7 +36,7 @@ Progress: [████████████████████] 100% (v
 
 **Velocity (v1.0):**
 
-- Total plans completed: 10
+- Total plans completed: 14
 - Average duration: 3.5 min
 - Total execution time: ~0.6 hours
 

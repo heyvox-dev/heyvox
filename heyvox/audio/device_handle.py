@@ -182,4 +182,71 @@ class PortAudioHandle:
         return False
 
 
-__all__ = ["CoreAudioHandle", "PortAudioHandle"]
+# ---------------------------------------------------------------------------
+# DEF-104 detection — device live in CoreAudio but absent from PortAudio's cache
+# ---------------------------------------------------------------------------
+
+
+def _matches(prio_name: str, names: set[str]) -> bool:
+    """True if ``prio_name`` is a case-insensitive substring of any name.
+
+    Mirrors ``find_best_mic``'s matching (``prio_name.lower() in dev_name``),
+    so detection agrees with selection. ``names`` is expected lowercased.
+    """
+    p = prio_name.lower()
+    return any(p in n for n in names)
+
+
+def detect_missed_hotplug(
+    live_input_names: set[str],
+    pa_input_names: set[str],
+    mic_priority: list[str] | None,
+    current_dev_name: Optional[str],
+) -> Optional[str]:
+    """Return a ``mic_priority`` entry that is the DEF-104 signature, else None.
+
+    The signature: a configured-priority device that the **live CoreAudio HAL**
+    reports (``live_input_names``) but PortAudio's cached enumeration does NOT
+    (``pa_input_names``), *and* that outranks whatever mic is in use right now.
+    Such a device was hotplugged after the daemon's first PortAudio init and is
+    invisible to every PortAudio code path until the process restarts.
+
+    Pure function — both name sets are lowercased CoreAudio/PortAudio device
+    names; matching is the same substring rule as ``find_best_mic``. No I/O, so
+    it's unit-testable without audio hardware.
+
+    Args:
+        live_input_names: lowercase names of live input devices (CoreAudio).
+        pa_input_names: lowercase names PortAudio currently enumerates (in_ch>0).
+        mic_priority: configured priority list (substrings, highest first).
+        current_dev_name: the mic the daemon is using now (any case), or None.
+
+    Returns:
+        The highest-ranked priority entry matching the signature, or None. When
+        ``live_input_names`` is empty (CoreAudio unavailable) this returns None
+        rather than false-firing — detection degrades to a no-op.
+    """
+    if not mic_priority or not live_input_names:
+        return None
+
+    # Rank of the device in use now. Unmatched / None → worst rank, so any
+    # live-but-uncached priority device counts as an upgrade.
+    cur = (current_dev_name or "").lower()
+    current_rank = len(mic_priority)
+    for rank, prio_name in enumerate(mic_priority):
+        if cur and prio_name.lower() in cur:
+            current_rank = rank
+            break
+
+    for rank, prio_name in enumerate(mic_priority):
+        if rank >= current_rank:
+            # Not an upgrade over the current mic — stop (list is ordered).
+            break
+        if _matches(prio_name, live_input_names) and not _matches(
+            prio_name, pa_input_names
+        ):
+            return prio_name
+    return None
+
+
+__all__ = ["CoreAudioHandle", "PortAudioHandle", "detect_missed_hotplug"]

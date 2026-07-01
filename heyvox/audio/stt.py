@@ -34,10 +34,11 @@ _mlx_language: str = ""
 _mlx_loaded = threading.Event()  # Set when model is ready
 _mlx_lock = threading.Lock()
 _mlx_last_use: float = 0.0
-_mlx_unload_secs: float = 600.0  # 10 minutes idle → unload (short timeouts cause slow reloads under swap pressure)
+_mlx_unload_secs: float = 300.0  # idle → unload; configurable via stt.local.unload_secs (too-short timeouts cause slow reloads under swap pressure)
 _mlx_unloader: threading.Timer | None = None
 _mlx_transcribing: bool = False  # Guard: prevents unload during active transcription
 _log_fn: Callable[[str], None] | None = None
+_mlx_initial_prompt: str = ""   # Phase 16: glossary bias for the first decode window
 
 
 def _log(msg: str) -> None:
@@ -125,6 +126,16 @@ def preload_model() -> None:
     t.start()
 
 
+# DEF-152: the glossary initial_prompt collapses prompt-fragile Whisper decoders —
+# whisper-small degenerates to "!" on healthy audio, large-v3 stalls — while only the
+# "turbo" class (large-v3-turbo, turbo-german-f16-q4) is prompt-robust. Gate the glossary
+# so switching to a fragile model auto-disables biasing instead of breaking dictation.
+# Prompts are model-sensitive (cf. P-detector-tuned-to-model, DEF-137).
+def _model_supports_glossary(model_id: str) -> bool:
+    """True only for prompt-robust MLX Whisper models (the turbo class, DEF-152)."""
+    return "turbo" in (model_id or "").lower()
+
+
 def init_local_stt(
     engine: str = "mlx",
     mlx_model: str = "mlx-community/whisper-small-mlx",
@@ -132,6 +143,8 @@ def init_local_stt(
     language: str = "",
     threads: int = 4,
     log_fn: Callable[[str], None] | None = None,
+    initial_prompt: str = "",
+    unload_secs: float = 300.0,
 ) -> None:
     """Initialize local STT engine.
 
@@ -145,14 +158,29 @@ def init_local_stt(
         language: Language code (e.g. "en") or "" for auto-detect.
         threads: CPU thread count for sherpa backend.
         log_fn: Optional callable(str) for log messages. Defaults to print.
+        initial_prompt: Rendered glossary string for MLX Whisper biasing (Phase 16).
+        unload_secs: Idle seconds before the MLX model is unloaded from RAM.
     """
-    global _recognizer, _mlx_model_id, _mlx_language, _log_fn
+    global _recognizer, _mlx_model_id, _mlx_language, _log_fn, _mlx_initial_prompt
+    global _mlx_unload_secs
     _log_fn = log_fn
 
     if engine == "mlx":
         _mlx_model_id = mlx_model
         _mlx_language = language
-        _log(f"Local STT configured (MLX Metal GPU, lazy load, lang={'auto' if not language else language})")
+        # DEF-152 model-gate: only turbo-class models survive the glossary prompt.
+        if initial_prompt and not _model_supports_glossary(mlx_model):
+            _log(f"glossary DISABLED for prompt-fragile model {mlx_model} "
+                 f"(DEF-152 — only turbo-class models are prompt-robust); biasing skipped")
+            _mlx_initial_prompt = ""
+        else:
+            _mlx_initial_prompt = initial_prompt
+        if unload_secs > 0:
+            _mlx_unload_secs = unload_secs
+        _log(f"Local STT configured (MLX Metal GPU, lazy load, "
+             f"lang={'auto' if not language else language}, "
+             f"glossary={'on' if _mlx_initial_prompt else 'off'}, "
+             f"unload={int(_mlx_unload_secs)}s)")
     else:
         try:
             import sherpa_onnx
@@ -251,6 +279,13 @@ def transcribe_audio(
         kwargs["condition_on_previous_text"] = False
         kwargs["compression_ratio_threshold"] = 2.2
         kwargs["logprob_threshold"] = -0.8
+        # Phase 16: bias the first decode window toward the learned glossary. Engine-gated
+        # (sherpa-onnx has no initial_prompt equivalent, Pitfall 5) AND model-gated to the
+        # prompt-robust turbo class (DEF-152 — fragile models collapse under the prompt;
+        # init already clears _mlx_initial_prompt for them, this is belt-and-suspenders).
+        # With condition_on_previous_text=False (above) this only affects the first 30s window.
+        if _mlx_initial_prompt and engine == "mlx" and _model_supports_glossary(_mlx_model_id or mlx_model):
+            kwargs["initial_prompt"] = _mlx_initial_prompt
 
         # Run transcription with timeout to prevent hangs.
         # Use context manager so the executor waits for completion on success,

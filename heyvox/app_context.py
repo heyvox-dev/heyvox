@@ -9,6 +9,7 @@ Requirements: DECOMP-04
 from __future__ import annotations
 import dataclasses
 import threading
+from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -49,8 +50,30 @@ class AppContext:
     busy_since: float = 0.0
     """Timestamp when busy flag was set (used by busy watchdog)."""
 
+    rec_stop_score_max: float = 0.0
+    """Highest wake-word score the model produced during the current
+    recording. Reset by RecordingManager.start(), written by the main
+    loop's prediction sweep, snapshotted by stop() into fn_stop/tp_stop
+    training-clip filenames — distinguishes model-blind stop misses
+    (score≈0) from gate-blocked ones (score near threshold). DEF-155."""
+
     audio_buffer: list = dataclasses.field(default_factory=list)
+    preroll_buffer: deque = dataclasses.field(default_factory=deque)
+    """~500ms ring buffer of idle audio, prepended to a recording so the first
+    words aren't clipped. _setup() replaces this with a maxlen-bounded deque
+    once sample_rate/chunk_size are known; the main loop fills it while idle and
+    the wake-word / PTT / hands-free start paths snapshot it. Shared on ctx
+    because the PTT callbacks (built in _setup) and the fill/consume sites (in
+    _run_loop) live in different function scopes."""
     triggered_by_ptt: bool = False
+    handsfree: bool = False
+    """True if the current recording was started by a PTT-key double-tap
+    (hands-free / continuous mode). Like a wake-word recording it ends on
+    silence / stop wake word / Escape (triggered_by_ptt stays False so the
+    main-loop watchdogs run), but unlike a wake-word recording there is NO
+    spoken wake word — so RecordingStateMachine.stop() skips BOTH the start
+    and end audio trims that would otherwise clip the user's first/last words.
+    Mutually exclusive with triggered_by_ptt."""
     stopped_via_ptt_mid_recording: bool = False
     """DEF-116: True if PTT was pressed to stop a wake-word-started recording.
     Distinguishes "user gave up waiting for stop-wake" from "stop-wake-word
@@ -120,6 +143,17 @@ class AppContext:
 
     dead_mic_low_chunks: int = 0
     """Count of chunks with level 1-9 since last_good_audio_time (AUDIO-13 diagnostic)."""
+
+    last_read_time: float = 0.0
+    """time.monotonic() of the last stream read. Drives the main-loop no-data
+    stall guard. Initialised in main() before the loop; reset by DeviceManager
+    on every mic (re)selection (DEF-132)."""
+
+    mic_just_switched: bool = False
+    """DEF-132: set True by DeviceManager right after a mic (re)selection so the
+    main-loop no-data stall guard grants the freshly-chosen device a longer
+    first-packet window — Bluetooth A2DP→HFP can take several seconds to deliver
+    its first PCM frame. Cleared by main() on the first successful read."""
 
     # -------------------------------------------------------------------------
     # HUD state (Phase 5 — optional, never crashes main loop)

@@ -500,6 +500,49 @@ def run_setup(config) -> None:
     console.print()
 
     # ---------------------------------------------------------------------------
+    # Step 9b: Telemetry consent (opt-in only)
+    # ---------------------------------------------------------------------------
+    console.print("[bold]Step 9b: Anonymous Telemetry (optional)[/bold]")
+    console.print(
+        "  HeyVox can send anonymous usage signals so we can spot regressions"
+    )
+    console.print(
+        "  before users notice. [bold]Off by default[/bold] — flip it on only"
+    )
+    console.print("  if you want to help.")
+    console.print()
+    console.print("  [dim]What's sent (only when enabled):[/dim]")
+    console.print("  [dim]  • HeyVox version, macOS version, Mac model[/dim]")
+    console.print(
+        "  [dim]  • Counts of: USER_EFFORT, NEAR_MISS, WAKE_VAD_DROP, MIC_ZOMBIE, KOKORO_RESTART[/dim]"
+    )
+    console.print("  [dim]  • Random anonymous UUID (resettable any time)[/dim]")
+    console.print()
+    console.print("  [dim]What's NOT sent:[/dim]")
+    console.print("  [dim]  • Audio, transcripts, file paths, config, workspace names[/dim]")
+    console.print()
+    console.print("  [dim]Toggle later: HUD menu → Settings → Telemetry, or `heyvox telemetry`.[/dim]")
+    console.print("  [dim]Full field list: docs/telemetry.md[/dim]")
+    console.print()
+
+    enable_telemetry = console.input(
+        "  Enable anonymous telemetry? [y/N] "
+    ).strip().lower()
+    if enable_telemetry == "y":
+        try:
+            from heyvox.telemetry.consent import enable as _tm_enable, get_anon_id
+            _tm_enable()
+            console.print(f"  [green]✓[/green] Telemetry enabled (anon ID: {get_anon_id()})")
+            telemetry_enabled_state = True
+        except Exception as exc:
+            console.print(f"  [yellow]![/yellow] Could not enable telemetry: {exc}")
+            telemetry_enabled_state = False
+    else:
+        console.print("  [dim]Skipped — telemetry remains off.[/dim]")
+        telemetry_enabled_state = False
+    console.print()
+
+    # ---------------------------------------------------------------------------
     # Step 10: Summary
     # ---------------------------------------------------------------------------
     console.print("[bold]Step 10: Setup Summary[/bold]")
@@ -549,6 +592,10 @@ def run_setup(config) -> None:
             "[dim]-[/dim]",
             "MCP: not registered (run `heyvox setup` to add)",
         )
+    summary_table.add_row(
+        "[green]✓ Enabled[/green]" if telemetry_enabled_state else "[dim]Disabled[/dim]",
+        "Anonymous telemetry (toggle with `heyvox telemetry`)",
+    )
 
     console.print(summary_table)
     console.print()

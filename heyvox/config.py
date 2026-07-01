@@ -46,12 +46,15 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 class WakeWordConfig(BaseModel):
     """Wake word model names for start and stop triggers."""
-    start: str = "hey_vox"
+    # Default ships with hey_jarvis_v0.1 (bundled with openwakeword) so a fresh
+    # pip install works out-of-the-box on any voice. Switch to "hey_vox" once the
+    # general-purpose model ships (see docs/wakeword-training.md). DEF-159.
+    start: str = "hey_jarvis_v0.1"
     stop: str = ""  # Empty = use same as start
-    # Additional models to load as fallback wake words. Ships with
-    # hey_jarvis_v0.1 (bundled with openwakeword) so fresh installs get a
-    # working fallback before any custom model is trained.
-    also_load: list[str] = ["hey_jarvis_v0.1"]
+    # Additional fallback wake words. Empty by default — do NOT add "hey_vox"
+    # until ~/.config/heyvox/models/hey_vox.onnx exists, or openwakeword raises
+    # ValueError on the unknown model name (DEF-159).
+    also_load: list[str] = []
     model_thresholds: dict[str, float] = {}  # Per-model threshold overrides (e.g. hey_vox: 0.95)
     models_dir: str = ""  # Custom models directory (empty = use default locations)
     # Hard negative mining: passively save audio clips that contain speech but
@@ -76,6 +79,8 @@ class STTLocalConfig(BaseModel):
     model_dir: str = "models/sherpa-onnx-whisper-small"
     language: str = ""
     threads: int = 4
+    initial_prompt: str = ""   # rendered glossary from `heyvox learn-vocab` (Phase 16)
+    unload_secs: float = 300.0  # idle seconds before MLX model is unloaded from RAM
 
 
 class STTConfig(BaseModel):
@@ -325,6 +330,14 @@ class AppProfileConfig(BaseModel):
     # Requirement: PASTE-15-R7
     ax_settle_before_verify: float = 0.1
 
+    # Multi-monitor fix: when `focused_was_text_field=False` at capture (because
+    # the mouse-target app was visible on another monitor but not the OS-level
+    # frontmost — Chrome on monitor 1, Slack on monitor 2 etc.) AND this profile
+    # has no focus_shortcut, try NSRunningApplication.activate() + re-query AX
+    # before fail-closed. Useful for apps that auto-focus their composer on
+    # activation (Slack) but lack a deterministic focus keystroke.
+    activate_on_mismatch: bool = False
+
 
 # Built-in profiles for common apps. Users can override or add more via config.
 _DEFAULT_APP_PROFILES: list[dict] = [
@@ -376,6 +389,21 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "is_electron": False,
         "supports_ax_verify": False,
     },
+    {
+        # Slack has no clean focus shortcut for the composer (Cmd+K opens the
+        # quick switcher, not the composer). It auto-focuses the active
+        # channel's composer when the app becomes frontmost, so the
+        # activate_on_mismatch path is the recovery route for the multi-monitor
+        # case where Slack is visible on another monitor but Chrome (etc.) is
+        # the OS-level frontmost.
+        "name": "Slack",
+        "focus_shortcut": "",
+        "enter_count": 1,
+        "is_electron": True,
+        "settle_delay": 0.3,
+        "enter_delay": 0.15,
+        "activate_on_mismatch": True,
+    },
 ]
 
 
@@ -384,11 +412,34 @@ class PushToTalkConfig(BaseModel):
     enabled: bool = True
     key: str = "fn"
 
+    # Double-tap → hands-free (continuous) recording.
+    # A quick double-tap of the PTT key starts a recording that runs until
+    # silence / stop wake word / Escape — exactly like a wake-word trigger,
+    # but with NO spoken wake word (so no start/end audio trim). A single tap
+    # while it runs toggles it off. A plain hold remains classic push-to-talk.
+    double_tap_handsfree: bool = True
+    # Max press duration (seconds) that still counts as a "tap" rather than a
+    # hold. Also the delay before a held key is promoted to push-to-talk — kept
+    # short so the latency is imperceptible; the idle pre-roll buffer back-fills
+    # any speech spoken during this window so no words are lost.
+    tap_max_secs: float = 0.2
+    # Max gap (seconds) between the two taps for them to register as a
+    # double-tap. Longer than this and the first tap is treated as a no-op.
+    double_tap_secs: float = 0.35
+
 
 class AudioConfig(BaseModel):
     """Audio stream parameters (must match openwakeword requirements)."""
     sample_rate: int = 16000
     chunk_size: int = 1280
+
+    # DEF-148: hold a silent OUTPUT stream open while the default output is a
+    # USB device, so USB power-saving headsets (G535 over Lightspeed) don't park
+    # the audio path and swallow the cold-start of short cues. No-op on built-in
+    # speakers / Bluetooth / virtual outputs (the delay doesn't occur there), so
+    # it's safe to leave on. Disable if the suppressed idle deep-sleep costs too
+    # much battery on a wireless headset.
+    output_keepalive: bool = True
 
 
 class InjectionConfig(BaseModel):
@@ -474,6 +525,79 @@ class MicProfileEntryConfig(BaseModel):
 # Root config model
 # ---------------------------------------------------------------------------
 
+class TelemetryConfig(BaseModel):
+    """Anonymous telemetry — opt-in, default OFF.
+
+    What's sent (only when enabled):
+    * App version, macOS version, Mac model.
+    * Counter deltas: USER_EFFORT, NEAR_MISS, WAKE_VAD_DROP, MIC_ZOMBIE,
+      KOKORO_RESTART (numbers only, no log content).
+    * Anonymous random UUID stored at ``~/.config/heyvox/telemetry-id``.
+
+    What is NOT sent:
+    * Audio samples, transcripts, file paths, config contents, workspace names.
+
+    See ``docs/telemetry.md`` for the full field list.
+    """
+    # Master switch. Default off; flipped on via setup wizard or HUD menu.
+    enabled: bool = False
+
+    # POST endpoint for batched events. Server may not exist yet; the sender
+    # tolerates connection failures and keeps queued events on disk.
+    endpoint: str = "https://heyvox.dev/telemetry/v1/events"
+
+    # Batch cadence — minimum seconds between upload attempts.
+    batch_secs: int = 3600
+
+    # Hard ceiling on a single batch payload to avoid runaway growth.
+    max_batch_kb: int = 100
+
+
+class MemoryConfig(BaseModel):
+    """System RAM-pressure monitoring → menu-bar banner.
+
+    Distinct from the self-RSS watchdog in main.py (which restarts heyvox when
+    its OWN process balloons). This watches the WHOLE machine and only shows a
+    banner: system RAM pressure is what forces MLX Whisper to cold-reload
+    (force-unload at RSS>1500MB under swap), which silently slows STT. Surfaced
+    via HUDSurface — ⚠️ at warn, ❌ at critical, full text on hover. Read-only,
+    no restart side-effect. See heyvox/ram_pressure.py.
+    """
+    # Master switch. Default ON — it is read-only monitoring, no side-effects.
+    monitor_system_ram: bool = True
+
+    # Free system RAM (MB) below which a ⚠️ warn banner shows. Also fires on the
+    # macOS pressure level (kern.memorystatus_vm_pressure_level >= 2) regardless.
+    system_ram_warn_mb: int = 2048
+
+    # Free system RAM (MB) below which a ❌ critical banner shows (or pressure
+    # level >= 4).
+    system_ram_critical_mb: int = 1024
+
+
+class VocabLearnerConfig(BaseModel):
+    """Offline vocabulary glossary extractor for STT initial_prompt biasing (Phase 16).
+
+    Opt-in, off the hot path. When `enabled` is False (the default) NO transcript text is
+    ever sent to any subprocess or network — the learner is a no-op. The extraction call
+    (Haiku via the Max subscription, or the anthropic API-key path for OSS users) only runs
+    when the user explicitly flips `enabled` on.
+    """
+    enabled: bool = False                       # opt-in — MUST default closed (privacy)
+    provider: str = "subscription"              # "subscription" (claude CLI) | "api" (ANTHROPIC_API_KEY)
+    model: str = "claude-haiku-4-5"
+    max_terms: int = 30                         # cap on terms entering initial_prompt
+    min_frequency: int = 2                      # corpus-frequency gate (drop one-off junk)
+    min_confidence: float = 0.6                 # confidence gate (drop low-conf hallucinations)
+    seeds: list[str] = [                        # private terms no model can infer (guardrail layer 2)
+        "ngrid", "HeyVox", "Conductor", "Kokoro",
+        "Hush", "Herald", "Quartz", "Geminicap",
+        "MLX", "sherpa-onnx",
+    ]
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class HeyvoxConfig(BaseModel):
     """Root configuration model for the heyvox voice layer.
 
@@ -503,6 +627,7 @@ class HeyvoxConfig(BaseModel):
     transcription_prefix: str = ""
 
     stt: STTConfig = STTConfig()
+    vocab_learner: VocabLearnerConfig = VocabLearnerConfig()
     tts: TTSConfig = TTSConfig()
     hold_queue: HoldQueueConfig = HoldQueueConfig()
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
@@ -532,6 +657,12 @@ class HeyvoxConfig(BaseModel):
 
     log_file: str = LOG_FILE_DEFAULT
     log_max_bytes: int = 1_000_000
+
+    # Anonymous telemetry — opt-in (see TelemetryConfig docstring)
+    telemetry: TelemetryConfig = TelemetryConfig()
+
+    # System RAM-pressure monitoring → menu-bar banner (see MemoryConfig)
+    memory: MemoryConfig = MemoryConfig()
 
     @field_validator("target_mode")
     @classmethod
@@ -628,37 +759,55 @@ _config_lock = threading.Lock()
 
 
 def _yaml_escape(value: str) -> str:
-    """Escape a string value for safe YAML embedding."""
-    # Quote if it contains YAML-special characters
-    if any(c in value for c in (':', '#', '{', '}', '[', ']', ',', '&', '*',
-                                  '?', '|', '-', '<', '>', '=', '!', '%', '@',
-                                  '`', '"', "'")):
-        # Use double quotes with backslash escaping
-        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    """Escape a string value for safe YAML embedding (double-quoted scalar).
+
+    Control characters (newline, tab, CR) MUST be backslash-escaped: a literal
+    newline inside a double-quoted scalar spans multiple lines and YAML folds it
+    back to a single space on reload, silently corrupting the stored value.
+    """
+    specials = (':', '#', '{', '}', '[', ']', ',', '&', '*', '?', '|', '-',
+                '<', '>', '=', '!', '%', '@', '`', '"', "'", '\n', '\r', '\t')
+    if any(c in value for c in specials):
+        # Use double quotes with backslash escaping (backslash first, then quote,
+        # then control chars — so each replacement targets the original text).
+        escaped = (value.replace('\\', '\\\\')
+                        .replace('"', '\\"')
+                        .replace('\n', '\\n')
+                        .replace('\r', '\\r')
+                        .replace('\t', '\\t'))
+        return f'"{escaped}"'
     if not value or value != value.strip():
         return f'"{value}"'
     return value
 
 
-def update_config(**kwargs) -> None:
+def update_config(**kwargs) -> bool:
     """Update specific keys in the config file, preserving comments and structure.
 
     Thread-safe (uses _config_lock). Writes atomically via temp file + rename.
     Uses simple line-based replacement for top-level keys. For nested keys,
     use dot notation (e.g., ``tts.verbosity="short"``).
 
-    Only writes keys that are already present in the file. Appends new
-    top-level keys at the end if not found.
+    Top-level keys are appended at the end if not present. A nested key is
+    inserted into its enclosing section, but if an INTERMEDIATE section is
+    missing (e.g. ``stt.local`` when the file has no ``stt:`` block) the write
+    is skipped — the line-based editor will not synthesize section headers.
+
+    Returns True only if EVERY requested key was applied; False if any key was
+    skipped (e.g. missing intermediate section, or no/blank config file). Callers
+    that need accurate user feedback MUST check the return value rather than
+    assume success.
     """
     with _config_lock:
         if not CONFIG_FILE.exists():
-            return
+            return False
 
         content = CONFIG_FILE.read_text()
         if not content.strip():
-            return  # Don't clobber an empty/blank config with partial updates
+            return False  # Don't clobber an empty/blank config with partial updates
 
         lines = content.splitlines(keepends=True)
+        applied_all = True
 
         for key, value in kwargs.items():
             # Convert Python values to YAML scalars
@@ -675,11 +824,11 @@ def update_config(**kwargs) -> None:
             else:
                 yaml_val = str(value)
 
-            parts = key.split(".", 1)
-            found = False
+            key_parts = key.split(".")
 
-            if len(parts) == 1:
+            if len(key_parts) == 1:
                 # Top-level key
+                found = False
                 for i, line in enumerate(lines):
                     stripped = line.lstrip()
                     if stripped.startswith(f"{key}:") and not stripped.startswith("#"):
@@ -690,37 +839,98 @@ def update_config(**kwargs) -> None:
                 if not found:
                     lines.append(f"{key}: {yaml_val}\n")
             else:
-                # Nested key (e.g., tts.verbosity)
-                section, subkey = parts
-                in_section = False
-                section_start_idx = -1
-                section_last_idx = -1
-                section_indent = ""
-                for i, line in enumerate(lines):
-                    stripped = line.lstrip()
-                    if stripped.startswith(f"{section}:"):
-                        in_section = True
-                        section_start_idx = i
-                        continue
-                    if in_section:
-                        if stripped and not stripped.startswith("#") and not line[0].isspace():
-                            in_section = False  # Left the section
-                            continue
-                        # Track last indented (section-member) line for insertion point
-                        if line.strip() and line[0].isspace():
-                            section_last_idx = i
-                            if not section_indent:
-                                section_indent = line[:len(line) - len(stripped)]
-                        if stripped.startswith(f"{subkey}:"):
-                            indent = line[:len(line) - len(stripped)]
-                            lines[i] = f"{indent}{subkey}: {yaml_val}\n"
-                            found = True
-                            break
-                if not found and section_start_idx >= 0:
-                    # Section exists but subkey missing — insert inside the section.
-                    insert_idx = (section_last_idx + 1) if section_last_idx >= 0 else (section_start_idx + 1)
-                    indent = section_indent or "  "
-                    lines.insert(insert_idx, f"{indent}{subkey}: {yaml_val}\n")
+                # Nested key with arbitrary depth (e.g., tts.verbosity or stt.local.initial_prompt).
+                # Walk down the key_parts hierarchy, each section narrowing the search window.
+                # search_start / search_end track the current section's line range.
+                search_start = 0
+                search_end = len(lines)
+                # current_min_indent: the indent level we require the SECTION header to have.
+                # Top-level sections start at column 0 (indent=""), then 2-space children, etc.
+                section_indent_required: str | None = None
+
+                found = False
+                for depth, part in enumerate(key_parts):
+                    is_leaf = (depth == len(key_parts) - 1)
+                    in_section = False
+                    section_start_idx = -1
+                    section_last_idx = -1
+                    next_section_indent = ""
+
+                    for i in range(search_start, search_end):
+                        line = lines[i]
+                        stripped = line.lstrip()
+                        current_indent = line[:len(line) - len(stripped)]
+
+                        if is_leaf:
+                            # We're inside the parent section; look for the leaf key.
+                            if not in_section:
+                                # Not yet entered the section — skip until we are inside it.
+                                # (search_start was set to point inside the section by previous
+                                # depth iterations; in_section will be True from the first line
+                                # that is indented relative to the section header)
+                                if stripped and not stripped.startswith("#") and not line[0].isspace():
+                                    break  # Left the enclosing section
+                                if line.strip():
+                                    in_section = True
+                                    section_last_idx = i
+                                    if not next_section_indent:
+                                        next_section_indent = current_indent
+                                    if stripped.startswith(f"{part}:"):
+                                        lines[i] = f"{current_indent}{part}: {yaml_val}\n"
+                                        found = True
+                                        break
+                                continue
+                            # Already in the section
+                            if stripped and not stripped.startswith("#") and not line[0].isspace():
+                                break  # Left the enclosing section
+                            if line.strip() and line[0].isspace():
+                                section_last_idx = i
+                                if not next_section_indent:
+                                    next_section_indent = current_indent
+                                if stripped.startswith(f"{part}:"):
+                                    lines[i] = f"{current_indent}{part}: {yaml_val}\n"
+                                    found = True
+                                    break
+                        else:
+                            # Intermediate depth — find the section header for this part.
+                            if section_indent_required is None:
+                                # Top-level section: header must be at column 0
+                                header_match = (not line[0].isspace()
+                                                if line.strip() else False)
+                            else:
+                                header_match = (current_indent == section_indent_required
+                                                if line.strip() else False)
+
+                            if header_match and stripped.startswith(f"{part}:") and not stripped.startswith("#"):
+                                section_start_idx = i
+                                in_section = True
+                                continue
+
+                            if in_section:
+                                if stripped and not stripped.startswith("#") and not line[0].isspace():
+                                    # Returned to top-level — section ended
+                                    search_end = i
+                                    break
+                                if line.strip() and line[0].isspace():
+                                    section_last_idx = i
+                                    if not next_section_indent:
+                                        next_section_indent = current_indent
+
+                    if not is_leaf:
+                        if section_start_idx < 0:
+                            applied_all = False  # missing intermediate section — key skipped
+                            break  # Section not found at all — give up
+                        # Narrow search window to the contents of this section.
+                        search_start = section_start_idx + 1
+                        # search_end already narrowed above when we left the section
+                        section_indent_required = next_section_indent or None
+                    else:
+                        if not found:
+                            # Leaf key missing — insert inside the enclosing section.
+                            insert_after = section_last_idx if section_last_idx >= 0 else search_start - 1
+                            insert_idx = insert_after + 1
+                            insert_indent = next_section_indent or section_indent_required or "    "
+                            lines.insert(insert_idx, f"{insert_indent}{part}: {yaml_val}\n")
 
         # Atomic write: temp file + rename prevents partial writes on crash
         new_content = "".join(lines)
@@ -740,6 +950,8 @@ def update_config(**kwargs) -> None:
             except OSError:
                 pass
             CONFIG_FILE.write_text(new_content)
+
+        return applied_all
 
 
 # ---------------------------------------------------------------------------
@@ -765,9 +977,9 @@ def generate_default_config() -> str:
 # ---------------------------------------------------------------------------
 
 wake_words:
-  start: hey_vox                   # Model name (from models/ directory)
-  stop: hey_vox                    # Leave same as start to toggle; use different for separate start/stop
-  also_load: [hey_jarvis_v0.1]     # Extra fallback wake words loaded alongside start/stop
+  start: hey_jarvis_v0.1           # Bundled default (works on any voice). Switch to "hey_vox" after the general model ships — see docs/wakeword-training.md
+  stop: hey_jarvis_v0.1            # Leave same as start to toggle; use different for separate start/stop
+  also_load: []                    # Extra fallback wake words; add "hey_vox" only once its .onnx model is present
 
 threshold: 0.5             # Detection confidence threshold (0.0–1.0)
 cooldown_secs: 2.0         # Minimum seconds between triggers
@@ -815,6 +1027,12 @@ transcription_prefix: ""   # Prepend this text to every transcription
 push_to_talk:
   enabled: true
   key: fn                  # Supported: fn, right_cmd, right_alt, right_ctrl, right_shift
+  double_tap_handsfree: true  # Double-tap the PTT key → hands-free recording
+                              # (runs until silence/stop-word/Escape, like wake word).
+                              # A single tap while it runs toggles it off.
+                              # A plain hold stays classic push-to-talk.
+  tap_max_secs: 0.2        # Max press to count as a "tap" (also hold-detect delay)
+  double_tap_secs: 0.35    # Max gap between the two taps
 
 # ---------------------------------------------------------------------------
 # Speech-to-text (STT)

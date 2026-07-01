@@ -12,5 +12,7 @@ set_heyvox_pythonpath
 # Fork worker into background — stdin is already consumed by bash, so pass via temp file
 TMPFILE=$(mktemp /tmp/herald-hook.XXXXXX)
 cat > "$TMPFILE"
-python3 -m heyvox.herald.worker "$TMPFILE" </dev/null >/dev/null 2>&1 &
-disown
+# DEF-121: heyvox_run_worker resolves a python with heyvox importable so
+# Conductor / project-virtualenv PATH prepends can't silently crash the
+# worker with ModuleNotFoundError under the /dev/null redirect.
+heyvox_run_worker "$TMPFILE"

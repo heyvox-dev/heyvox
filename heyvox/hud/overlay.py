@@ -35,6 +35,8 @@ PILL_MARGIN_RIGHT = 16  # Default distance from right edge of screen
 ANIM_DURATION = 0.2
 from heyvox.constants import HUD_POSITION_FILE as POSITION_FILE  # Persists user-dragged position
 _MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
+_LAST_STATE = "idle"    # DEF-135: last state applied; lets the overlay-mode toggle re-apply it
+_REAPPLY_STATE = None   # DEF-135: set by main() — re-applies _LAST_STATE to pill + menu bar
 
 _MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.png")
 
@@ -151,65 +153,6 @@ def _save_position(x, y):
 # ---------------------------------------------------------------------------
 # Custom NSView subclasses (defined inside main() to ensure AppKit is loaded)
 # ---------------------------------------------------------------------------
-
-def _make_comm_badge_view_class():
-    """Create an NSView subclass that draws the TNG Starfleet communicator badge."""
-    from AppKit import NSView, NSColor, NSBezierPath, NSFont, NSFontAttributeName, \
-        NSForegroundColorAttributeName, NSParagraphStyleAttributeName
-    from Foundation import NSMakeRect, NSDictionary, NSAttributedString
-    import AppKit
-
-    class CommBadgeView(NSView):
-        def drawRect_(self, rect):
-            w = rect.size.width
-            h = rect.size.height
-            cx = w / 2 - 10  # shift badge left to make room for "Vox"
-            cy = h / 2
-
-            # -- Background oval --
-            oval_w = 26
-            oval_h = 22
-            oval_rect = NSMakeRect(cx - oval_w/2, cy - oval_h/2, oval_w, oval_h)
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.45, 0.35, 0.05, 0.5).set()
-            NSBezierPath.bezierPathWithOvalInRect_(oval_rect).fill()
-
-            # -- "V" chevron (our brand mark) --
-            v = NSBezierPath.bezierPath()
-            v.setLineWidth_(2.5)
-            # Left arm of V
-            v.moveToPoint_((cx - 7, cy + 8))
-            v.lineToPoint_((cx, cy - 5))
-            # Right arm of V
-            v.lineToPoint_((cx + 7, cy + 8))
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.78, 0.15, 1.0).set()
-            v.stroke()
-
-            # -- Small sound wave arcs (right side of V) --
-            for i, radius in enumerate([4, 7]):
-                arc = NSBezierPath.bezierPath()
-                arc.setLineWidth_(1.5)
-                # Quarter arc from ~30° to ~-30° (rightward sound waves)
-                arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-                    (cx + 3, cy + 1), radius, 40, -40, True
-                )
-                alpha = 0.7 - i * 0.25
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.78, 0.15, alpha).set()
-                arc.stroke()
-
-            # -- "ox" text to complete "Vox" --
-            font = NSFont.boldSystemFontOfSize_(12)
-            style = AppKit.NSMutableParagraphStyle.alloc().init()
-            style.setAlignment_(AppKit.NSTextAlignmentLeft)
-            attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-                [font, NSColor.whiteColor(), style],
-                [NSFontAttributeName, NSForegroundColorAttributeName,
-                 NSParagraphStyleAttributeName],
-            )
-            text = NSAttributedString.alloc().initWithString_attributes_("ox", attrs)
-            text.drawAtPoint_((cx + oval_w/2 + 2, cy - 8))
-
-    return CommBadgeView
-
 
 def _make_waveform_view_class():
     from AppKit import NSView, NSColor, NSBezierPath
@@ -371,12 +314,18 @@ def _apply_state(
     """
     from AppKit import NSAnimationContext, NSColor, NSScreen
 
+    # DEF-135: remember the last applied state so a runtime overlay-mode toggle
+    # can re-apply it through this same path instead of force-showing a blank,
+    # un-painted window.
+    global _LAST_STATE
+    _LAST_STATE = state_str
+
     # Update menu bar status icon + label
     _STATUS_LABELS = {
         "idle":       ("\U0001f399", ""),                # 🎙 (icon only)
-        "listening":  ("\U0001f534", " Recording..."),   # 🔴 Recording...
-        "processing": ("\U0001f7e1", " Transcribing..."),# 🟡 Transcribing...
-        "speaking":   ("\U0001f7e2", " Speaking..."),    # 🟢 Speaking...
+        "listening":  ("\U0001f534", " Rec"),               # 🔴 Rec
+        "processing": ("\U0001f7e1", " Trans"),            # 🟡 Trans
+        "speaking":   ("\U0001f7e2", " Speak"),             # 🟢 Speak
     }
     if status_item is not None:
         icon, label = _STATUS_LABELS.get(state_str, _STATUS_LABELS["idle"])
@@ -401,8 +350,8 @@ def _apply_state(
                 if (has_pid or has_sock) and not pid_alive:
                     crashed.append(name)
             if crashed:
-                icon = "\u26a0\ufe0f"
-                label = f" {'+'.join(crashed)} crashed"
+                icon = "\u26a0"  # \u26a0 text-mode, no emoji overflow
+                label = f" {'&'.join(crashed)} err"
         # DEF-100: held TTS count badge \u2014 surfaces hold-queue state.
         # Stays at 0 with default config (hold_queue.enabled=false), but if
         # the user opts back into hold-queue behaviour, this makes it visible.
@@ -435,10 +384,10 @@ def _apply_state(
         _banner_symbol = ""
         if _mic_warn:
             _banner_symbol = {
-                "error": "\u274c",
-                "warn": "\u26a0\ufe0f",
-                "info": "\u2139\ufe0f",
-            }.get(_banner_level, "\u26a0\ufe0f")
+                "error": "\u2716",   # \u2716 text-mode, fits menu bar height
+                "warn": "\u26a0",    # \u26a0 text-mode (no \ufe0f emoji selector)
+                "info": "\u2139",    # \u2139 text-mode
+            }.get(_banner_level, "\u26a0")
         # Build menu bar title with SF Symbol-style mute indicators.
         # The banner appears as a *suffix symbol*, not a title override \u2014
         # brand glyph + state stay intact, only a small badge gets added.
@@ -459,7 +408,9 @@ def _apply_state(
                 _spk_muted = get_verbosity() == "skip"
             except Exception:
                 pass
-            from AppKit import NSImage, NSImageSymbolConfiguration
+            from AppKit import NSImage, NSImageSymbolConfiguration, NSVariableStatusItemLength as _NSVarLen
+            # Release reserved width so the brand glyph sits compactly.
+            status_item.setLength_(_NSVarLen)
             btn = status_item.button()
             if _mic_muted:
                 # Muted: keep SF Symbol mic.slash with red palette — clearer
@@ -513,7 +464,19 @@ def _apply_state(
             else:
                 btn.setToolTip_(f"Mic: {_friendly}")
         else:
-            # Non-idle states or crashed: use emoji text, clear image
+            # Non-idle states or crashed: use emoji text, clear image.
+            # Reserve exact measured width BEFORE setting title so macOS doesn't
+            # reflow and hide the item when it expands (NSVariableStatusItemLength
+            # can disappear when neighbours like Docker leave no room).
+            try:
+                from AppKit import NSFont, NSFontAttributeName
+                from Foundation import NSString as _NSString
+                _mfont = NSFont.menuBarFontOfSize_(0)
+                _ns = _NSString.stringWithString_(_bar_title)
+                _w = int(_ns.sizeWithAttributes_({NSFontAttributeName: _mfont}).width) + 14
+            except Exception:
+                _w = 120
+            status_item.setLength_(_w)
             status_item.button().setImage_(None)
             status_item.button().setTitle_(_bar_title)
         # Refresh menu on state change (updates transcript list, mute state)
@@ -663,7 +626,12 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                 pass  # v1: ignore; future: show badge count
 
             elif msg_type == "error":
-                print(f"[HUD] Error from client: {msg_dict.get('message', '')}", file=sys.stderr)
+                # DEF-136: senders (device_manager, recording) put the text in
+                # 'text'; the old code read 'message' and logged an empty string
+                # on every mic-error event (46 blank lines observed). Read 'text'
+                # first, 'message' as fallback.
+                _err = msg_dict.get("text") or msg_dict.get("message") or ""
+                print(f"[HUD] Error from client: {_err}", file=sys.stderr)
 
     return _Dispatcher
 
@@ -888,35 +856,129 @@ def _make_menu_action_class():
 
         def openConfig_(self, sender):
             import subprocess
-            cfg = os.path.expanduser("~/.config/heyvox/config.yaml")
-            if os.path.exists(cfg):
-                try:
-                    subprocess.run(["open", cfg])
-                except Exception:
-                    pass
+            try:
+                from heyvox.config import CONFIG_FILE
+                if CONFIG_FILE.exists():
+                    subprocess.run(["open", str(CONFIG_FILE)])
+            except Exception:
+                pass
 
         def openHelp_(self, sender):
             import webbrowser
             webbrowser.open("https://heyvox.dev")
 
+        def telemetryToggle_(self, sender):
+            """Flip telemetry on or off and persist to config.
+
+            Also starts or stops the background sender thread in the running
+            daemon so the change takes effect immediately, not just on restart.
+            """
+            try:
+                from heyvox.telemetry.consent import is_enabled, enable, disable
+                from heyvox.telemetry.sender import (
+                    start_background as _tm_start,
+                    stop_background as _tm_stop,
+                )
+                if is_enabled():
+                    disable()
+                    _tm_stop(timeout=1.0)
+                else:
+                    enable()
+                    _tm_start()
+            except Exception as exc:
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Telemetry toggle failed")
+                    a.setInformativeText_(str(exc))
+                    a.runModal()
+                except Exception:
+                    pass
+
+        def telemetryShowSent_(self, sender):
+            """Open the telemetry documentation in the system browser."""
+            import webbrowser
+            # docs/telemetry.md ships on the heyvox.dev landing site too.
+            webbrowser.open("https://heyvox.dev/telemetry.html")
+
+        def telemetryResetId_(self, sender):
+            """Generate a fresh anonymous ID and show it in an alert."""
+            try:
+                from heyvox.telemetry.consent import reset_anon_id
+                new_id = reset_anon_id()
+                from AppKit import NSAlert
+                a = NSAlert.alloc().init()
+                a.setMessageText_("New anonymous ID")
+                a.setInformativeText_(new_id)
+                a.runModal()
+            except Exception as exc:
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Reset failed")
+                    a.setInformativeText_(str(exc))
+                    a.runModal()
+                except Exception:
+                    pass
+
+        def reportIssue_(self, sender):
+            """Open the Report Issue dialog → build bundle → open GitHub Issue."""
+            try:
+                from heyvox.reporting.dialog import prompt_for_report
+                from heyvox.reporting.bundle import build_bundle
+                from heyvox.reporting.text_report import run_bugreport
+                from heyvox.reporting.issue import (
+                    build_issue_url,
+                    open_in_browser,
+                    reveal_in_finder,
+                )
+            except Exception as exc:
+                # Surface the failure to the user via a fallback alert.
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Report Issue unavailable")
+                    a.setInformativeText_(f"Could not load reporting module: {exc}")
+                    a.runModal()
+                except Exception:
+                    pass
+                return
+
+            opts = prompt_for_report()
+            if opts is None:
+                return  # Cancelled
+
+            try:
+                zip_path = build_bundle(opts)
+            except Exception as exc:
+                try:
+                    from AppKit import NSAlert
+                    a = NSAlert.alloc().init()
+                    a.setMessageText_("Bundle build failed")
+                    a.setInformativeText_(str(exc))
+                    a.runModal()
+                except Exception:
+                    pass
+                return
+
+            body = run_bugreport(opts.comment)
+            first_line = (opts.comment.splitlines() or [""])[0]
+            title = "[Bug] " + (first_line[:80] if first_line else "")
+            url = build_issue_url(title, body, bundle_path=zip_path)
+            open_in_browser(url)
+            reveal_in_finder(zip_path)
+
         def toggleOverlay_(self, sender):
             """Toggle the floating pill overlay on/off at runtime. Persists to config."""
             global _MENU_BAR_ONLY
             _MENU_BAR_ONLY = not _MENU_BAR_ONLY
-            if _MENU_BAR_ONLY:
-                sender.setState_(0)  # NSOffState — no checkmark
-                # Hide the pill window
-                from AppKit import NSApplication
-                for w in NSApplication.sharedApplication().windows():
-                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
-                        w.orderOut_(None)
-            else:
-                sender.setState_(1)  # NSOnState — checkmark
-                # Immediately show the pill window
-                from AppKit import NSApplication
-                for w in NSApplication.sharedApplication().windows():
-                    if hasattr(w, 'isMainWindow') and not w.isMainWindow():
-                        w.orderFrontRegardless()
+            sender.setState_(0 if _MENU_BAR_ONLY else 1)  # checkmark when pill shown
+            # DEF-135: re-apply the current state through the canonical path so
+            # the window is hidden (menu-bar-only) or shown *and painted* (pill).
+            # The old code force-showed an un-painted window, surfacing an empty
+            # frosted box until the next state message arrived.
+            if _REAPPLY_STATE is not None:
+                _REAPPLY_STATE()
             # Persist to config so it survives restarts
             try:
                 from heyvox.config import update_config
@@ -1612,6 +1674,58 @@ def _build_transcript_menu(handler):
     _styled(log_item)
     settings_sub.addItem_(log_item)
 
+    # "Report Issue…" — bundles logs + diagnostics, opens pre-filled GitHub Issue.
+    report_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Report Issue…", "reportIssue:", "",
+    )
+    report_item.setTarget_(handler)
+    report_item.setEnabled_(True)
+    _styled(report_item)
+    settings_sub.addItem_(report_item)
+
+    # "Telemetry" submenu — opt-in anonymous usage signals.
+    try:
+        from heyvox.telemetry.consent import is_enabled as _tm_is_enabled
+        _tm_on = _tm_is_enabled()
+    except Exception:
+        _tm_on = False
+
+    tm_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        f"Telemetry: {'On' if _tm_on else 'Off'}", None, "",
+    )
+    _styled(tm_parent)
+    tm_sub = NSMenu.alloc().init()
+
+    tm_toggle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Disable telemetry" if _tm_on else "Enable telemetry",
+        "telemetryToggle:", "",
+    )
+    tm_toggle.setTarget_(handler)
+    tm_toggle.setEnabled_(True)
+    _styled(tm_toggle)
+    tm_sub.addItem_(tm_toggle)
+
+    tm_sub.addItem_(NSMenuItem.separatorItem())
+
+    tm_what = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "What's being sent…", "telemetryShowSent:", "",
+    )
+    tm_what.setTarget_(handler)
+    tm_what.setEnabled_(True)
+    _styled(tm_what)
+    tm_sub.addItem_(tm_what)
+
+    tm_reset = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Reset anonymous ID", "telemetryResetId:", "",
+    )
+    tm_reset.setTarget_(handler)
+    tm_reset.setEnabled_(True)
+    _styled(tm_reset)
+    tm_sub.addItem_(tm_reset)
+
+    tm_parent.setSubmenu_(tm_sub)
+    settings_sub.addItem_(tm_parent)
+
     # DEF-100: drain held TTS messages from cross-workspace hold queue.
     # One tap drains one held WAV regardless of which workspace it belongs to.
     drain_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -1845,6 +1959,16 @@ def main(menu_bar_only: bool = False):
     from AppKit import NSStatusBar, NSVariableStatusItemLength
     status_bar = NSStatusBar.systemStatusBar()
     status_item = status_bar.statusItemWithLength_(NSVariableStatusItemLength)
+    # DEF-134: persist the menu bar item's position across launches. Without an
+    # autosave name macOS re-places the item arbitrarily on every start — so it
+    # randomly landed in front (visible) or in the notch/clutter zone (hidden),
+    # which read as "the recording indicator doesn't show up". With it, the
+    # user's ⌘-drag position sticks. (Does not override notch clipping on a
+    # full menu bar — that's a macOS limit, not ours.)
+    try:
+        status_item.setAutosaveName_("com.heyvox.menubar")
+    except Exception:
+        pass
     status_button = status_item.button()
 
     # State icons for menu bar — using Unicode text rendered as the icon
@@ -1904,6 +2028,14 @@ def main(menu_bar_only: bool = False):
         status_item=status_item, update_status_menu=_update_status_menu,
     )
     dispatcher = DispatcherClass.alloc().init()
+
+    # DEF-135: expose a hook so the menu-bar overlay toggle can re-apply the
+    # current state through the canonical dispatcher path. The menu action runs
+    # on the main thread, so applyMessage_ can be called directly here.
+    global _REAPPLY_STATE
+    def _reapply_current_state():
+        dispatcher.applyMessage_({"type": "state", "state": _LAST_STATE})
+    _REAPPLY_STATE = _reapply_current_state
 
     # ---- HUD IPC server ----
     def on_message(msg: dict) -> None:

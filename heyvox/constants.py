@@ -14,6 +14,13 @@ _TMP = tempfile.gettempdir()
 # Requirement: DECP-04
 RECORDING_FLAG = f"{_TMP}/heyvox-recording"
 
+# DEF-104: marker written just before a hotplug-triggered self-restart.
+# Carries "<monotonic-ish epoch>\n<device name>" so the freshly-started
+# process can tell whether it already tried (and failed) to clear the
+# PortAudio cache for this device — preventing a restart loop when a device
+# stays invisible to PortAudio even after a restart.
+HOTPLUG_RESTART_MARKER = f"{_TMP}/heyvox-hotplug-restart"
+
 # Default log file location
 LOG_FILE_DEFAULT = f"{_TMP}/heyvox.log"
 
@@ -251,6 +258,19 @@ HUSH_LOG = f"{_TMP}/hush.log"
 # ---------------------------------------------------------------------------
 
 HEYVOX_STATE_FILE = f"{_TMP}/heyvox-state.json"
+
+# ---------------------------------------------------------------------------
+# Telemetry (opt-in) — persistent, lives under the config dir not /tmp/.
+# Must survive reboots so queued events can retry. Sender writes batches as
+# JSON files into the queue dir; each successful upload deletes the file.
+# ---------------------------------------------------------------------------
+
+_HOME = os.path.expanduser("~")
+TELEMETRY_DIR = f"{_HOME}/.config/heyvox/telemetry"
+TELEMETRY_ID_FILE = f"{TELEMETRY_DIR}/anon-id"
+TELEMETRY_QUEUE_DIR = f"{TELEMETRY_DIR}/queue"
+TELEMETRY_LAST_BATCH_FILE = f"{TELEMETRY_DIR}/last-batch"
+TELEMETRY_COUNTER_SNAPSHOT = f"{TELEMETRY_DIR}/counter-snapshot.json"
 
 
 # ---------------------------------------------------------------------------

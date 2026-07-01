@@ -371,9 +371,33 @@ def _hammerspoon_running() -> bool:
         return subprocess.call(
             ["pgrep", "-q", "Hammerspoon"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=1.0,  # DEF-090 twin: bare pgrep can stall under fork-storm and block the TTS path
         ) == 0
     except (OSError, subprocess.SubprocessError):
+        # subprocess.TimeoutExpired is a SubprocessError subclass — fail closed (treat as not running)
         return False
+
+
+def _afplay_ceiling(wav_file) -> float:
+    """Hard upper bound (seconds) for a single afplay run: clip duration + slack.
+
+    afplay plays in real time, so a healthy run takes ~the clip's duration. This
+    sizes a kill-ceiling to the actual clip (read from the WAV header) plus generous
+    slack for afplay/CoreAudio startup latency, with a floor for very short cues and
+    an absolute cap as a backstop when the header is unreadable. Guards against a
+    stalled afplay (wedged CoreAudio, unreadable mount) — the recording watchdog
+    only fires when a recording starts, not when playback itself hangs.
+    """
+    FLOOR = 15.0      # short clips still tolerate startup + CoreAudio latency
+    ABS_CAP = 300.0   # no TTS clip runs this long; absolute backstop
+    try:
+        import wave
+        with wave.open(str(wav_file), "rb") as w:
+            rate = w.getframerate() or 1
+            duration = w.getnframes() / float(rate)
+        return min(max(duration + 10.0, FLOOR), ABS_CAP)
+    except Exception:
+        return ABS_CAP
 
 
 def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
@@ -624,6 +648,49 @@ def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_lo
 
 
 # ---------------------------------------------------------------------------
+# Volume-zero guard
+# ---------------------------------------------------------------------------
+
+# Reuse the same threshold as _duck_audio's guard — below this the duck is
+# skipped and TTS plays at essentially no volume.
+_VOL_ZERO_THRESHOLD: float = 0.05
+# Banner TTL slightly longer than the 30s periodic check so it auto-expires
+# between checks once volume is fixed without needing a clear() call.
+_VOL_ZERO_BANNER_TTL: float = 35.0
+
+
+def _warn_if_vol_zero(cfg: OrchestratorConfig, debug_log: Path) -> bool:
+    """Emit a menu-bar / HUD-overlay warning when system volume is near zero.
+
+    Called before each TTS message and on a 30-second periodic poll from the
+    orchestrator idle loop. Clears the banner automatically when volume is
+    restored above the threshold.
+
+    Returns True if volume is effectively zero (TTS will be inaudible).
+    """
+    try:
+        from heyvox.herald.coreaudio import get_system_volume_cached
+        from heyvox.hud.surface import HUDSurface
+        vol = get_system_volume_cached(ttl=1.0)
+        if vol <= _VOL_ZERO_THRESHOLD:
+            HUDSurface.banner(
+                level="warn",
+                source="vol-zero",
+                text=f"Volume {int(round(vol * 100))}% — TTS muted",
+                ttl_secs=_VOL_ZERO_BANNER_TTL,
+            )
+            _herald_log(
+                f"ORCH: [VOL-ZERO] vol={vol:.2f} ≤ {_VOL_ZERO_THRESHOLD} — TTS inaudible",
+                debug_log,
+            )
+            return True
+        HUDSurface.clear("vol-zero")
+        return False
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Violation check
 # ---------------------------------------------------------------------------
 
@@ -783,6 +850,7 @@ def _play_wav(
             _media_pause(cfg)
             _herald_log("ORCH: media PAUSED", debug_log)
 
+        _warn_if_vol_zero(cfg, debug_log)
         original_vol = _duck_audio(cfg, debug_log)
         _set_tts_volume(original_vol, cfg)
     else:
@@ -863,7 +931,23 @@ def _play_wav(
     watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
     watchdog_thread.start()
 
-    play_exit = proc.wait()
+    # Hard ceiling so a stalled afplay can't block the orchestrator loop forever.
+    # The recording watchdog above only kills on recording-start; this catches a
+    # wedged playback (DEF-140 follow-up: the orchestrator's afplay proc.wait()).
+    play_ceiling = _afplay_ceiling(wav_file)
+    try:
+        play_exit = proc.wait(timeout=play_ceiling)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            play_exit = proc.wait(timeout=2.0)
+        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+            play_exit = -1
+        _violation_check(f"orchestrator:afplay-stall-kill:{basename}", cfg)
+        _herald_log(
+            f"ORCH: killed stalled afplay after {play_ceiling:.0f}s ceiling for {basename}",
+            debug_log,
+        )
     watchdog_stop.set()
     watchdog_thread.join(timeout=0.5)
     cfg.playing_pid_file.unlink(missing_ok=True)
@@ -1013,6 +1097,7 @@ class HeraldOrchestrator:
         original_vol: float | None = None
         current_workspace: str = ""
         last_msg_prefix: str = ""
+        _last_vol_check: float = 0.0
 
         # Signal handlers
         def _handle_signal(signum, frame):
@@ -1164,6 +1249,11 @@ class HeraldOrchestrator:
                     else:
                         time.sleep(cfg.poll_interval)
                         _gc_queue_dirs(cfg, cfg.debug_log)
+                        # Periodic volume-zero check — refresh banner every 30s
+                        _now_mono = time.monotonic()
+                        if _now_mono - _last_vol_check >= 30.0:
+                            _last_vol_check = _now_mono
+                            _warn_if_vol_zero(cfg, cfg.debug_log)
 
         finally:
             self._cleanup(original_vol)

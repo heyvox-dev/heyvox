@@ -290,6 +290,31 @@ def _get_mute_coreaudio(device_id: int) -> bool | None:
     return None
 
 
+def _set_mute_coreaudio(device_id: int, muted: bool) -> bool:
+    """Set the mute state of the default output device via CoreAudio."""
+    ca = _load_coreaudio()
+    if ca is None:
+        return False
+    val = ctypes.c_uint32(1 if muted else 0)
+    data_size = ctypes.c_uint32(ctypes.sizeof(val))
+    for channel in (0, 1):
+        addr = AudioObjectPropertyAddress(
+            kAudioDevicePropertyMute,
+            kAudioObjectPropertyScopeOutput,
+            channel,
+        )
+        err = ca.AudioObjectSetPropertyData(
+            device_id,
+            ctypes.byref(addr),
+            0, None,
+            data_size,
+            ctypes.byref(val),
+        )
+        if err == 0:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # osascript fallbacks
 # ---------------------------------------------------------------------------
@@ -333,6 +358,18 @@ def _is_muted_osascript() -> bool:
     except Exception as e:
         log.debug("osascript mute check failed: %s", e)
     return False
+
+
+def _set_mute_osascript(muted: bool) -> None:
+    """Set system mute via osascript."""
+    flag = "with output muted" if muted else "without output muted"
+    try:
+        subprocess.run(
+            ["osascript", "-e", f"set volume {flag}"],
+            capture_output=True, timeout=3.0,
+        )
+    except Exception as e:
+        log.debug("osascript mute set failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +427,19 @@ def is_system_muted() -> bool:
         if muted is not None:
             return muted
     return _is_muted_osascript()
+
+
+def set_system_muted(muted: bool) -> None:
+    """Set the macOS system output mute state without changing the volume scalar.
+
+    Uses the CoreAudio mute property rather than setting volume=0, so Bluetooth
+    headsets in HFP mode do not receive a volume=0 HFP command and do not update
+    their remembered volume level. Falls back to osascript on CoreAudio failure.
+    """
+    device_id = _get_default_output_device()
+    if device_id is not None and _set_mute_coreaudio(device_id, muted):
+        return
+    _set_mute_osascript(muted)
 
 
 # ---------------------------------------------------------------------------
