@@ -19,6 +19,13 @@ signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 _cue_suppress_until: float = 0.0
 _suppress_lock = threading.Lock()
 
+# Cache of decoded cue audio: cue_file path -> (data, samplerate). Populated on
+# first successful soundfile.read() per cue file, reused thereafter to avoid
+# disk I/O on the wake-word audible-feedback critical path. Plain dict is safe
+# here: worst-case concurrent access is a redundant re-read of the same file
+# under the GIL, never corruption.
+_cue_cache: dict[str, tuple] = {}
+
 
 def get_cues_dir(config_cues_dir: str = "") -> str:
     """Resolve the cues directory location.
@@ -43,6 +50,41 @@ def get_cues_dir(config_cues_dir: str = "") -> str:
         print(f"WARNING: No cues directory found at {resolved}. Audio cues will be silent.", flush=True)
 
     return resolved
+
+
+def _play_via_sounddevice(cue_file: str) -> bool:
+    """Play a cue file via sounddevice using a pre-loaded, cached PCM buffer.
+
+    Replaces the afplay subprocess spawn on the non-USB output path with a
+    direct sounddevice.play() call, eliminating process-spawn latency on the
+    wake-word audible-feedback critical path (WW_LATENCY).
+
+    On cache miss, decodes the file via soundfile.read() and caches the
+    result keyed by cue_file path. On cache hit, skips the disk read
+    entirely. Any failure (missing/corrupt file, sounddevice/soundfile
+    unavailable, device busy or removed mid-call) is swallowed and reported
+    as False -- callers must fall back to the existing afplay path.
+
+    Args:
+        cue_file: Absolute path to the cue file (as constructed by audio_cue()).
+
+    Returns:
+        True if sounddevice.play() was successfully dispatched, False if any
+        step failed and the caller should fall back to afplay.
+    """
+    try:
+        if cue_file in _cue_cache:
+            data, samplerate = _cue_cache[cue_file]
+        else:
+            import soundfile
+            data, samplerate = soundfile.read(cue_file)
+            _cue_cache[cue_file] = (data, samplerate)
+
+        import sounddevice
+        sounddevice.play(data, samplerate)
+        return True
+    except Exception:
+        return False
 
 
 def audio_cue(
@@ -106,12 +148,13 @@ def audio_cue(
     except Exception:
         pass
 
-    subprocess.Popen(
-        ["afplay", cue_file],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    if not _play_via_sounddevice(cue_file):
+        subprocess.Popen(
+            ["afplay", cue_file],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 def is_suppressed() -> bool:
