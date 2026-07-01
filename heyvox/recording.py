@@ -328,6 +328,7 @@ class RecordingStateMachine:
         self._log = log_fn
         self._hud_send = hud_send
         self.training_collector = None  # Set by main.py when collect_negatives is enabled
+        self._quiet_streak = 0  # consecutive too-quiet recordings; banner only after ≥2
 
     def start(self, ptt: bool = False, preroll=None, handsfree: bool = False) -> None:
         """Begin a recording session.
@@ -758,34 +759,37 @@ class RecordingStateMachine:
             # DEF-101: per-mic threshold from config.mic_profiles[<mic>].min_audio_dbfs.
             min_dbfs = _resolve_min_audio_dbfs(self.config)
             if raw_rms_db < min_dbfs:
+                self._quiet_streak += 1
                 self._log(
                     f"Recording too quiet ({raw_rms_db:.1f} dBFS < {min_dbfs} dBFS), skipping STT"
+                    f" [streak={self._quiet_streak}]"
                 )
-                # DEF-101: surface silent-skip to user via HUDSurface banner.
-                # HUD overlay reads HUDSurface.top_active() and prepends a
-                # level-appropriate marker to the bar title until TTL expires.
-                # Patterns P-new + P-detector-without-action.
-                try:
-                    from heyvox.hud.surface import HUDSurface
-                    from heyvox.constants import MIC_WARN_TTL_SECS
-                    _mic_name = ""
+                # DEF-101: surface silent-skip via HUDSurface banner — but only
+                # after 2 consecutive quiet recordings so a single wake-word false
+                # positive (background noise briefly triggers the model) doesn't
+                # show a misleading "mic too quiet" warning to the user.
+                if self._quiet_streak >= 2:
                     try:
-                        from heyvox.constants import ACTIVE_MIC_FILE
-                        _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
-                    except OSError:
+                        from heyvox.hud.surface import HUDSurface
+                        from heyvox.constants import MIC_WARN_TTL_SECS
+                        _mic_name = ""
+                        try:
+                            from heyvox.constants import ACTIVE_MIC_FILE
+                            _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
+                        except OSError:
+                            pass
+                        _warn = (
+                            f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
+                            + (f" — {_mic_name}" if _mic_name else "")
+                        )
+                        HUDSurface.banner(
+                            level="warn",
+                            source="recording-quiet",
+                            text=_warn,
+                            ttl_secs=MIC_WARN_TTL_SECS,
+                        )
+                    except Exception:
                         pass
-                    _warn = (
-                        f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
-                        + (f" — {_mic_name}" if _mic_name else "")
-                    )
-                    HUDSurface.banner(
-                        level="warn",
-                        source="recording-quiet",
-                        text=_warn,
-                        ttl_secs=MIC_WARN_TTL_SECS,
-                    )
-                except Exception:
-                    pass
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
                     if self.training_collector.reclassify_tp_start_as_fp(
@@ -808,6 +812,7 @@ class RecordingStateMachine:
             _t_stt_start = time.time()
             if stop_time:
                 self._log(f"[TIMING] stop→STT start: {_t_stt_start - stop_time:.2f}s")
+            self._quiet_streak = 0
             self._log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
             try:
                 print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
