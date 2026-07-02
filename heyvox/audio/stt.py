@@ -118,10 +118,22 @@ def preload_model() -> None:
     """Start loading MLX model in background thread.
 
     Call this when wake word triggers to hide load latency behind
-    the user's speaking time. No-op if model is already loaded.
+    the user's speaking time.
+
+    DEF-164: if the model is already loaded, this must still touch the
+    idle-unload timer. Otherwise a timer armed by the *previous*
+    transcription keeps counting down unaffected by this new recording,
+    and can fire mid-recording (_mlx_transcribing is False until
+    transcribe_audio() actually runs) — evicting a model that's warm
+    and in active use, forcing an un-hidden cold reload right after the
+    user stops talking.
     """
-    if _mlx_loaded.is_set():
-        return
+    global _mlx_last_use
+    with _mlx_lock:
+        if _mlx_loaded.is_set():
+            _mlx_last_use = time.time()
+            _schedule_unload()
+            return
     t = threading.Thread(target=_load_mlx_model, daemon=True)
     t.start()
 

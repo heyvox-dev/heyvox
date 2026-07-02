@@ -410,8 +410,10 @@ class RecordingStateMachine:
         self._hud_send({"type": "state", "state": "listening"})
         self._log("Recording started. Waiting for stop wake word.")
 
-        # Preload STT model in background while user speaks — hides the ~1s
-        # model load latency behind recording time. No-op if already loaded.
+        # Preload STT model in background while user speaks — hides the
+        # model load latency (varies by model, see MLX log lines) behind
+        # recording time. If already loaded, DEF-164: also refreshes the
+        # idle-unload timer so a stale countdown can't evict it mid-recording.
         if self.config.stt.backend == "local":
             from heyvox.audio.stt import preload_model
             preload_model()

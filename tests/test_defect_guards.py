@@ -1773,3 +1773,63 @@ def test_default_wake_word_loadable_on_fresh_install():
         f"{pkg_models_dir}. openwakeword raises ValueError on unknown names. "
         f"Bundle the model or keep the default to a bundled name."
     )
+
+
+def test_def164_preload_model_refreshes_idle_timer_when_already_loaded():
+    """DEF-164: preload_model() used to no-op when the model was already
+    loaded, leaving a stale idle-unload timer (armed by the *previous*
+    transcription) ticking down unaffected by the new recording. If that
+    recording ran long enough to cross the old deadline, the model got
+    evicted mid-recording (_mlx_transcribing is False until
+    transcribe_audio() actually runs) — forcing an un-hidden cold reload
+    right after the user stopped talking. Confirmed twice in production
+    logs on 2026-07-02 (unloads at 17:02:58 and 09:31:20, both firing
+    after a new recording had already started). Fix: the already-loaded
+    path must also refresh _mlx_last_use and reschedule the timer."""
+    import time
+    from unittest.mock import patch
+
+    from heyvox.audio import stt
+
+    saved_loaded = stt._mlx_loaded.is_set()
+    saved_last_use = stt._mlx_last_use
+    try:
+        stt._mlx_loaded.set()
+        stale_last_use = time.time() - 250  # armed by a use 250s ago
+        stt._mlx_last_use = stale_last_use
+
+        with patch.object(stt, "_schedule_unload") as mock_schedule:
+            stt.preload_model()
+
+        assert stt._mlx_last_use > stale_last_use, (
+            "DEF-164: preload_model() must refresh _mlx_last_use when the "
+            "model is already loaded, or a timer armed by the previous "
+            "transcription can evict it mid-recording."
+        )
+        mock_schedule.assert_called_once()
+    finally:
+        if not saved_loaded:
+            stt._mlx_loaded.clear()
+        stt._mlx_last_use = saved_last_use
+
+
+def test_def164_preload_model_still_spawns_load_when_not_loaded():
+    """DEF-164 counterpart: the not-yet-loaded path must be untouched by
+    the fix above — preload_model() should still kick off a background
+    load (the normal cold-start case, which was never buggy)."""
+    from unittest.mock import patch
+
+    from heyvox.audio import stt
+
+    saved_loaded = stt._mlx_loaded.is_set()
+    try:
+        stt._mlx_loaded.clear()
+        with patch.object(stt.threading, "Thread") as mock_thread:
+            stt.preload_model()
+        mock_thread.assert_called_once()
+        assert mock_thread.call_args.kwargs.get("target") == stt._load_mlx_model
+    finally:
+        if saved_loaded:
+            stt._mlx_loaded.set()
+        else:
+            stt._mlx_loaded.clear()
