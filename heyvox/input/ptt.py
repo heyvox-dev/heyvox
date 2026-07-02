@@ -351,6 +351,20 @@ def start_ptt_listener(
     def _callback_inner(proxy, event_type, event, refcon):
         nonlocal ptt_held, _last_keydown_time
 
+        # macOS disables the tap after a slow callback response (timeout) or
+        # a secure-input prompt (user input), and notifies via this special
+        # event type instead of queuing it. React immediately here instead of
+        # relying solely on _tap_watchdog's 1s poll below — under sustained
+        # system load the tap can be re-disabled faster than the watchdog
+        # polls, leaving Escape/PTT effectively dead until the next tick.
+        if event_type in (
+            Quartz.kCGEventTapDisabledByTimeout,
+            Quartz.kCGEventTapDisabledByUserInput,
+        ):
+            Quartz.CGEventTapEnable(tap, True)
+            _log("PTT event tap disabled by macOS, re-enabled immediately (in-callback)")
+            return event
+
         # Handle Escape key — consume it (return None) when HeyVox acts on it,
         # so it doesn't propagate to the foreground app (e.g. exit fullscreen).
         if event_type == Quartz.kCGEventKeyDown:
