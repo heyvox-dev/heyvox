@@ -1367,9 +1367,6 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         if quiet_pct >= 0.85:
                             log(f"No speech after {_NO_SPEECH_CANCEL_SECS}s ({quiet_pct:.0%} quiet), cancelling (false trigger)")
                             recording.cancel()
-                            if _training_collector is not None:
-                                if _training_collector.reclassify_tp_start_as_fp("no-speech"):
-                                    log("Training: reclassified last TP → FP (no-speech after trigger)")
                             log("Ready for next wake word.")
                             continue
                         else:
@@ -1901,12 +1898,12 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                 f"pre_silence={_recent_silence} "
                                 f"last_silent={_silent_age_ok}"
                             )
-                        # Training data: save TP-start and reclassify recent TN→FN
+                        # Training data: save TP-start. Evidence-based fn recovery
+                        # (a TN clip that actually contains the wake word) now
+                        # happens via the batch quality gate (tools/quality_gate.py)
+                        # run before featurization, not via retroactive heuristics.
                         if _training_collector is not None and not _is_rec:
                             _training_collector.save_tp_start(s)
-                            reclass = _training_collector.reclassify_fn_start()
-                            if reclass:
-                                log(f"Training: reclassified {reclass} TN→FN (retry pattern)")
                         last_trigger = now
                         # D-05: If TTS is playing (echo_safe mode), interrupt it and start recording
                         if _tts_active and _echo_safe and not _is_rec:

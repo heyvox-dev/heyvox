@@ -663,15 +663,6 @@ class RecordingStateMachine:
                             f"Post-trim audio too short ({_post_trim_secs:.1f}s), "
                             f"cancelling (Whisper hallucination risk)"
                         )
-                        # Training: trigger fired but recording has no real content → FP.
-                        if self.training_collector:
-                            if self.training_collector.reclassify_tp_start_as_fp(
-                                "post-trim-short"
-                            ):
-                                self._log(
-                                    "Training: reclassified tp_start → FP "
-                                    "(post-trim-short)"
-                                )
                         _release_recording_guard()
                         with self.ctx.lock:
                             self.ctx.busy = False
@@ -794,13 +785,6 @@ class RecordingStateMachine:
                         pass
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
-                    if self.training_collector.reclassify_tp_start_as_fp(
-                        "low-energy"
-                    ):
-                        self._log(
-                            "Training: reclassified tp_start → FP (low-energy)"
-                        )
-                    # Also save the noise tail with FP label for training.
                     self.training_collector.save_fp(
                         audio_chunks, self.config.audio.sample_rate,
                         reason="low-energy",
@@ -1058,12 +1042,6 @@ class RecordingStateMachine:
                 self._log("WARNING: Empty transcription, skipping")
                 # Training: STT returned nothing from a triggered recording → FP.
                 if self.training_collector:
-                    if self.training_collector.reclassify_tp_start_as_fp(
-                        "empty-stt"
-                    ):
-                        self._log(
-                            "Training: reclassified tp_start → FP (empty-stt)"
-                        )
                     if _training_chunks:
                         self.training_collector.save_fp(
                             _training_chunks, _training_sr, reason="empty-stt"
@@ -1076,12 +1054,6 @@ class RecordingStateMachine:
                 self._log("Transcription cancelled by user (Escape)")
                 # Training: user explicitly cancelled → likely FP (trigger was wrong).
                 if self.training_collector:
-                    if self.training_collector.reclassify_tp_start_as_fp(
-                        "user-cancelled"
-                    ):
-                        self._log(
-                            "Training: reclassified tp_start → FP (user-cancelled)"
-                        )
                     if _training_chunks:
                         self.training_collector.save_fp(
                             _training_chunks, _training_sr,

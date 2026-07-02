@@ -165,3 +165,42 @@ def test_prune_noop_under_limit(tmp_path):
         _make_clip(tn, f"tn_x_2026010{i + 1}_000000_score0.50.wav", 1000.0 + i)
     collector._prune("tn")
     assert len(list(tn.glob("*.wav"))) == 3
+
+
+# ---------------------------------------------------------------------------
+# DEF-167 — retroactive relabelers removed (no evidence-free reclassification)
+# ---------------------------------------------------------------------------
+
+def test_save_tp_start_has_no_reclassify_method(collector):
+    assert not hasattr(collector, "reclassify_tp_start_as_fp")
+
+
+def test_save_tn_has_no_reclassify_method(collector):
+    assert not hasattr(collector, "reclassify_fn_start")
+
+
+def test_aborted_trigger_leaves_tp_start_clip_alone(collector, tmp_path):
+    """An aborted trigger must not relabel its tp_start clip as fp/ — the
+    method that used to do this (reclassify_tp_start_as_fp) is gone."""
+    collector.feed(_speech(3.0))
+    assert collector.save_tp_start(0.85) is True
+
+    tp_clips = list((tmp_path / "tp").glob("tp_start_*.wav"))
+    assert len(tp_clips) == 1
+    fp_clips = list((tmp_path / "fp").glob("*.wav"))
+    assert fp_clips == [], "no reclassification path exists to move tp_start into fp/"
+
+
+def test_tn_save_not_relabeled_by_subsequent_trigger(collector, tmp_path):
+    """A trigger following a recent TN save must not relabel that TN clip as
+    fn/ — the method that used to do this (reclassify_fn_start) is gone."""
+    collector.feed(_speech(3.0))
+    assert collector.save_tn(0.4) is True  # within default tn_score_range (0.1, 0.7)
+
+    collector.feed(_speech(3.0))
+    assert collector.save_tp_start(0.9) is True  # simulate "a trigger followed"
+
+    tn_clips = list((tmp_path / "tn").glob("*.wav"))
+    assert len(tn_clips) == 1, "tn/ clip must still be present, unrelabeled"
+    fn_clips = list((tmp_path / "fn").glob("*.wav"))
+    assert fn_clips == [], "no reclassification path exists to move tn into fn/"
