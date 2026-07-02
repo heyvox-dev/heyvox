@@ -8,9 +8,10 @@ is a minor optimization — the clipboard path is the reliable default.
 """
 
 import json
+import os
 import socket
 import subprocess
-import sys
+import threading
 import time
 
 from heyvox.audio.cues import audio_cue
@@ -19,13 +20,90 @@ from heyvox.audio.cues import audio_cue
 # Max seconds to wait for osascript subprocess to complete
 SUBPROCESS_TIMEOUT = 5
 
+# Max seconds to wait for a PyObjC call into a system framework (NSPasteboard,
+# NSWorkspace). These have no built-in timeout of their own — DEF-165 found a
+# wedged pasteboard server freezing the main loop for ~3 minutes because
+# nothing bounded the wait.
+_APPKIT_CALL_TIMEOUT = 2.0
+
+
+_LOG_PATH_CACHE: str | None = None
+
+
+def _resolve_log_path() -> str:
+    """Resolve and cache the log file path for the life of the process.
+
+    Resolved once (not per call) — a full load_config() per _log() call
+    regressed the AX fast-path from <5ms to >10ms (see
+    test_ax_inject_text_phase12_fastpath_remains_under_5ms). The path itself
+    never changes after startup (main.py's own _LOG_FILE is likewise set
+    once, in _init_log()), so caching the string is safe; correctness comes
+    from reopening the file BY PATH on every _log() call, not from
+    re-resolving the path.
+    """
+    global _LOG_PATH_CACHE
+    if _LOG_PATH_CACHE is None:
+        from heyvox.constants import LOG_FILE_DEFAULT
+        path = os.environ.get("HEYVOX_LOG_FILE")
+        if not path:
+            try:
+                from heyvox.config import load_config
+                path = load_config().log_file or LOG_FILE_DEFAULT
+            except Exception:
+                path = LOG_FILE_DEFAULT
+        _LOG_PATH_CACHE = path
+    return _LOG_PATH_CACHE
+
 
 def _log(msg: str) -> None:
-    """Log to stderr with [injection] prefix."""
+    """Write to the main vox log file (same path/rotation as main.py's log()).
+
+    DEF-166: raw stderr prints relied on launchd's fd-level redirect, which
+    only points at the log file as of process start. The central log()
+    rotates by renaming the file (os.replace) once it crosses the size cap
+    — that repoints the *path* but not fds opened before the rename, so
+    stderr writes silently ended up in the renamed-away (orphaned) inode
+    after the first rotation, invisible from the live log for the rest of
+    the process's life. Reopen by path on every call instead (matching
+    main.py/media.py) — a fresh open() always finds whatever currently sits
+    at that path, so this self-heals across rotations.
+    """
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] [injection] {msg}\n"
     try:
-        print(f"[injection] {msg}", file=sys.stderr, flush=True)
-    except (BrokenPipeError, OSError):
+        with open(_resolve_log_path(), "a") as f:
+            f.write(line)
+    except OSError:
         pass
+
+
+def _call_with_timeout(fn, timeout: float = _APPKIT_CALL_TIMEOUT):
+    """Run a zero-arg callable on a throwaway daemon thread, bounded by timeout.
+
+    PyObjC calls into system frameworks (NSPasteboard, NSWorkspace) block the
+    calling thread with no way to interrupt them. Each call gets a fresh
+    thread (not a shared pool) so one call that never returns only leaks that
+    one thread instead of permanently blocking every future call.
+
+    Raises TimeoutError if `fn` hasn't returned within `timeout` seconds.
+    Re-raises whatever exception `fn` itself raised.
+    """
+    box: dict = {}
+
+    def _run():
+        try:
+            box["result"] = fn()
+        except Exception as e:
+            box["error"] = e
+
+    t = threading.Thread(target=_run, daemon=True, name="heyvox-appkit-call")
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"AppKit call did not return within {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _get_frontmost_app() -> str:
@@ -107,11 +185,14 @@ def _set_clipboard(text: str) -> tuple[bool, int]:
     """
     try:
         import AppKit
-        pb = AppKit.NSPasteboard.generalPasteboard()
-        pb.clearContents()
-        result = pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-        count = pb.changeCount()
-        return bool(result), count
+
+        def _do():
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            pb.clearContents()
+            result = pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+            return bool(result), pb.changeCount()
+
+        return _call_with_timeout(_do, timeout=_APPKIT_CALL_TIMEOUT)
     except Exception as e:
         _log(f"_set_clipboard (NSPasteboard) failed: {e}")
         return False, -1
@@ -128,9 +209,14 @@ def _clipboard_still_ours(expected_count: int) -> bool:
     """
     try:
         import AppKit
-        pb = AppKit.NSPasteboard.generalPasteboard()
-        return pb.changeCount() == expected_count
-    except Exception:
+
+        def _do():
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            return pb.changeCount() == expected_count
+
+        return _call_with_timeout(_do, timeout=_APPKIT_CALL_TIMEOUT)
+    except Exception as e:
+        _log(f"_clipboard_still_ours failed: {e}")
         return False
 
 
@@ -151,9 +237,13 @@ def _verify_target_focused(expected_bundle_id: str | None) -> bool:
         return True
     try:
         import AppKit
-        ws = AppKit.NSWorkspace.sharedWorkspace()
-        front = ws.frontmostApplication()
-        actual = front.bundleIdentifier()
+
+        def _do():
+            ws = AppKit.NSWorkspace.sharedWorkspace()
+            front = ws.frontmostApplication()
+            return front.bundleIdentifier()
+
+        actual = _call_with_timeout(_do, timeout=_APPKIT_CALL_TIMEOUT)
         if actual == expected_bundle_id:
             return True
         _log(f"Focus verify FAILED: expected {expected_bundle_id}, got {actual}")
@@ -737,8 +827,13 @@ def get_clipboard_text() -> str:
     """
     try:
         import AppKit
-        pb = AppKit.NSPasteboard.generalPasteboard()
-        text = pb.stringForType_(AppKit.NSPasteboardTypeString)
-        return str(text) if text else ""
-    except Exception:
+
+        def _do():
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            text = pb.stringForType_(AppKit.NSPasteboardTypeString)
+            return str(text) if text else ""
+
+        return _call_with_timeout(_do, timeout=_APPKIT_CALL_TIMEOUT)
+    except Exception as e:
+        _log(f"get_clipboard_text failed: {e}")
         return ""

@@ -72,6 +72,20 @@ def _make_config(**profile_kwargs):
     return FakeConfig(_p=FakeProfile(**profile_kwargs))
 
 
+@pytest.fixture
+def target_log(monkeypatch, tmp_path):
+    """Redirect heyvox.input.target._log() to an isolated temp file.
+
+    DEF-166: _log() now reopens the config-resolved log path on every call
+    instead of printing to stderr (stderr silently diverged from the live
+    log after rotation). Tests must read that file instead of capsys.
+    """
+    log_file = tmp_path / "target.log"
+    monkeypatch.setenv("HEYVOX_LOG_FILE", str(log_file))
+    monkeypatch.setattr("heyvox.input.target._LOG_PATH_CACHE", None)
+    return log_file
+
+
 # ---------------------------------------------------------------------------
 # Pre-tier short-circuit
 # ---------------------------------------------------------------------------
@@ -126,7 +140,7 @@ def test_paste_outcome_is_frozen():
 # ---------------------------------------------------------------------------
 
 
-def test_tier1_succeeds_when_role_path_walks_cleanly(monkeypatch, capsys):
+def test_tier1_succeeds_when_role_path_walks_cleanly(monkeypatch, target_log):
     from heyvox.input.target import resolve_lock
 
     monkeypatch.setattr(
@@ -159,8 +173,7 @@ def test_tier1_succeeds_when_role_path_walks_cleanly(monkeypatch, capsys):
     assert outcome.ok is True
     assert outcome.tier_used == 1
     assert outcome.element is fake_leaf
-    captured = capsys.readouterr()
-    assert "[PASTE] tier_used=1" in captured.err
+    assert "[PASTE] tier_used=1" in target_log.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +181,7 @@ def test_tier1_succeeds_when_role_path_walks_cleanly(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_tier2_fires_with_focus_shortcut(monkeypatch, capsys):
+def test_tier2_fires_with_focus_shortcut(monkeypatch, target_log):
     """DEF-089: Tier 2 with focus_shortcut returns ok=True without firing
     any osascript itself. The actual focus+paste+Enter osascript is fired
     by `app_fast_paste` — the caller — once. Firing it here too caused
@@ -219,9 +232,9 @@ def test_tier2_fires_with_focus_shortcut(monkeypatch, capsys):
         f"Tier 2 should defer keystrokes to app_fast_paste; "
         f"got osascript calls: {osa}"
     )
-    captured = capsys.readouterr()
-    assert "[PASTE] tier_used=2" in captured.err
-    assert "deferred to app_fast_paste" in captured.err
+    log_text = target_log.read_text()
+    assert "[PASTE] tier_used=2" in log_text
+    assert "deferred to app_fast_paste" in log_text
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +242,7 @@ def test_tier2_fires_with_focus_shortcut(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_tier1_fail_with_no_profile_returns_target_unreachable(monkeypatch, capsys):
+def test_tier1_fail_with_no_profile_returns_target_unreachable(monkeypatch, target_log):
     """DEF-089: with the keystroke removed from Tier 2, the only path to
     TARGET_UNREACHABLE through Tier 3 is "Tier 1 walk failed AND no profile
     provided" (no Tier 2 to defer to). Replaces the obsolete test that
@@ -263,9 +276,9 @@ def test_tier1_fail_with_no_profile_returns_target_unreachable(monkeypatch, caps
     assert outcome.tier_used == 0
     assert outcome.reason is FailReason.TARGET_UNREACHABLE
     assert "TargetApp" in outcome.message
-    captured = capsys.readouterr()
-    assert "tier_used=fail_closed" in captured.err
-    assert "target_unreachable" in captured.err
+    log_text = target_log.read_text()
+    assert "tier_used=fail_closed" in log_text
+    assert "target_unreachable" in log_text
 
 
 def test_no_focus_shortcut_gives_multi_field_no_shortcut(monkeypatch):

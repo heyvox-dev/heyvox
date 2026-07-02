@@ -1,7 +1,11 @@
 """Tests for heyvox.input.injection — text injection via clipboard + osascript."""
 
+import time as _real_time
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+from heyvox.input import injection
 from heyvox.input.injection import (
     type_text, press_enter, focus_app, focus_input,
     clipboard_is_image, get_clipboard_text,
@@ -9,6 +13,8 @@ from heyvox.input.injection import (
     _clipboard_still_ours,
     _verify_target_focused,
     _ax_inject_text,
+    _call_with_timeout,
+    _set_clipboard,
 )
 
 
@@ -450,3 +456,81 @@ class TestErrorCue:
                         mock_run.return_value = MagicMock(returncode=0)
                         result = type_text("hello")
         assert result is True
+
+
+class TestCallWithTimeout:
+    """_call_with_timeout — bounds PyObjC calls that have no timeout of their
+    own (DEF-165: a wedged NSPasteboard call froze the main loop for ~3 min).
+    """
+
+    def test_returns_result_on_fast_call(self):
+        assert _call_with_timeout(lambda: "ok", timeout=1.0) == "ok"
+
+    def test_reraises_exception_from_callable(self):
+        def _boom():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            _call_with_timeout(_boom, timeout=1.0)
+
+    def test_raises_timeout_error_without_waiting_for_slow_call(self):
+        def _slow():
+            _real_time.sleep(5)
+            return "too late"
+
+        t0 = _real_time.monotonic()
+        with pytest.raises(TimeoutError):
+            _call_with_timeout(_slow, timeout=0.2)
+        elapsed = _real_time.monotonic() - t0
+        assert elapsed < 1.0, f"should return promptly, took {elapsed:.2f}s"
+
+
+class TestSetClipboardTimeout:
+    """DEF-165: _set_clipboard must fail fast instead of hanging when the
+    pasteboard server is wedged."""
+
+    def test_set_clipboard_times_out_instead_of_hanging(self):
+        mock_pb = MagicMock()
+        mock_pb.clearContents.side_effect = lambda: _real_time.sleep(5)
+        mock_appkit = MagicMock()
+        mock_appkit.NSPasteboard.generalPasteboard.return_value = mock_pb
+
+        with patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            with patch.object(injection, "_APPKIT_CALL_TIMEOUT", 0.2):
+                t0 = _real_time.monotonic()
+                ok, count = _set_clipboard("hello")
+        elapsed = _real_time.monotonic() - t0
+
+        assert (ok, count) == (False, -1)
+        assert elapsed < 1.0, f"timeout not enforced, took {elapsed:.2f}s"
+
+
+class TestLogSurvivesRotation:
+    """DEF-166: _log() must keep writing to the live path after the central
+    logger rotates the file out from under it (os.replace renames the path;
+    stale fds don't follow). Covers injection.py and target.py, which share
+    the same _log()/_resolve_log_path() pattern.
+    """
+
+    @pytest.mark.parametrize("module_path", ["heyvox.input.injection", "heyvox.input.target"])
+    def test_log_reopens_by_path_after_rotation(self, module_path, monkeypatch, tmp_path):
+        import importlib
+        mod = importlib.import_module(module_path)
+
+        log_file = tmp_path / "vox.log"
+        monkeypatch.setenv("HEYVOX_LOG_FILE", str(log_file))
+        monkeypatch.setattr(mod, "_LOG_PATH_CACHE", None)
+
+        mod._log("before rotation")
+        assert "before rotation" in log_file.read_text()
+
+        # Simulate main.py's log() rotation: rename the current file away.
+        # Any writer holding a stale fd from before this point would now be
+        # writing into the orphaned inode at `rotated`, invisible at `log_file`.
+        rotated = tmp_path / "vox.log.1"
+        log_file.rename(rotated)
+
+        mod._log("after rotation")
+        assert log_file.exists(), "log() must recreate the file at the live path"
+        assert "after rotation" in log_file.read_text()
+        assert "after rotation" not in rotated.read_text()

@@ -27,7 +27,6 @@ import re
 import subprocess  # Module-level per Fact 5 — test patches via
                    # monkeypatch.setattr("heyvox.input.target.subprocess.run", ...)
                    # only intercept when subprocess is imported at module scope.
-import sys
 import time as _time
 from dataclasses import dataclass
 from enum import Enum
@@ -40,18 +39,58 @@ from heyvox.adapters.conductor import get_active_workspace_and_session
 # would add a redundant tell-application-activate osascript fork (~50ms).
 
 
+_LOG_PATH_CACHE: str | None = None
+
+
+def _resolve_log_path() -> str:
+    """Resolve and cache the log file path for the life of the process.
+
+    Resolved once (not per call) — a full load_config() per _log() call
+    measurably regresses hot AX call sites. The path itself never changes
+    after startup (main.py's own _LOG_FILE is likewise set once, in
+    _init_log()), so caching the string is safe; correctness comes from
+    reopening the file BY PATH on every _log() call, not from re-resolving
+    the path.
+    """
+    global _LOG_PATH_CACHE
+    if _LOG_PATH_CACHE is None:
+        from heyvox.constants import LOG_FILE_DEFAULT
+        path = os.environ.get("HEYVOX_LOG_FILE")
+        if not path:
+            try:
+                from heyvox.config import load_config
+                path = load_config().log_file or LOG_FILE_DEFAULT
+            except Exception:
+                path = LOG_FILE_DEFAULT
+        _LOG_PATH_CACHE = path
+    return _LOG_PATH_CACHE
+
+
 def _log(msg: str) -> None:
-    """Log to stderr with [HH:MM:SS] [target] prefix.
+    """Write to the main vox log file (same path/rotation as main.py's log()).
 
     Timestamp is needed for sub-step timing inside resolve_lock +
     _activate_app (DEF-061) — without it, multi-second hangs inside
     a single call are invisible because only the caller's entry/exit
     lines carry timestamps.
+
+    DEF-166: previously printed to stderr, relying on launchd's fd-level
+    redirect to the log file. That redirect only points at the file as of
+    process start — the central log() rotates by renaming the file
+    (os.replace) once it crosses the size cap, which repoints the *path*
+    but not fds opened before the rename. Writes via sys.stderr silently
+    ended up in the renamed-away (orphaned) inode after the first rotation.
+    Reopen by path on every call instead (matching main.py/media.py) — a
+    fresh open() always finds whatever currently sits at that path, so this
+    self-heals across rotations.
     """
+    ts = _time.strftime("%H:%M:%S")
+    line = f"[{ts}] [target] {msg}\n"
+    path = _resolve_log_path()
     try:
-        ts = _time.strftime("%H:%M:%S")
-        print(f"[{ts}] [target] {msg}", file=sys.stderr, flush=True)
-    except (BrokenPipeError, OSError):
+        with open(path, "a") as f:
+            f.write(line)
+    except OSError:
         pass
 
 

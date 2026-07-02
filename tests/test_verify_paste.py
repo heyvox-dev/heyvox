@@ -58,6 +58,20 @@ def _make_profile(**kwargs):
     return FakeProfile(**kwargs)
 
 
+@pytest.fixture
+def target_log(monkeypatch, tmp_path):
+    """Redirect heyvox.input.target._log() to an isolated temp file.
+
+    DEF-166: _log() now reopens the config-resolved log path on every call
+    instead of printing to stderr (stderr silently diverged from the live
+    log after rotation). Tests must read that file instead of capsys.
+    """
+    log_file = tmp_path / "target.log"
+    monkeypatch.setenv("HEYVOX_LOG_FILE", str(log_file))
+    monkeypatch.setattr("heyvox.input.target._LOG_PATH_CACHE", None)
+    return log_file
+
+
 # ---------------------------------------------------------------------------
 # _normalize_text
 # ---------------------------------------------------------------------------
@@ -309,7 +323,7 @@ def test_tier2_acquire_fail_focus_moved_drift(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_verify_with_profile_none_emits_explicit_log(monkeypatch, capsys):
+def test_verify_with_profile_none_emits_explicit_log(monkeypatch, target_log):
     from heyvox.input.target import verify_paste
 
     monkeypatch.setattr(
@@ -323,9 +337,9 @@ def test_verify_with_profile_none_emits_explicit_log(monkeypatch, capsys):
     lock = _make_lock(app_name="MyApp")
     verify_paste(lock, None, "hello", profile=None)
 
-    captured = capsys.readouterr()
-    assert "profile=None" in captured.err, (
-        f"W7: expected explicit profile=None log; got {captured.err!r}"
+    log_text = target_log.read_text()
+    assert "profile=None" in log_text, (
+        f"W7: expected explicit profile=None log; got {log_text!r}"
     )
 
 
@@ -334,7 +348,7 @@ def test_verify_with_profile_none_emits_explicit_log(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_verified_true_first_try_log(monkeypatch, capsys):
+def test_verified_true_first_try_log(monkeypatch, target_log):
     from heyvox.input.target import verify_paste
 
     monkeypatch.setattr(
@@ -343,11 +357,11 @@ def test_verified_true_first_try_log(monkeypatch, capsys):
     monkeypatch.setattr("heyvox.input.target._time.sleep", lambda s: None)
 
     verify_paste(_make_lock(), object(), "hello", _make_profile())
-    out = capsys.readouterr().err
+    out = target_log.read_text()
     assert "[PASTE] verified=true retried=false drift=false" in out
 
 
-def test_drift_log_format(monkeypatch, capsys):
+def test_drift_log_format(monkeypatch, target_log):
     from heyvox.input.target import verify_paste
 
     monkeypatch.setattr(
@@ -367,7 +381,7 @@ def test_drift_log_format(monkeypatch, capsys):
     )
 
     verify_paste(_make_lock(), object(), "hello", _make_profile())
-    out = capsys.readouterr().err
+    out = target_log.read_text()
     assert "[PASTE] verified=false retried=true drift=true" in out
 
 
