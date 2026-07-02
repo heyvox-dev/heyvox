@@ -135,3 +135,44 @@ def test_check_never_raises_when_psutil_missing(monkeypatch):
     monkeypatch.setattr(psutil, "virtual_memory", _boom)
     # Must return None, not propagate.
     assert ram_pressure.check_and_surface() is None
+
+
+# --------------------------------------------------------------------------
+# contention_snapshot() -- DEF-169 follow-up: system-load context riding
+# along on every STT timing log line, not just the warn/crit banner path.
+# --------------------------------------------------------------------------
+
+def test_contention_snapshot_happy_path(monkeypatch):
+    import os
+    _patch_available(monkeypatch, 2140)
+    monkeypatch.setattr(ram_pressure, "macos_pressure_level", lambda: ram_pressure.PRESSURE_WARN)
+    monkeypatch.setattr(os, "getloadavg", lambda: (13.82, 10.33, 9.41))
+
+    snapshot = ram_pressure.contention_snapshot()
+
+    assert "avail_mb=2140" in snapshot
+    assert "pressure=warn" in snapshot
+    assert "load1=13.8" in snapshot
+
+
+def test_contention_snapshot_unknown_pressure_level_shows_placeholder(monkeypatch):
+    import os
+    _patch_available(monkeypatch, 8000)
+    monkeypatch.setattr(ram_pressure, "macos_pressure_level", lambda: 99)  # not a known bit value
+    monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+
+    assert "pressure=?" in ram_pressure.contention_snapshot()
+
+
+def test_contention_snapshot_never_raises_when_every_signal_fails(monkeypatch):
+    import os
+    import psutil
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ram_pressure, "macos_pressure_level", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(os, "getloadavg", lambda: (_ for _ in ()).throw(OSError("boom")))
+
+    # Must degrade to placeholders, never propagate -- this rides along on
+    # every single STT completion, so it must be unconditionally safe.
+    snapshot = ram_pressure.contention_snapshot()
+    assert snapshot == "avail_mb=? pressure=? load1=?"

@@ -72,6 +72,52 @@ def macos_pressure_level() -> int | None:
         return None
 
 
+def contention_snapshot() -> str:
+    """Return a compact, log-ready "is the system under load right now" string.
+
+    DEF-169 follow-up: STT decode time on this machine has a heavy tail (p50
+    ~2s, occasional 10-20s+ outliers) that a historical log investigation
+    could only correlate with system contention *after the fact*, and only
+    approximately (memory pressure explained one slow-STT cluster tightly,
+    not the other). This snapshot rides along on every STT-timing log line
+    instead, so future slow/fast comparisons don't need manual reconstruction.
+
+    Best-effort — each field degrades to "?" independently so one failing
+    signal (e.g. sysctl unavailable off macOS) doesn't blank the others.
+    Deliberately NOT wired into the warn/crit banner thresholds in
+    ``evaluate()`` above — this is a raw snapshot for correlation, not a
+    decision, and callers should never branch on its contents.
+    """
+    avail = "?"
+    try:
+        import psutil
+
+        avail = f"{psutil.virtual_memory().available / 1024 / 1024:.0f}"
+    except Exception:
+        pass
+
+    pressure = "?"
+    try:
+        level = macos_pressure_level()
+        pressure = {
+            PRESSURE_NORMAL: "normal",
+            PRESSURE_WARN: "warn",
+            PRESSURE_CRITICAL: "critical",
+        }.get(level, "?")
+    except Exception:
+        pass
+
+    load1 = "?"
+    try:
+        import os
+
+        load1 = f"{os.getloadavg()[0]:.1f}"
+    except Exception:
+        pass
+
+    return f"avail_mb={avail} pressure={pressure} load1={load1}"
+
+
 def evaluate(
     available_mb: float,
     warn_mb: float,

@@ -847,9 +847,11 @@ class RecordingStateMachine:
                 .replace("whisper-", "").replace("-mlx", "")
             )
             if stop_time:
+                from heyvox.ram_pressure import contention_snapshot
                 self._log(
                     f"[TIMING] stop→STT done: {_t_stt_done - stop_time:.2f}s "
-                    f"(STT={elapsed:.1f}s model={_stt_model_short} warm={_stt_was_warm})"
+                    f"(STT={elapsed:.1f}s model={_stt_model_short} warm={_stt_was_warm}) "
+                    f"[{contention_snapshot()}]"
                 )
             self._log(
                 f"Transcription ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}"
