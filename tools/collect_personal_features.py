@@ -14,7 +14,7 @@ Source directory roles (hard-coded — this is a single-owner personal model):
   Positives (should fire — label 1):
     ~/.config/heyvox/training/tp          runtime TPs (user's voice, real mic)
     ~/.config/heyvox/training/positives   clean auto-collected positives
-    ~/.config/heyvox/training/fn          runtime false negatives (retroactive)
+    ~/.config/heyvox/training/fn          runtime false negatives (evidence-based, save_fn_stop)
     training/recordings                   user recordings
     training/recordings_friends           friends recordings (voice diversity)
     training/recordings_jabra             jabra-specific recordings (codec cover)
@@ -28,11 +28,19 @@ Usage:
     python3 tools/collect_personal_features.py \\
         --out-dir /tmp/personal_features \\
         --tarball /tmp/personal_features.tar.gz
+
+Before featurising, this script runs a mandatory Whisper quality gate
+(tools/quality_gate.py) over every source dir listed below, quarantining
+mismatched clips (DEF-167). Two flags change that default:
+    --gate-only    Run the gate, print its summary, exit 0 -- no featurisation.
+    --skip-gate    Skip the gate entirely and featurise as-is (explicit escape
+                   hatch; prints a WARNING since this bypasses the audit).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tarfile
@@ -43,6 +51,7 @@ import numpy as np
 # Reuse the featuriser — no duplication.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from featurise_clips import collect_wav_paths, featurise  # noqa: E402
+from quality_gate import run_gate  # noqa: E402
 
 
 def _expand(p: str) -> Path:
@@ -85,7 +94,60 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--limit-per-side", type=int, default=0,
                     help="Cap N per side (smoke testing). 0 = no cap.")
+    ap.add_argument("--gate-only", action="store_true",
+                    help="Run the quality gate, print its summary, exit 0 -- "
+                         "no featurisation.")
+    ap.add_argument("--skip-gate", action="store_true",
+                    help="Skip the mandatory quality gate and featurise as-is "
+                         "(explicit escape hatch; prints a warning).")
     args = ap.parse_args()
+
+    if args.skip_gate and not args.gate_only:
+        print(
+            "WARNING: --skip-gate set -- featurizing WITHOUT the mandatory "
+            "Whisper quality audit",
+            file=sys.stderr,
+        )
+    elif args.skip_gate and args.gate_only:
+        print(
+            "NOTE: both --gate-only and --skip-gate passed -- --gate-only "
+            "takes precedence (gate runs, featurization is skipped either "
+            "way, so --skip-gate has no effect)",
+            file=sys.stderr,
+        )
+
+    if not args.skip_gate or args.gate_only:
+        gate_summary = run_gate(
+            POSITIVE_DIRS, HARD_NEGATIVE_DIRS,
+            _expand("~/.config/heyvox/training/positives"),
+            _expand("~/.config/heyvox/training/quarantine"),
+        )
+        print(
+            f"=== Quality gate: {gate_summary['quarantined']} quarantined, "
+            f"{gate_summary['recovered_to_positives']} recovered to positives "
+            f"(rate={gate_summary['quarantine_rate']:.1%}) ===",
+            file=sys.stderr,
+        )
+        if gate_summary.get("recovered_to_positives", 0) > 0:
+            try:
+                manifest = json.loads(Path(gate_summary["manifest_path"]).read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"WARNING: failed to read gate manifest for spot-check log: {e}",
+                      file=sys.stderr)
+                manifest = []
+            for entry in manifest:
+                if entry.get("side") == "negative" and entry.get("moved_to") == "positives":
+                    clip_name = Path(entry["from"]).name
+                    duration = entry.get("duration", 0.0)
+                    text = entry.get("text", "")
+                    print(
+                        f"  recovered: {clip_name} <- {duration:.1f}s, "
+                        f"transcript: '{text[:60]}'",
+                        file=sys.stderr,
+                    )
+
+        if args.gate_only:
+            return 0
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
