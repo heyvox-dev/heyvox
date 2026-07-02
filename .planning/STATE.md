@@ -5,7 +5,7 @@ milestone_name: Paste Injection Reliability
 status: executing
 stopped_at: Phase 14 context gathered
 last_updated: "2026-06-11T18:23:37.000Z"
-last_activity: 2026-06-11
+last_activity: 2026-07-02
 progress:
   total_phases: 16
   completed_phases: 9
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 Phase: 16
 Plan: Not started
 Status: Executing Phase 16
-Last activity: 2026-06-28 - Completed quick task 260628-mhf: Wake-word latency instrumentation (t0/t1/t2 perf_counter)
+Last activity: 2026-07-02 - Completed quick task 260702-cdg: Wake-word training-data quality gate (DEF-167)
 
 Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
 
@@ -99,6 +99,7 @@ None — milestone complete.
 | 260525-d80 | DEF-080 herald CLI pinned to `[sys.executable, -m, heyvox.herald.cli]` — closes 5-week-old WIP parked fix; defect-guard tests for the pin + dispatch argv | 2026-05-25 | 40e254046 | [260525-def080-herald-cmd](./quick/260525-def080-herald-cmd/) |
 | 260628-mhf | Wake-word latency instrumentation — t0/t1/t2 perf_counter timestamps + [WW_LATENCY] log tags in main.py, cues.py, recording.py; baseline measurement pending | 2026-06-28 | 2ef86947c | [260628-mhf-wakeword-latency](./quick/260628-mhf-wakeword-latency/) |
 | 260701-dis | cues.py: sounddevice + cache statt afplay für non-USB output — eliminiert p99-Spike (212ms→<50ms erwartet); afplay als Fallback erhalten | 2026-07-01 | 01cf8dd40 | [260701-dis-cues-sounddevice](./quick/260701-dis-cues-sounddevice/) |
+| 260702-cdg | Wake-word training-data quality gate — removed retroactive relabelers (DEF-167) + mandatory resumable Whisper gate (quarantine-only, collision-safe) + append-only eval-history log | 2026-07-02 | 31b3a0ddb | [260702-cdg-wake-word-training-data-quality-gate](./quick/260702-cdg-wake-word-training-data-quality-gate/) |
 
 ## Session Continuity
 
