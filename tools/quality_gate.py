@@ -235,6 +235,29 @@ def _gather_wavs(dirs: list[Path]) -> list[Path]:
     return all_paths
 
 
+def _safe_dest(dest_dir: Path, name: str) -> Path:
+    """Return a collision-free destination path inside dest_dir.
+
+    Path.rename() silently overwrites an existing target on POSIX -- which
+    would violate this module's never-delete guarantee if two clips ever
+    share a filename across source dirs (rare given the collector's
+    category+timestamp+score naming, but possible, and a silent overwrite
+    is an unrecoverable loss). If dest_dir/name is free, return it;
+    otherwise insert _dup1, _dup2, ... before the suffix until a free
+    path is found.
+    """
+    candidate = dest_dir / name
+    if not candidate.exists():
+        return candidate
+    stem, suffix = candidate.stem, candidate.suffix
+    i = 1
+    while True:
+        alt = dest_dir / f"{stem}_dup{i}{suffix}"
+        if not alt.exists():
+            return alt
+        i += 1
+
+
 def _verdict_for_clip(clip: Path, state_dir: Path) -> tuple[str, bool, bool]:
     """Transcribe (with resumable write-ahead) and return (text, has_ww, timed_out)."""
     abs_path = str(clip.resolve())
@@ -313,7 +336,7 @@ def run_gate(
         })
 
         if not has_ww:
-            new_path = quarantine_dir / clip.name
+            new_path = _safe_dest(quarantine_dir, clip.name)
             try:
                 clip.rename(new_path)
             except OSError as e:
@@ -357,10 +380,10 @@ def run_gate(
         if has_ww:
             duration = len(audio) / sr if sr else 0.0
             if duration <= _RECOVERY_MAX_SECS:
-                new_path = positives_dir / clip.name
+                new_path = _safe_dest(positives_dir, clip.name)
                 moved_to = "positives"
             else:
-                new_path = quarantine_dir / clip.name
+                new_path = _safe_dest(quarantine_dir, clip.name)
                 moved_to = "quarantine"
             try:
                 new_path.parent.mkdir(parents=True, exist_ok=True)
