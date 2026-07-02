@@ -13,12 +13,23 @@ This script:
   * reads wav AND flac via soundfile, recursing into subdirs,
   * reports FP count + FP/hour and (optional) TP rate per threshold.
 
+Local-vs-remote retrain/eval boundary: retrain itself runs on Colab (remote
+GPU, tools/retrain_heyvox_v8.py or equivalent). This script runs LOCALLY --
+it needs both the LibriSpeech/negative-corpus WAV files AND the downloaded
+.onnx model artifact on local disk, neither of which exist inside the Colab
+notebook's ephemeral environment. "Run fp_rate_eval after every retrain" is
+therefore a documented manual local post-download step in the retrain
+workflow, NOT a CI hook and NOT something that runs automatically inside the
+Colab notebook. Every run appends one record to --history-file so the
+threshold-sweep results of every retrain are auditable over time without
+re-running the corpus scan.
+
 Usage:
     python3 tools/fp_rate_eval.py \
         --model ~/.config/heyvox/models/hey_vox.onnx \
         --negatives /tmp/LibriSpeech/dev-clean \
         --positives /tmp/heyvox-baseline/pos_friends \
-        [--limit-neg 0] [--wake-name hey_vox]
+        [--limit-neg 0] [--wake-name hey_vox] [--history-file PATH]
 """
 from __future__ import annotations
 
@@ -27,6 +38,7 @@ import glob
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -100,6 +112,12 @@ def main() -> int:
     p.add_argument("--positives", default="", help="optional dir of positive wav/flac (recursive)")
     p.add_argument("--wake-name", default="", help="defaults to model filename stem")
     p.add_argument("--limit-neg", type=int, default=0, help="cap negative files (0 = all)")
+    p.add_argument(
+        "--history-file",
+        default=os.path.expanduser("~/.config/heyvox/training/eval_history.jsonl"),
+        help="Append-only JSONL log of every eval run "
+             "(default: ~/.config/heyvox/training/eval_history.jsonl)",
+    )
     args = p.parse_args()
 
     try:
@@ -153,6 +171,25 @@ def main() -> int:
         "positive_files": pos_n,
         "results": results,
     }, indent=2))
+
+    # Lowest threshold (THRESHOLDS is already ascending) whose gate passed,
+    # or None if nothing passed this run.
+    best_passing_threshold = next(
+        (r["threshold"] for r in results if r["gate_pass"]), None
+    )
+    history_record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": args.model,
+        "negative_hours": round(neg_hours, 3),
+        "negative_files": len(neg_scores),
+        "positive_files": pos_n,
+        "per_threshold": results,
+        "best_passing_threshold": best_passing_threshold,
+    }
+    os.makedirs(os.path.dirname(args.history_file), exist_ok=True)
+    with open(args.history_file, "a") as f:  # append-only, NEVER "w" (would truncate)
+        f.write(json.dumps(history_record) + "\n")
+
     return 0
 
 
