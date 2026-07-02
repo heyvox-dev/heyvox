@@ -333,3 +333,135 @@ def test_handsfree_recording_skips_wakeword_trim(isolate_flags):
 def test_wakeword_recording_still_applies_trim(isolate_flags):
     """Guard the control case: a normal wake-word recording is still trimmed."""
     assert _run_stop_and_count_chunks(handsfree=False) == 76
+
+
+# ---------------------------------------------------------------------------
+# DEF-169: garbled-discard recovery pointer (raw_wav_path plumbing)
+#
+# _last_raw_wav used to be a local set inside stop() and read back inside
+# _send_local -- a different method, run on its own daemon thread. Referencing
+# it there was a guaranteed NameError, silently swallowed. Separately, the
+# on-demand fallback for when debug-capture is off checked `audio_chunks`
+# *after* it had already been `.clear()`-ed a few lines earlier, so it was
+# dead too. Net effect: the large-v3 reverify-and-clipboard recovery for a
+# discarded transcription never fired, regardless of settings.
+# ---------------------------------------------------------------------------
+
+def test_stop_passes_raw_wav_path_kwarg_to_send_local(isolate_flags):
+    """stop() must forward whatever _save_debug_audio("raw", ...) returned
+    into _send_local as `raw_wav_path` -- previously this was dropped."""
+    import numpy as np
+
+    ctx = AppContext()
+    config = MagicMock()
+    config.min_recording_secs = 0.5
+    config.cues_dir = None
+    config.stt.backend = "local"
+    config.audio.sample_rate = 16000
+    config.audio.chunk_size = 1280
+
+    captured = {}
+
+    def fake_send_local(duration, chunks, raw_rms_db, **kw):
+        captured.update(kw)
+
+    rsm = RecordingStateMachine(
+        ctx=ctx, config=config, log_fn=lambda s: None, hud_send=lambda m: None
+    )
+    ctx.is_recording = True
+    ctx.recording_start_time = time.time() - 5.0
+    ctx.triggered_by_ptt = False
+    ctx.handsfree = False
+    ctx.recording_target = object()
+    ctx.audio_buffer = [np.full(1280, 800, dtype=np.int16) for _ in range(100)]
+
+    with patch.object(rsm, "_send_local", side_effect=fake_send_local), \
+         patch("heyvox.recording.threading.Thread", _SyncThread), \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.ipc.update_state"):
+        rsm.stop()
+
+    # STT_DEBUG_DIR won't exist in the test env, so the value itself is None
+    # here -- what this guards is that stop() still passes the key at all.
+    assert "raw_wav_path" in captured
+
+
+def _send_local_garbled_config():
+    config = MagicMock()
+    config.cues_dir = None
+    config.audio.sample_rate = 16000
+    config.echo_suppression.stt_echo_filter = False
+    config.stt.local.engine = "local"
+    config.stt.local.mlx_model = "mlx-community/whisper-large-v3-turbo"
+    config.stt.local.language = "de"
+    config.wake_words.start = "hey_vox"
+    config.wake_words.stop = "hey_vox"
+    config.mic_profiles = {}
+    return config
+
+
+def test_send_local_garbled_with_debug_wav_triggers_reverify(rsm_and_ctx, isolate_flags):
+    """With a debug-capture WAV path available, a garbled discard must call
+    the large-v3 reverify -- previously _reverify_garbled_async was never
+    invoked because the path lookup silently NameError'd every time."""
+    rsm, ctx = rsm_and_ctx
+    rsm.config = _send_local_garbled_config()
+
+    with patch("heyvox.audio.stt.transcribe_audio", return_value="the the the the"), \
+         patch("heyvox.audio.stt.model_loaded", return_value=True), \
+         patch("heyvox.recording._reverify_garbled_async") as mock_reverify, \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.recording._release_recording_guard"), \
+         patch("heyvox.audio.media.resume_media"):
+        rsm._send_local(
+            duration=3.0,
+            audio_chunks=[],
+            raw_rms_db=-30.0,
+            ptt=False,
+            recording_target=None,
+            stop_time=0.0,
+            raw_wav_path="/tmp/heyvox-debug/20260702_999999_raw.wav",
+        )
+
+    mock_reverify.assert_called_once()
+    assert mock_reverify.call_args[0][0] == "/tmp/heyvox-debug/20260702_999999_raw.wav"
+
+
+def test_send_local_garbled_without_debug_wav_falls_back_on_demand(rsm_and_ctx, isolate_flags):
+    """Without a debug-capture path (raw_wav_path=None), the on-demand
+    fallback must still see the real audio -- previously audio_chunks.clear()
+    ran before this check, so the fallback silently never fired either."""
+    import os
+    import numpy as np
+    rsm, ctx = rsm_and_ctx
+    rsm.config = _send_local_garbled_config()
+
+    chunks = [np.full(1280, 800, dtype=np.int16) for _ in range(20)]
+
+    with patch("heyvox.audio.stt.transcribe_audio", return_value="the the the the"), \
+         patch("heyvox.audio.stt.model_loaded", return_value=True), \
+         patch("heyvox.recording._reverify_garbled_async") as mock_reverify, \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.recording._release_recording_guard"), \
+         patch("heyvox.audio.media.resume_media"):
+        rsm._send_local(
+            duration=3.0,
+            audio_chunks=chunks,
+            raw_rms_db=-30.0,
+            ptt=False,
+            recording_target=None,
+            stop_time=0.0,
+            raw_wav_path=None,
+        )
+
+    mock_reverify.assert_called_once()
+    on_demand_path = mock_reverify.call_args[0][0]
+    try:
+        assert os.path.exists(on_demand_path)
+        assert "heyvox-garbled-" in on_demand_path
+    finally:
+        if os.path.exists(on_demand_path):
+            os.remove(on_demand_path)

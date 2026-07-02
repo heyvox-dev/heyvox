@@ -688,7 +688,8 @@ class RecordingStateMachine:
                     kwargs={"ptt": ptt_snapshot, "recording_target": target_snapshot,
                             "stop_time": _stop_t0, "stop_reason": reason,
                             "raw_tail": _raw_tail,
-                            "observed_stop_score": _observed_stop_score},
+                            "observed_stop_score": _observed_stop_score,
+                            "raw_wav_path": _last_raw_wav},
                     daemon=True,
                 ).start()
         except Exception as e:
@@ -733,6 +734,7 @@ class RecordingStateMachine:
         stop_reason: str = "other",
         raw_tail: list | None = None,
         observed_stop_score: float = 0.0,
+        raw_wav_path: str | None = None,
     ) -> None:
         """Transcribe locally and inject text into target app."""
         import subprocess as _subprocess
@@ -821,8 +823,9 @@ class RecordingStateMachine:
             # Snapshot audio tail for training data before clearing
             _training_chunks = list(audio_chunks) if self.training_collector else []
             _training_sr = self.config.audio.sample_rate
-            # Free audio chunks immediately — no longer needed after transcription
-            audio_chunks.clear()
+            # NOTE: audio_chunks is freed further down (both branches), once the
+            # garbled-discard check has had a chance to use it for on-demand
+            # recovery. Do not clear it here — DEF-169.
 
             # Post-STT memory check: if MLX Whisper ballooned, force unload now
             try:
@@ -970,13 +973,9 @@ class RecordingStateMachine:
                 self._log(
                     f"FILTER (garbled, stt={elapsed:.1f}s): Discarding transcription: {text[:80]}"
                 )
-                _raw_for_reverify = None
-                try:
-                    if _last_raw_wav:
-                        self._log(f"FILTER (garbled): raw audio preserved at {_last_raw_wav}")
-                        _raw_for_reverify = _last_raw_wav
-                except NameError:
-                    pass
+                _raw_for_reverify = raw_wav_path
+                if _raw_for_reverify:
+                    self._log(f"FILTER (garbled): raw audio preserved at {_raw_for_reverify}")
                 # DEF-133: the large-v3 recovery needs a raw WAV, but
                 # _save_debug_audio only writes one when STT_DEBUG_DIR exists.
                 # With debug capture off (the default), persist *this* garbled
@@ -1003,6 +1002,8 @@ class RecordingStateMachine:
                         )
                     except Exception as _ge:
                         self._log(f"FILTER (garbled): on-demand raw save failed: {_ge}")
+                # Free audio chunks now that on-demand recovery (if any) has run.
+                audio_chunks.clear()
                 # P-stochastic-stt: whisper-small can hallucinate repetition on
                 # a clean recording; re-run large-v3 in the background and copy
                 # any clean recovery to the clipboard. No auto-paste — by the
@@ -1025,6 +1026,9 @@ class RecordingStateMachine:
                 cues_dir = get_cues_dir(self.config.cues_dir)
                 audio_cue("paused", cues_dir)
                 return
+
+            # Free audio chunks -- not garbled, no on-demand recovery needed.
+            audio_chunks.clear()
 
             self._hud_send({"type": "transcript", "text": text})
 
