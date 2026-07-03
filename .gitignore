@@ -23,11 +23,13 @@ env/
 .DS_Store
 ._*
 
-# Internal planning docs (not for public release)
-.planning/
+# Internal docs (not for public release)
+# CLAUDE.md and the rest of .planning/ are intentionally public; only the
+# business-strategy docs below are kept private (also purged from history).
 .context/
 product-concept.md
-CLAUDE.md
+.planning/PROJECT.md
+.planning/research/
 conductor/
 
 # Environment files
