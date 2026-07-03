@@ -43,7 +43,7 @@ One install gets everything. One setup command wires it all up.
 
 ## Install
 
-### From source (recommended for now)
+### From source (for development)
 
 ```bash
 # Prerequisites
@@ -58,13 +58,15 @@ pip install -e ".[apple-silicon,chrome]"
 heyvox setup
 ```
 
-### From PyPI (coming soon)
+### From PyPI (recommended)
 
 ```bash
-pip install heyvox
-pip install 'heyvox[apple-silicon]'   # Apple Silicon acceleration (MLX Whisper)
-pip install 'heyvox[tts]'             # Kokoro TTS support
-pip install 'heyvox[full]'            # Everything
+pip install heyvox                    # core
+pip install 'heyvox[apple-silicon]'  # + MLX Whisper (Apple Silicon STT acceleration)
+pip install 'heyvox[tts]'            # + Kokoro/Qwen TTS (Herald voice output)
+
+# then run the setup wizard
+heyvox setup
 ```
 
 ### What `heyvox setup` does

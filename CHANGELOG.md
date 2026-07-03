@@ -6,7 +6,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Launch-readiness hardening for the public release. Not yet published to PyPI.
+## [1.1.0] - 2026-07-03
+
+Launch-readiness hardening — the first release where a fresh `pip install heyvox`
+actually runs, plus security fixes and public-repo hygiene.
 
 ### Fixed
 
@@ -55,5 +58,6 @@ detection, local STT (MLX Whisper / sherpa-onnx), local TTS (Kokoro / Piper),
 HUD overlay, MCP integration, and Hush browser media control. Earlier
 development history is available in the git log.
 
-[Unreleased]: https://github.com/heyvox-dev/heyvox/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/heyvox-dev/heyvox/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/heyvox-dev/heyvox/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/heyvox-dev/heyvox/releases/tag/v1.0.0
