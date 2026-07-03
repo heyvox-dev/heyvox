@@ -16,6 +16,24 @@ MCP tools:
 - voice_queue(action)             -- manage TTS queue
 - voice_config(action, key, value)-- get or set voice config
 
+Security (DEF-178):
+- The default `stdio` transport opens NO network port — it is a per-session
+  sidecar over stdin/stdout, with no cross-process surface. This is what
+  `heyvox setup` registers.
+- The opt-in `streamable-http` server binds 127.0.0.1 only. FastMCP auto-enables
+  DNS-rebinding / Origin+Host validation for loopback binds, so a malicious web
+  page cannot reach it (a forged Origin is rejected with 403).
+- It has NO per-user authentication. On a MULTI-user Mac, another local account
+  (or any already-running local process) can call the tools. The blast radius is
+  bounded to TTS control — `voice_speak` (say arbitrary text), `voice_queue`
+  (skip/stop/mute), `voice_config` (verbosity/style/mute). No filesystem,
+  subprocess, or credential-bearing tool is exposed. This is accepted for the
+  single-user-Mac target; shared-Mac users should keep the default stdio
+  transport (no port) or firewall port 8014.
+- NEVER bind a non-loopback host (e.g. 0.0.0.0): it exposes the unauthenticated
+  tools to the local network AND silently disables FastMCP's Origin protection.
+  `_is_loopback_host()` guards `--host` and warns loudly on override.
+
 Requirements: MCP-01 through MCP-06
 """
 
@@ -55,6 +73,22 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 # live in shared files), so requests need no session pinning. Clients survive
 # server restarts without a session re-handshake. Ignored by stdio transport.
 mcp = FastMCP("heyvox", stateless_http=True)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True if the bind host is loopback-only (safe for the shared-HTTP server).
+
+    FastMCP's DNS-rebinding / Origin protection only engages for loopback binds,
+    and binding a routable address would expose the unauthenticated TTS-control
+    tools to the local network. Used to warn loudly if `--host` is overridden
+    away from loopback (DEF-178).
+    """
+    return host.strip().lower() in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "::ffff:127.0.0.1",
+    }
 
 
 def _init_tts() -> None:
@@ -218,6 +252,16 @@ if __name__ == "__main__":
     sys.stdout = _original_stdout
 
     if args.transport == "streamable-http":
+        if not _is_loopback_host(args.host):
+            print(
+                f"vox MCP server: WARNING — binding non-loopback host "
+                f"{args.host!r}. The HTTP server has no per-user authentication, "
+                "so this exposes the TTS-control tools to anything that can "
+                "reach this address, and FastMCP's browser-Origin protection "
+                "only applies to loopback binds. Use 127.0.0.1 (default) on "
+                "shared or networked machines.",
+                file=sys.stderr,
+            )
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")
