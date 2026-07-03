@@ -2,8 +2,7 @@
 """Hush Native Messaging Host.
 
 Bridges Chrome's Native Messaging protocol (stdin/stdout with 4-byte
-little-endian length-prefixed JSON) and a local Unix domain socket server
-(with an optional TCP fallback on localhost:9847).
+little-endian length-prefixed JSON) and a local Unix domain socket server.
 
 Chrome launches this process; external clients (Herald, Vox, CLI tools)
 connect to the socket.
@@ -49,8 +48,6 @@ _TMP: str = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
 SOCKET_PATH: str = f"{_TMP}/hush-{os.getpid()}.sock"
 LEGACY_SOCKET_SYMLINK: str = f"{_TMP}/hush.sock"
-TCP_HOST: str = "127.0.0.1"
-TCP_PORT: int = 9847
 LOG_PATH: str = f"{_TMP}/hush.log"
 LOG_MAX_BYTES: int = 1_048_576  # 1 MB
 LOG_BACKUP_COUNT: int = 2
@@ -287,7 +284,7 @@ async def _handle_client(
 
 
 async def _run_servers() -> None:
-    """Start the Unix socket server and optional TCP server, then serve forever."""
+    """Start the Unix socket server, then serve forever."""
     global _loop
     _loop = asyncio.get_running_loop()
 
@@ -316,18 +313,6 @@ async def _run_servers() -> None:
             log.warning("Legacy symlink not created: %s", exc)
     except Exception as exc:
         log.error("Could not start Unix socket server: %s", exc)
-
-    # --- TCP fallback ---------------------------------------------------------
-    try:
-        tcp_server = await asyncio.start_server(
-            _handle_client,
-            host=TCP_HOST,
-            port=TCP_PORT,
-        )
-        servers.append(tcp_server)
-        log.info("Listening on TCP %s:%d", TCP_HOST, TCP_PORT)
-    except Exception as exc:
-        log.warning("Could not start TCP server (non-fatal): %s", exc)
 
     if not servers:
         log.critical("No servers could be started — aborting")
