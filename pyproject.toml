@@ -64,9 +64,6 @@ aec = [
 learn-vocab = [
     "anthropic>=0.84,<1",
 ]
-chrome = [
-    "websockets>=13.0",
-]
 dev = [
     "pytest",
     "pytest-asyncio",
@@ -78,7 +75,6 @@ dev = [
 [project.scripts]
 heyvox = "heyvox.cli:main"
 herald = "heyvox.herald.cli:main"
-heyvox-chrome-bridge = "heyvox.chrome.bridge:run_bridge"
 
 [tool.setuptools.packages.find]
 include = ["heyvox*"]

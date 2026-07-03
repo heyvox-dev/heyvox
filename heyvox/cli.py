@@ -310,21 +310,6 @@ def _cmd_history(args):
         print(f"[{ts}] ({trigger}, {dur}s) {display}")
 
 
-def _cmd_chrome_bridge(args):
-    """Start the Chrome companion WebSocket bridge.
-
-    Runs a local WebSocket server that the HeyVox Chrome extension connects to
-    for per-tab media state detection and control.
-
-    Requirement: CHROME-01
-    """
-    from heyvox.chrome.bridge import run_bridge
-
-    host = getattr(args, "host", "127.0.0.1")
-    port = getattr(args, "port", 9285)
-    run_bridge(host=host, port=port)
-
-
 def _cmd_debug(args):
     """Show recent STT debug recordings and pipeline info."""
     import json
@@ -1311,24 +1296,6 @@ def main():
         help="Print the transcript file path",
     )
     sub_history.set_defaults(func=_cmd_history)
-
-    # chrome-bridge — start WebSocket bridge for Chrome extension (CHROME-01)
-    sub_chrome = subparsers.add_parser(
-        "chrome-bridge",
-        help="Start Chrome companion WebSocket bridge for per-tab media control",
-    )
-    sub_chrome.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Bind address (default: 127.0.0.1, localhost only)",
-    )
-    sub_chrome.add_argument(
-        "--port",
-        type=int,
-        default=9285,
-        help="WebSocket port (default: 9285)",
-    )
-    sub_chrome.set_defaults(func=_cmd_chrome_bridge)
 
     # debug — show recent STT debug info
     sub_debug = subparsers.add_parser("debug", help="Show recent STT recordings and debug info")
