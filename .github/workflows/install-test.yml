@@ -51,3 +51,17 @@ jobs:
           print('hush home:', HUSH_HOME)
           print('imports ok')
           "
+
+      - name: Verify wake-word model loads (the fresh-install boot path)
+        run: |
+          # This is the exact path that crashed on fresh installs (DEF-173):
+          # the wheel must ship the bundled models and load_models() must
+          # provision + load them without a network round-trip.
+          .venv-install-test/bin/python -c "
+          import numpy as np
+          from heyvox.audio.wakeword import load_models
+          model, _ = load_models('hey_jarvis_v0.1', 'hey_jarvis_v0.1')
+          preds = model.predict(np.zeros(1280, dtype=np.int16))
+          assert 'hey_jarvis_v0.1' in preds, preds
+          print('wake-word model loads + predicts:', list(preds.keys()))
+          "
