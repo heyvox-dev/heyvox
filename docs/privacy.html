@@ -34,31 +34,50 @@
 <body>
 
 <h1>Privacy Policy</h1>
-<p class="meta">HeyVox and the Hush Chrome extension &middot; Last updated: 20 April 2026</p>
+<p class="meta">HeyVox and the Hush Chrome extension &middot; Last updated: 3 July 2026</p>
 
 <p>
     This policy covers both <strong>HeyVox</strong>, the desktop voice layer for AI coding
     agents, and <strong>Hush</strong>, the companion Chrome extension that pauses
     in-browser media while HeyVox is speaking or listening. The short version:
-    nothing you do with either product is sent anywhere, ever.
+    by default, nothing you do with either product is sent anywhere. Two optional
+    features &mdash; anonymous telemetry and vocabulary learning &mdash; are off
+    by default and only send data if you explicitly turn them on; both are
+    described below.
 </p>
 
 <hr class="rule">
 
-<h2>Summary — the one-paragraph version</h2>
+<h2>Summary</h2>
 <p>
-    HeyVox and Hush are 100% local. We do not collect, store, transmit, sell, or share any
-    personal data. Your microphone audio, speech transcriptions, browsing activity, tab
-    contents, configuration, and usage patterns never leave your computer. There are no
-    servers operated by us that process any of your data. There are no analytics, no
-    telemetry, no ads, and no user accounts.
+    By default, HeyVox and Hush run entirely on your Mac: no analytics, no
+    telemetry, no ads, no user accounts, and no data sent to any server. Your
+    <strong>microphone audio never leaves your device under any configuration</strong>.
+    Two optional features are <strong>off by default</strong> and only transmit
+    data if you explicitly enable them:
+</p>
+<ul>
+    <li><strong>Anonymous telemetry</strong> — if you opt in, HeyVox sends a
+        version string, a hashed (non-identifying) hostname, and five numeric
+        counters to <code>heyvox.dev</code>. No transcripts, log lines, file
+        paths, or configuration values are ever included.</li>
+    <li><strong>Vocabulary learning</strong> — if you opt in and run
+        <code>heyvox learn-vocab</code>, recent dictation <em>transcripts</em>
+        (text, not audio) are sent to the Anthropic API to improve recognition
+        of your custom terms.</li>
+</ul>
+<p>
+    Both are disabled unless you turn them on, and both fail closed — any doubt
+    about your consent means nothing is sent.
 </p>
 
 <h2>Data we collect</h2>
 <p>
-    None. There is no account creation, no signup, no login, no usage reporting. HeyVox
-    runs entirely on your Mac; Hush runs entirely inside your copy of Chrome and a local
-    companion process on your Mac.
+    No account, no signup, no login. By default, no usage reporting either: HeyVox
+    runs entirely on your Mac, and Hush inside your copy of Chrome plus a local
+    companion process. The only data that ever leaves your Mac is through the two
+    opt-in features described in the summary above (anonymous telemetry and
+    vocabulary learning), both off by default.
 </p>
 
 <h2>Audio, speech, and transcription</h2>
@@ -67,10 +86,15 @@
     <li>Speech-to-text runs locally on-device via MLX Whisper (Apple Silicon) or
         sherpa-onnx (Intel).</li>
     <li>Text-to-speech runs locally on-device via Kokoro or Piper.</li>
-    <li>No audio, no transcripts, no model outputs, and no training data are
-        transmitted off your device. Nothing is shared with Anthropic, OpenAI,
+    <li><strong>No audio ever leaves your device</strong>, under any
+        configuration.</li>
+    <li>Transcripts, model outputs, and training data also stay on your device —
+        <strong>unless</strong> you opt into vocabulary learning
+        (<code>heyvox learn-vocab</code>), which sends recent dictation
+        transcripts (text only, never audio) to the Anthropic API. This is off
+        by default; when it is off, nothing is shared with Anthropic, OpenAI,
         Google, Apple, or anyone else.</li>
-    <li>A local transcript history (if enabled) is stored in
+    <li>A local transcript history is stored in
         <code>~/.config/heyvox/</code> on your Mac. Deleting that file or the
         config directory removes it.</li>
 </ul>
@@ -112,14 +136,24 @@
 
 <h2>Analytics, crash reporting, telemetry</h2>
 <p>
-    None. There is no analytics integration, no crash reporter phoning home, no
-    feature-usage tracking, no error beaconing. If something crashes, the stack
-    trace stays on your Mac.
+    HeyVox includes <strong>optional, off-by-default</strong> anonymous telemetry.
+    When it is disabled (the default), nothing is sent. When you explicitly opt in
+    — during setup, or via config — HeyVox periodically sends to
+    <code>heyvox.dev</code>: the HeyVox version, macOS version, Mac model, Python
+    version, a hashed non-identifying hostname, and five numeric event counters
+    (e.g. wake-word drops, mic restarts). It <strong>never</strong> sends
+    transcripts, log-line content, file paths, or configuration values. You can
+    preview the exact payload with <code>heyvox telemetry preview</code> and turn
+    it off at any time (or set <code>HEYVOX_TELEMETRY=0</code>). There is no crash
+    reporter phoning home — stack traces stay on your Mac.
 </p>
 
 <h2>Third parties</h2>
 <p>
-    We do not share any data with third parties, because we do not collect any. The
+    By default we share no data with third parties. The one exception is the
+    opt-in vocabulary-learning feature: only when you enable it, recent dictation
+    transcripts are sent to the <strong>Anthropic API</strong> (processed under
+    Anthropic's terms) to improve recognition of your custom terms. The
     open-source speech and text-to-speech models (Whisper, Kokoro, Piper,
     openwakeword, sherpa-onnx) run entirely on your device and are licensed under
     their respective open-source licences.
@@ -134,11 +168,14 @@
 
 <h2>International users / GDPR / CCPA</h2>
 <p>
-    HeyVox and Hush do not collect personal data, so there is no personal data to
-    subject to cross-border transfer, access, or deletion requests. You are welcome
-    to delete the applications, the Chrome extension, and the
-    <code>~/.config/heyvox</code> directory at any time and no data will remain on
-    any system we control (because no data is on any system we control).
+    By default, HeyVox and Hush do not collect personal data, so there is no
+    personal data subject to cross-border transfer, access, or deletion requests.
+    If you opt into telemetry, the only identifier stored is a hashed hostname
+    that cannot be reversed to your identity; if you opt into vocabulary learning,
+    transcripts are processed by Anthropic under their terms. You are welcome to
+    delete the applications, the Chrome extension, and the
+    <code>~/.config/heyvox</code> directory at any time, and to leave both opt-in
+    features off (their default).
 </p>
 
 <h2>Changes to this policy</h2>
