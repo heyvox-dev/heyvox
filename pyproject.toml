@@ -44,7 +44,7 @@ Homepage = "https://heyvox.dev"
 Documentation = "https://github.com/heyvox-dev/heyvox#readme"
 Repository = "https://github.com/heyvox-dev/heyvox"
 Issues = "https://github.com/heyvox-dev/heyvox/issues"
-Changelog = "https://github.com/heyvox-dev/heyvox/releases"
+Changelog = "https://github.com/heyvox-dev/heyvox/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 apple-silicon = [
