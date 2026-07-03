@@ -122,6 +122,17 @@
 - **Found by**: Launch-readiness audit — a fresh-venv PyPI install reproduced the crash end-to-end; a follow-up fresh-venv test confirmed the fix (0 models → `load_models()` loads + `predict()` runs).
 - **Would have caught earlier**: CI's install-test only ran `heyvox --help`; it never constructed the wake-word `Model()`, so the crash shipped and survived months of development. Added `tests/test_wakeword_provisioning.py` (bundled-files-present, default-resolvable, empty-dir-mirror — all net-free). General pattern: a guard test that checks a *name/config value* instead of the *actual runtime artifact* gives false safety — the fresh-install guard must load the real model, and CI must exercise the real thing (Blocker 4, still pending).
 
+## DEF-174 — `heyvox doctor` crashed with ModuleNotFoundError (module never existed)
+
+- **Date**: 2026-07-03
+- **Category**: dead-code / integration
+- **Severity**: S2 (the command a stuck user reaches for after a failed start is itself broken — compounds any other first-run failure; no impact on the running daemon)
+- **Symptom**: `heyvox doctor` → `ModuleNotFoundError: No module named 'heyvox.doctor'`. The subcommand was registered in `cli.py` (`_cmd_doctor` → `from heyvox.doctor import run_doctor`) and advertised in `--help`, but `heyvox/doctor.py` never existed in the repo or the wheel.
+- **Root cause**: An orphaned subcommand — the CLI registration + help text shipped without the backing module. Leaving a registered, documented command that always crashes is worse than not having it.
+- **Fix**: Implemented `heyvox/doctor.py::run_doctor()` — a guarded diagnostics report (platform/STT-engine fit, macOS permissions, wake-word model presence + loadability, key optional deps, config location), complementary to `heyvox status`. Every check degrades to a warning line rather than raising. Directly surfaces the DEF-173 fresh-install model-presence class.
+- **Found by**: Launch-readiness onboarding audit (reproduced against PyPI 1.0.0), cross-confirmed by project memory (`project_heyvox_doctor_broken`).
+- **Would have caught earlier**: A CLI smoke test invoking every registered subcommand's `--help` (and a dry-run) would flag any subcommand whose backing module is missing — belongs in the same CI step as the install-test (Blocker 4).
+
 ## Patterns & Process Gaps
 
 - **P-silent-wrong-device** (DEF-172, sibling to DEF-104/148/150/153): a long-lived PortAudio (pyaudio/sounddevice) stream or context can remain "open" and functionally healthy while bound to a device object that CoreAudio has since superseded, if the underlying device swap doesn't cross a boundary the code actually watches (e.g. transport type staying USB→USB across a reconnect). Unlike DEF-104/153's failure mode (loud errors: `-9986`/`-10851`), this variant throws nothing — recovery logic gated on exceptions (`stale` counters, drop-and-recreate-on-failure) never fires. **Action item**: any code opening a PortAudio-family stream against "the default device" should (a) resolve and pass an explicit device index/UID rather than relying on the library's own default resolution, matching it against a live CoreAudio query, and (b) re-validate that binding periodically, not just at open time — "open succeeded" and "bound to the right device" are different claims and only the fix for DEF-172 checks both.
