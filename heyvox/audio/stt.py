@@ -9,6 +9,8 @@ MLX model is lazy-loaded on first use and unloaded after idle timeout
 to free ~855MB of GPU/unified memory when not dictating.
 """
 
+import ctypes
+import ctypes.util
 import os
 import sys
 import threading
@@ -21,6 +23,33 @@ import numpy as np
 # Timeout for model loading and transcription calls
 _LOAD_TIMEOUT = 120  # seconds — cold load can be very slow under swap pressure
 _TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
+
+# DEF-171: pthread QoS class for the transcription worker thread. One tier
+# below QOS_CLASS_USER_INTERACTIVE (0x21) on purpose — that top tier is
+# reserved for UI-blocking work, and this codebase already has a thread that
+# needs to win there (the PTT CGEventTap callback, see DEF-168 — starving it
+# under load makes Escape/PTT go silently unresponsive). user_initiated
+# (0x19) still outranks the process/thread default, which is what actually
+# matters on a system oversubscribed by parallel Conductor/Claude sessions
+# (load averages of 13-32 observed on this 8-core machine, see DEF-170).
+_QOS_CLASS_USER_INITIATED = 0x19
+
+
+def _boost_transcribe_thread_priority() -> None:
+    """Raise the CALLING thread's QoS class. Must be invoked from inside the
+    worker thread itself (pthread_set_qos_class_self_np has no "set on
+    another thread" variant) — call this as the first line of whatever
+    function actually runs on the ThreadPoolExecutor worker.
+
+    Best-effort and silent: a failure here (non-Darwin, missing symbol,
+    sandboxed environment) just leaves the thread at its current QoS.
+    Never raises — this must not be able to break transcription itself.
+    """
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        libc.pthread_set_qos_class_self_np(_QOS_CLASS_USER_INITIATED, 0)
+    except Exception:
+        pass
 
 from heyvox.constants import DEFAULT_SAMPLE_RATE  # noqa: E402
 
@@ -309,10 +338,14 @@ def transcribe_audio(
         parts = []
         with _mlx_lock:
             _mlx_transcribing = True
+        def _run_mlx_transcribe(seg):
+            _boost_transcribe_thread_priority()
+            return mlx_whisper.transcribe(seg, **kwargs)
+
         try:
             for seg_idx, segment in enumerate(segments):
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(mlx_whisper.transcribe, segment, **kwargs)
+                    future = executor.submit(_run_mlx_transcribe, segment)
                     result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
                 text = result["text"].strip()
                 if text:
@@ -346,6 +379,7 @@ def transcribe_audio(
         # B2: Wrap the entire sherpa transcription loop in a thread with
         # _TRANSCRIBE_TIMEOUT to match the protection the MLX path has.
         def _sherpa_transcribe() -> str:
+            _boost_transcribe_thread_priority()
             max_samples = 30 * sample_rate
             parts = []
             for i in range(0, len(samples), max_samples):
