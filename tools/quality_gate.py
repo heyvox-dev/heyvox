@@ -123,17 +123,37 @@ def _parse_score(name: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def _positive_should_quarantine(has_ww: bool, score: float | None) -> bool:
-    """A positive-dir clip is quarantined ONLY if Whisper found no wake word
-    AND it is not a trusted high-confidence trigger. Clips with no parseable
-    score (curated recordings) are always trusted. This is the score-aware
-    guard that stops the STT from overruling the model on its own positives.
+def _is_garbage(text: str) -> bool:
+    """True for a transcript that is unambiguous garbage: empty/silence, a
+    known Whisper spam/hallucination phrase, or a long degenerate repeat loop.
+
+    Deliberately conservative on repeats: a short repeat like 'hey vox hey vox'
+    is a legit double-utterance and must NOT be flagged. Only long loops
+    (>=8 tokens, <=1/4 unique, e.g. 'and go and go and go ...') qualify.
     """
-    if has_ww:
-        return False
+    t = (text or "").strip()
+    if not t:
+        return True
+    if _HALLUCINATION_RE.search(t):
+        return True
+    words = t.lower().split()
+    return len(words) >= 8 and len(set(words)) <= max(1, len(words) // 4)
+
+
+def _positive_should_quarantine(text: str, has_ww: bool, score: float | None) -> bool:
+    """A positive is AUTO-quarantined ONLY when it is not a trusted high-score
+    trigger AND its transcript is clear garbage (empty/silent or a long
+    hallucination loop). A low-score clip that merely lacks a clean wake-word
+    transcription is NOT auto-removed: Whisper failing to read 'hey vox' on a
+    quiet/far/noisy clip does not prove it isn't the wake word -- that is
+    exactly the hard case, and the most valuable positive to keep. Those are
+    left for manual by-ear review (tools/review_clips.py). Clips with no
+    parseable score (curated recordings) are always trusted. has_ww kept for
+    signature clarity; a has_ww clip is never garbage anyway.
+    """
     if score is None or score >= _TRUST_SCORE:
         return False
-    return True
+    return _is_garbage(text)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +437,7 @@ def run_gate(
         side = r.get("side")
         if side == "positive":
             pos_total += 1
-            if _positive_should_quarantine(bool(r.get("has_ww")), r.get("score")):
+            if _positive_should_quarantine(r.get("text", ""), bool(r.get("has_ww")), r.get("score")):
                 pending.append((r, quarantine_dir, "quarantine"))
         elif side == "negative":
             neg_total += 1

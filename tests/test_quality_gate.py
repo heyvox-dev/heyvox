@@ -62,16 +62,28 @@ def test_parse_score():
     assert quality_gate._parse_score("some_curated_recording.wav") is None
 
 
+def test_is_garbage():
+    g = quality_gate._is_garbage
+    assert g("") is True                       # empty/silence
+    assert g("   ") is True
+    assert g("and go and go and go and go and go") is True   # long repeat loop
+    assert g("Hey Vox hey Vox") is False       # short double-utterance -> NOT garbage
+    assert g("Hey Buck") is False              # plausible garbled real vox -> keep
+    assert g("how do you do this") is False    # real speech -> not garbage (manual review)
+
+
 def test_positive_should_quarantine_decision():
     q = quality_gate._positive_should_quarantine
-    # has wake word -> never quarantine, regardless of score
-    assert q(True, 0.1) is False
-    # no wake word + low score -> quarantine
-    assert q(False, 0.30) is True
-    # no wake word + high score -> TRUSTED, do not quarantine
-    assert q(False, 0.99) is False
-    # no wake word + no score (curated) -> TRUSTED
-    assert q(False, None) is False
+    # low score + clear garbage (empty) -> auto-quarantine
+    assert q("", False, 0.30) is True
+    # low score + non-garbage 'hey buck' -> NOT auto-removed (left for manual review)
+    assert q("Hey Buck", False, 0.30) is False
+    # high score -> TRUSTED regardless of transcript
+    assert q("", False, 0.99) is False
+    # no score (curated) -> TRUSTED
+    assert q("", False, None) is False
+    # low score + long loop -> garbage -> quarantine
+    assert q("Fast Fast Fast Fast Fast Fast Fast Fast", False, 0.2) is True
 
 
 # --------------------------------------------------------------------------- #
