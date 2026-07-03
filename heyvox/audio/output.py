@@ -209,6 +209,18 @@ def list_output_devices() -> list[OutputDevice]:
     return devices
 
 
+def get_default_output_name() -> str | None:
+    """Get the name of the current default output device, or None if
+    unavailable. Callers that open a PyAudio/sounddevice stream should match
+    this name against that library's own device list (by name + output
+    capability) rather than relying on the library's own default resolution,
+    which can diverge from the live CoreAudio default after device churn."""
+    device_id = get_default_output_id()
+    if device_id is None or not _load_frameworks():
+        return None
+    return _get_device_name(device_id)
+
+
 def get_default_output_id() -> int | None:
     """Get the CoreAudio device ID of the current default output."""
     if not _load_frameworks():

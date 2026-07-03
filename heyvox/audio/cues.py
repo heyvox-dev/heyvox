@@ -52,6 +52,31 @@ def get_cues_dir(config_cues_dir: str = "") -> str:
     return resolved
 
 
+def _resolve_sounddevice_output_index():
+    """Match the CoreAudio-verified default output device to its sounddevice
+    index, by name + output capability.
+
+    Without this, sounddevice.play() with no device= falls back to
+    PortAudio's OWN default-device resolution (via sounddevice.default.device),
+    which can diverge from the live CoreAudio default after device churn —
+    see keepalive.py's _resolve_output_index() for the same gap on that path.
+    Returns None (→ caller falls back to sounddevice's own default) if
+    resolution fails for any reason.
+    """
+    try:
+        from heyvox.audio.output import get_default_output_name
+        import sounddevice
+        name = get_default_output_name()
+        if not name:
+            return None
+        for i, info in enumerate(sounddevice.query_devices()):
+            if info.get("name") == name and info.get("max_output_channels", 0) > 0:
+                return i
+    except Exception:
+        pass
+    return None
+
+
 def _play_via_sounddevice(cue_file: str) -> bool:
     """Play a cue file via sounddevice using a pre-loaded, cached PCM buffer.
 
@@ -81,7 +106,7 @@ def _play_via_sounddevice(cue_file: str) -> bool:
             _cue_cache[cue_file] = (data, samplerate)
 
         import sounddevice
-        sounddevice.play(data, samplerate)
+        sounddevice.play(data, samplerate, device=_resolve_sounddevice_output_index())
         return True
     except Exception:
         return False

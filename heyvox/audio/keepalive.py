@@ -136,6 +136,7 @@ class OutputKeepAlive:
         self._rate = rate
         self._chunk = chunk
         self._stream = None
+        self._bound_index: int | None = None  # PyAudio output_device_index the open stream is bound to
         self._stop = threading.Event()
         self.stale = threading.Event()   # set after 24 consecutive open failures
         self._thread: threading.Thread | None = None
@@ -224,27 +225,65 @@ class OutputKeepAlive:
                 return (chunk.tobytes(), pyaudio.paContinue)
         return (b"\x00" * (frame_count * 2), pyaudio.paContinue)
 
+    def _resolve_output_index(self):
+        """Match the CoreAudio-verified default output device (already
+        confirmed USB by default_output_is_usb()) to its PyAudio index, by
+        name + output capability.
+
+        Without this, pa.open(output=True) with no output_device_index falls
+        back to PortAudio's OWN default-device resolution, which can diverge
+        from the live CoreAudio default after device churn — the same class
+        of device object can get silently swapped (e.g. a USB reconnect)
+        without PortAudio's cached notion of "default" following along.
+        Returns None (→ caller falls back to PortAudio's own default,
+        today's original behavior) if resolution fails for any reason.
+        """
+        if self._pa is None:
+            return None
+        try:
+            from heyvox.audio.output import get_default_output_name
+            name = get_default_output_name()
+            if not name:
+                return None
+            for i in range(self._pa.get_device_count()):
+                info = self._pa.get_device_info_by_index(i)
+                if info.get("name") == name and info.get("maxOutputChannels", 0) > 0:
+                    return i
+        except Exception:
+            pass
+        return None
+
     def _open_stream(self) -> None:
         global _ACTIVE
-        if self._stream is not None:
-            return
         try:
             import pyaudio
             if self._pa is None:
                 self._pa = pyaudio.PyAudio()
+
+            target_index = self._resolve_output_index()
+
+            if self._stream is not None:
+                if target_index == self._bound_index:
+                    return  # still bound to the current default — nothing to do
+                self._log(f"[keepalive] default output device changed under us "
+                          f"(index {self._bound_index} -> {target_index}) — recycling stream")
+                self._close_stream(reason=None)  # recycle log line above already explains it
+
             self._stream = self._pa.open(
                 format=pyaudio.paInt16, channels=1, rate=self._rate,
-                output=True, frames_per_buffer=self._chunk,
+                output=True, output_device_index=target_index,
+                frames_per_buffer=self._chunk,
                 stream_callback=self._cb,
             )
             self._stream.start_stream()
+            self._bound_index = target_index
             _ACTIVE = self
             if self._open_fails:
                 self._log(f"[keepalive] stream recovered after "
                           f"{self._open_fails} failed attempt(s) — fresh PA context (DEF-153)")
             self._open_fails = 0
-            self._log("[keepalive] USB output detected — holding silent stream "
-                      "open + routing cues through it (DEF-148/150)")
+            self._log(f"[keepalive] USB output detected — holding silent stream "
+                      f"open on device_index={target_index} + routing cues through it (DEF-148/150)")
         except Exception as e:
             self._stream = None
             self._open_fails += 1
@@ -262,17 +301,19 @@ class OutputKeepAlive:
                           "process-level PA staleness (DEF-104 class), signalling auto-restart")
                 self.stale.set()
 
-    def _close_stream(self) -> None:
+    def _close_stream(self, reason: str = "[keepalive] output no longer USB — released silent stream") -> None:
         global _ACTIVE
         if _ACTIVE is self:
             _ACTIVE = None
         s, self._stream = self._stream, None
+        self._bound_index = None
         if s is None:
             return
         try:
             s.stop_stream()
             s.close()
-            self._log("[keepalive] output no longer USB — released silent stream")
+            if reason:
+                self._log(reason)
         except Exception:
             pass
 
