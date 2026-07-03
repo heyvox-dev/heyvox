@@ -12,14 +12,23 @@ Absorbs two prior one-off scripts into a permanent, resumable step:
     driver: RMS silence pre-gate, write-ahead JSONL, per-clip decode
     params tuned against DEF-075/083 hallucination-loop failure modes.
 
-Quarantine-only: this module NEVER deletes a file. A positive-dir clip
-that Whisper finds contains no wake word moves to ``quarantine/``. A
-negative-dir clip that Whisper finds DOES contain the wake word (a
-genuine miss -- the evidence-based fn-recovery mechanism that replaces
-the deleted heuristic relabelers, DEF-167) moves to ``positives/``
-(short clips) or ``quarantine/`` (long clips, likely contain more than
-just the wake word). Every move is recorded in a timestamped, reversible
-manifest matching the existing ``recfp_cleanup_manifest_*.json``
+Two-phase + DRY RUN by default: phase 1 transcribes every clip with no
+filesystem changes; then the positives-quarantine rate is checked against a
+hard brake BEFORE anything moves. Nothing moves unless ``--apply`` is passed
+AND the rate is under the brake (or ``--force``). This exists because running
+the naive one-pass version on the real corpus quarantined ~34% of positives,
+~40% of them REAL wake words Whisper mis-heard -- see the score gate below.
+
+Quarantine-only: this module NEVER deletes a file. A positive-dir clip is
+quarantined only if Whisper finds no wake word AND it is not a trusted
+high-confidence trigger (``_positive_should_quarantine`` / ``_TRUST_SCORE``):
+a clip that fired at a high model score is a positive by the model's own
+judgment, and a garble-prone STT must not overrule it (that is DEF-167's
+evidence-free relabeling, inverted). A negative-dir clip that Whisper finds
+DOES contain the wake word (a genuine miss -- the evidence-based fn-recovery
+that replaces the deleted heuristic relabelers, DEF-167) moves to
+``positives/`` (<=2.5s) or ``quarantine/`` (longer). Every move is recorded in
+a timestamped, reversible manifest matching the ``recfp_cleanup_manifest_*``
 precedent.
 
 Incremental / resumable across runs: state (results.jsonl, inflight.txt)
@@ -50,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -81,13 +91,49 @@ _RECOVERY_MAX_SECS = 2.5
 # stall a multi-hundred-clip run for more than ~7 minutes worst case.
 _CLIP_TIMEOUT_SECS = 20
 
-# Warn (not hard-fail) if more than this fraction of clips in a single run
-# get quarantined -- guards against Whisper false-quarantining real
-# positives. The gate must never silently shrink the positives set; a
-# spike is surfaced, not swallowed.
-_QUARANTINE_RATE_WARN_THRESHOLD = 0.15
+# A positive-dir clip whose model trigger score (parsed from the filename,
+# e.g. ..._score1.00.wav) is at or above this is TRUSTED: it fired at high
+# confidence, so a garble-prone STT must never overrule the model and
+# quarantine it. Running the gate on real data showed Whisper mis-hears the
+# made-up word "vox" as bucks/folks/books/Bob/Halevox/bare-"vox" often enough
+# that blanket Whisper-gating of high-score triggers quarantined ~34% of
+# positives, ~40% of them REAL wake words -- that is DEF-167's evidence-free
+# relabeling, inverted (the score is the stronger signal here, not the STT).
+# Only low/no-confidence positives (the fn_start-style retroactive garbage,
+# scored in the 0.1-0.7 TN range) are eligible for Whisper quarantine.
+_TRUST_SCORE = 0.8
+
+# HARD BRAKE: if more than this fraction of checked positives would be
+# quarantined, refuse to move anything without --force. A spike this size is
+# almost always Whisper mis-hearing real wake words, not bad data -- surface
+# it and stop, never silently shrink the positives set.
+_MAX_SAFE_QUARANTINE_RATE = 0.15
 
 _DEFAULT_STATE_DIR = Path("~/.config/heyvox/training/.gate_state/").expanduser()
+
+# Model trigger score embedded in collector filenames as the trailing
+# "_score<float>.wav" field. Curated clips (e.g. training/recordings/) carry
+# no score and are always trusted.
+_SCORE_RE = re.compile(r"_score([0-9]+(?:\.[0-9]+)?)\.wav$", re.IGNORECASE)
+
+
+def _parse_score(name: str) -> float | None:
+    """Return the model trigger score from a collector filename, or None."""
+    m = _SCORE_RE.search(name)
+    return float(m.group(1)) if m else None
+
+
+def _positive_should_quarantine(has_ww: bool, score: float | None) -> bool:
+    """A positive-dir clip is quarantined ONLY if Whisper found no wake word
+    AND it is not a trusted high-confidence trigger. Clips with no parseable
+    score (curated recordings) are always trusted. This is the score-aware
+    guard that stops the STT from overruling the model on its own positives.
+    """
+    if has_ww:
+        return False
+    if score is None or score >= _TRUST_SCORE:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +327,19 @@ def run_gate(
     quarantine_dir: Path,
     *,
     state_dir: Path | None = None,
+    apply: bool = False,
+    force: bool = False,
 ) -> dict:
-    """Run the mandatory batch Whisper quality gate. Returns a summary dict.
+    """Two-phase batch Whisper quality gate. Returns a summary dict.
 
-    Never deletes a file -- quarantine-only moves, all recorded in a
-    reversible, timestamped manifest.
+    Phase 1 transcribes every clip (resumable write-ahead, NO filesystem
+    changes). Then the positives-quarantine rate is computed over the FULL
+    corpus and checked against a hard brake BEFORE anything moves. Moves run
+    only when apply=True AND (the rate is under the brake OR force=True).
+    Default (apply=False) is a DRY RUN: it reports what would move and touches
+    nothing. Positives are score-gated (a high-confidence trigger is never
+    quarantined on Whisper's say-so). Never deletes -- every move is a
+    quarantine/recovery recorded in a reversible manifest.
     """
     if state_dir is None:
         state_dir = _DEFAULT_STATE_DIR
@@ -295,136 +349,128 @@ def run_gate(
     done = load_done(state_dir)
     _recover_stalled_inflight(state_dir, done)
 
-    manifest: list[dict] = []
-    positives_checked = 0
-    negatives_checked = 0
-    quarantined = 0
-    recovered_to_positives = 0
-    timeouts = 0
-    errors = 0
-
-    print("=== Quality gate: positive dirs ===", file=sys.stderr)
-    for clip in _gather_wavs(positive_dirs):
-        abs_path = str(clip.resolve())
-        if abs_path in done:
-            continue
-        positives_checked += 1
-
-        # Perf: RMS pre-gate in the PARENT process, before spawning any
-        # transcription subprocess -- a silent clip never pays the ~3.7s
-        # cold-transcribe cost.
-        try:
-            audio, _sr = _load_wav(clip)
-            rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
-        except Exception as e:  # noqa: BLE001
-            print(f"WARNING: failed to load {clip.name}: {e}", file=sys.stderr)
-            errors += 1
-            _append_result(state_dir, {"path": abs_path, "verdict": "error", "moved": False})
-            continue
-
-        if rms < _SILENCE_RMS:
-            text, has_ww, timed_out = "", False, False
-        else:
-            text, has_ww, timed_out = _verdict_for_clip(clip, state_dir)
-            if timed_out:
-                timeouts += 1
-
-        _append_result(state_dir, {
-            "path": abs_path, "verdict": "positive-checked",
-            "has_ww": has_ww, "timeout": timed_out, "text": text,
-            "moved": not has_ww,
-        })
-
-        if not has_ww:
-            new_path = _safe_dest(quarantine_dir, clip.name)
-            try:
-                clip.rename(new_path)
-            except OSError as e:
-                print(f"WARNING: failed to move {clip} -> {new_path}: {e}", file=sys.stderr)
+    # ---- Phase 1: verdicts only (transcribe, NO moves) ----
+    for side, dirs in (("positive", positive_dirs), ("negative", negative_dirs)):
+        print(f"=== Quality gate verdict pass: {side} dirs ===", file=sys.stderr)
+        for clip in _gather_wavs(dirs):
+            abs_path = str(clip.resolve())
+            if abs_path in done:
                 continue
-            quarantined += 1
-            manifest.append({
-                "from": str(clip), "to": str(new_path), "side": "positive",
-                "text": text, "reason": "no-wake-word-in-positive-dir",
+            # Perf: RMS pre-gate in the PARENT, before spawning any subprocess.
+            try:
+                audio, sr = _load_wav(clip)
+                rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+            except Exception as e:  # noqa: BLE001
+                print(f"WARNING: failed to load {clip.name}: {e}", file=sys.stderr)
+                _append_result(state_dir, {
+                    "path": abs_path, "side": side, "verdict": "error",
+                    "has_ww": False, "score": _parse_score(clip.name),
+                    "dur": 0.0, "timeout": False, "text": "",
+                })
+                continue
+            dur = len(audio) / sr if sr else 0.0
+            if rms < _SILENCE_RMS:
+                text, has_ww, timed_out = "", False, False
+            else:
+                text, has_ww, timed_out = _verdict_for_clip(clip, state_dir)
+            _append_result(state_dir, {
+                "path": abs_path, "side": side, "has_ww": has_ww,
+                "score": _parse_score(clip.name), "dur": round(dur, 3),
+                "timeout": timed_out, "text": text,
             })
 
-    print("=== Quality gate: negative dirs ===", file=sys.stderr)
-    for clip in _gather_wavs(negative_dirs):
-        abs_path = str(clip.resolve())
-        if abs_path in done:
-            continue
-        negatives_checked += 1
+    # ---- Read the FULL results.jsonl and compute pending moves (resume-safe:
+    # moves are derived from every verdict ever recorded, so a kill/resume mid
+    # verdict-pass never applies over a partial corpus -- apply only runs when a
+    # verdict pass reaches this point without being killed) ----
+    records: list[dict] = []
+    rp = _results_path(state_dir)
+    if rp.exists():
+        for line in rp.read_text().splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:  # noqa: BLE001
+                    pass
 
-        try:
-            audio, sr = _load_wav(clip)
-            rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
-        except Exception as e:  # noqa: BLE001
-            print(f"WARNING: failed to load {clip.name}: {e}", file=sys.stderr)
+    pending: list[tuple[dict, Path, str]] = []  # (record, dest_dir, moved_to)
+    pos_total = neg_total = timeouts = errors = 0
+    for r in records:
+        if r.get("verdict") == "error":
             errors += 1
-            _append_result(state_dir, {"path": abs_path, "verdict": "error", "moved": False})
             continue
+        if r.get("timeout"):
+            timeouts += 1
+        side = r.get("side")
+        if side == "positive":
+            pos_total += 1
+            if _positive_should_quarantine(bool(r.get("has_ww")), r.get("score")):
+                pending.append((r, quarantine_dir, "quarantine"))
+        elif side == "negative":
+            neg_total += 1
+            if r.get("has_ww") and not r.get("timeout"):
+                dur = float(r.get("dur") or 0.0)
+                if dur <= _RECOVERY_MAX_SECS:
+                    pending.append((r, positives_dir, "positives"))
+                else:
+                    pending.append((r, quarantine_dir, "quarantine"))
 
-        if rms < _SILENCE_RMS:
-            text, has_ww, timed_out = "", False, False
-        else:
-            text, has_ww, timed_out = _verdict_for_clip(clip, state_dir)
-            if timed_out:
-                timeouts += 1
+    would_quarantine = sum(1 for r, _d, m in pending
+                           if m == "quarantine" and r["side"] == "positive")
+    would_recover = sum(1 for r, _d, _m in pending if r["side"] == "negative")
+    pos_quar_rate = (would_quarantine / pos_total) if pos_total else 0.0
+    brake_tripped = pos_quar_rate > _MAX_SAFE_QUARANTINE_RATE
+    do_apply = apply and (force or not brake_tripped)
 
-        _append_result(state_dir, {
-            "path": abs_path, "verdict": "negative-checked",
-            "has_ww": has_ww, "timeout": timed_out, "text": text,
-            "moved": has_ww,
-        })
+    print(f"positives checked={pos_total}, would-quarantine={would_quarantine} "
+          f"({pos_quar_rate:.1%}); negatives checked={neg_total}, "
+          f"would-recover={would_recover}; timeouts={timeouts} errors={errors}",
+          file=sys.stderr)
+    if brake_tripped:
+        print(f"HARD BRAKE: positives quarantine rate {pos_quar_rate:.1%} exceeds "
+              f"{_MAX_SAFE_QUARANTINE_RATE:.0%}. Refusing to move without --force -- "
+              "a spike this size is usually Whisper mis-hearing real wake words, "
+              "not bad data. Review the would-quarantine set first.", file=sys.stderr)
+    if not apply:
+        print("DRY RUN (default): nothing moved. Re-run with --apply to execute "
+              "the moves above (still subject to the hard brake).", file=sys.stderr)
 
-        if has_ww:
-            duration = len(audio) / sr if sr else 0.0
-            if duration <= _RECOVERY_MAX_SECS:
-                new_path = _safe_dest(positives_dir, clip.name)
-                moved_to = "positives"
-            else:
-                new_path = _safe_dest(quarantine_dir, clip.name)
-                moved_to = "quarantine"
+    manifest: list[dict] = []
+    manifest_path = None
+    if do_apply:
+        for r, dest, moved_to in pending:
+            src = Path(r["path"])
+            if not src.exists():
+                continue
+            new_path = _safe_dest(dest, src.name)
             try:
                 new_path.parent.mkdir(parents=True, exist_ok=True)
-                clip.rename(new_path)
+                src.rename(new_path)
             except OSError as e:
-                print(f"WARNING: failed to move {clip} -> {new_path}: {e}", file=sys.stderr)
+                print(f"WARNING: failed to move {src} -> {new_path}: {e}", file=sys.stderr)
                 continue
-            if moved_to == "positives":
-                recovered_to_positives += 1
-            else:
-                quarantined += 1
             manifest.append({
-                "from": str(clip), "to": str(new_path), "side": "negative",
-                "text": text, "reason": "wake-word-in-negative-dir",
-                "duration": round(duration, 2), "moved_to": moved_to,
+                "from": str(src), "to": str(new_path), "side": r["side"],
+                "moved_to": moved_to, "text": r.get("text", ""),
+                "score": r.get("score"), "dur": r.get("dur"),
             })
-
-    total = positives_checked + negatives_checked
-    quarantine_rate = (quarantined / total) if total else 0.0
-    if quarantine_rate > _QUARANTINE_RATE_WARN_THRESHOLD:
-        print(
-            f"WARNING: quarantine_rate={quarantine_rate:.1%} exceeds "
-            f"{_QUARANTINE_RATE_WARN_THRESHOLD:.0%} threshold this run -- "
-            "possible Whisper false-quarantine spike, review the manifest "
-            "before trusting the shrunk positives set.",
-            file=sys.stderr,
-        )
-
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    manifest_path = state_dir / f"manifest_{timestamp}.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        manifest_path = state_dir / f"manifest_{timestamp}.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
 
     summary = {
-        "positives_checked": positives_checked,
-        "negatives_checked": negatives_checked,
-        "quarantined": quarantined,
-        "recovered_to_positives": recovered_to_positives,
+        "positives_checked": pos_total,
+        "negatives_checked": neg_total,
+        "would_quarantine": would_quarantine,
+        "would_recover": would_recover,
+        "positives_quarantine_rate": round(pos_quar_rate, 4),
+        "brake_tripped": brake_tripped,
+        "applied": do_apply,
+        "moves_made": len(manifest),
         "timeouts": timeouts,
         "errors": errors,
-        "quarantine_rate": round(quarantine_rate, 4),
-        "manifest_path": str(manifest_path),
+        "manifest_path": str(manifest_path) if manifest_path else None,
     }
     print(json.dumps(summary, indent=2))
     return summary
@@ -439,6 +485,17 @@ def main() -> int:
     ap.add_argument(
         "--state-dir", type=Path, default=_DEFAULT_STATE_DIR,
         help=f"Persistent resumable state dir (default: {_DEFAULT_STATE_DIR})",
+    )
+    ap.add_argument(
+        "--apply", action="store_true",
+        help="Actually move clips (quarantine/recover). Default is a DRY RUN "
+             "that only reports what would move.",
+    )
+    ap.add_argument(
+        "--force", action="store_true",
+        help="With --apply, move even if the positives quarantine rate trips "
+             f"the {_MAX_SAFE_QUARANTINE_RATE:.0%} hard brake. Use only after "
+             "reviewing the dry-run output.",
     )
     ap.add_argument(
         "--_worker", metavar="WAV_PATH", default=None,
@@ -457,11 +514,14 @@ def main() -> int:
 
     positives_dir = cpf._expand("~/.config/heyvox/training/positives")
     quarantine_dir = cpf._expand("~/.config/heyvox/training/quarantine")
-    run_gate(
+    summary = run_gate(
         cpf.POSITIVE_DIRS, cpf.HARD_NEGATIVE_DIRS,
         positives_dir, quarantine_dir, state_dir=args.state_dir,
+        apply=args.apply, force=args.force,
     )
-    return 0
+    # Non-zero exit when the brake tripped and moves were NOT forced, so a
+    # caller/pipeline can detect "gate wants review" rather than silently pass.
+    return 1 if (summary["brake_tripped"] and not summary["applied"]) else 0
 
 
 if __name__ == "__main__":

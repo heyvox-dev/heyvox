@@ -95,24 +95,29 @@ def main() -> int:
     ap.add_argument("--limit-per-side", type=int, default=0,
                     help="Cap N per side (smoke testing). 0 = no cap.")
     ap.add_argument("--gate-only", action="store_true",
-                    help="Run the quality gate, print its summary, exit 0 -- "
+                    help="Run the quality gate, print its summary, exit -- "
                          "no featurisation.")
+    ap.add_argument("--gate-apply", action="store_true",
+                    help="Let the gate actually MOVE clips (quarantine/recover). "
+                         "Default is a DRY RUN that only reports what would move.")
+    ap.add_argument("--gate-force", action="store_true",
+                    help="With --gate-apply, override the hard quarantine-rate "
+                         "brake (use only after reviewing the dry-run output).")
     ap.add_argument("--skip-gate", action="store_true",
-                    help="Skip the mandatory quality gate and featurise as-is "
+                    help="Skip the quality gate entirely and featurise as-is "
                          "(explicit escape hatch; prints a warning).")
     args = ap.parse_args()
 
     if args.skip_gate and not args.gate_only:
         print(
-            "WARNING: --skip-gate set -- featurizing WITHOUT the mandatory "
-            "Whisper quality audit",
+            "WARNING: --skip-gate set -- featurizing WITHOUT the Whisper "
+            "quality audit",
             file=sys.stderr,
         )
     elif args.skip_gate and args.gate_only:
         print(
             "NOTE: both --gate-only and --skip-gate passed -- --gate-only "
-            "takes precedence (gate runs, featurization is skipped either "
-            "way, so --skip-gate has no effect)",
+            "takes precedence (gate runs, no featurization either way)",
             file=sys.stderr,
         )
 
@@ -121,14 +126,22 @@ def main() -> int:
             POSITIVE_DIRS, HARD_NEGATIVE_DIRS,
             _expand("~/.config/heyvox/training/positives"),
             _expand("~/.config/heyvox/training/quarantine"),
+            apply=args.gate_apply, force=args.gate_force,
         )
+        mode = "APPLIED" if gate_summary["applied"] else "DRY RUN"
+        brake = ", BRAKE TRIPPED" if gate_summary["brake_tripped"] else ""
         print(
-            f"=== Quality gate: {gate_summary['quarantined']} quarantined, "
-            f"{gate_summary['recovered_to_positives']} recovered to positives "
-            f"(rate={gate_summary['quarantine_rate']:.1%}) ===",
+            f"=== Quality gate [{mode}]: would-quarantine="
+            f"{gate_summary['would_quarantine']}, would-recover="
+            f"{gate_summary['would_recover']}, pos-quarantine-rate="
+            f"{gate_summary['positives_quarantine_rate']:.1%}{brake}, "
+            f"moves-made={gate_summary['moves_made']} ===",
             file=sys.stderr,
         )
-        if gate_summary.get("recovered_to_positives", 0) > 0:
+        # Spot-check log: list negative->positives recoveries so a rare genuine
+        # ambient confusable can be eyeballed. Only meaningful once moves are
+        # applied (a dry run writes no manifest).
+        if gate_summary.get("applied") and gate_summary.get("manifest_path"):
             try:
                 manifest = json.loads(Path(gate_summary["manifest_path"]).read_text())
             except (OSError, json.JSONDecodeError) as e:
@@ -137,17 +150,33 @@ def main() -> int:
                 manifest = []
             for entry in manifest:
                 if entry.get("side") == "negative" and entry.get("moved_to") == "positives":
-                    clip_name = Path(entry["from"]).name
-                    duration = entry.get("duration", 0.0)
-                    text = entry.get("text", "")
                     print(
-                        f"  recovered: {clip_name} <- {duration:.1f}s, "
-                        f"transcript: '{text[:60]}'",
+                        f"  recovered: {Path(entry['from']).name} <- "
+                        f"{entry.get('dur', 0.0)}s, transcript: "
+                        f"'{entry.get('text', '')[:60]}'",
                         file=sys.stderr,
                     )
 
         if args.gate_only:
             return 0
+
+        # In the featurize path: if the user asked to APPLY but the brake stopped
+        # the moves, stop -- featurizing now would use data they expected to be
+        # cleaned. Dry-run (default) just advises and proceeds on current data.
+        if args.gate_apply and gate_summary["brake_tripped"] and not gate_summary["applied"]:
+            print(
+                "Gate brake stopped the requested --gate-apply. Review the "
+                "would-quarantine set, then re-run with --gate-apply --gate-force "
+                "to override, or --skip-gate to featurize as-is.",
+                file=sys.stderr,
+            )
+            return 3
+        if not args.gate_apply and (gate_summary["would_quarantine"] or gate_summary["would_recover"]):
+            print(
+                "NOTE: gate ran DRY -- featurizing current data unchanged. Run "
+                "`python3 tools/quality_gate.py --apply` first to clean.",
+                file=sys.stderr,
+            )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
