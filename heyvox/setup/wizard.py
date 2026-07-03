@@ -241,12 +241,20 @@ def run_setup(config) -> None:
     # ---------------------------------------------------------------------------
     console.print("[bold]Step 3: Kokoro TTS Model[/bold]")
 
-    kokoro_cache = Path.home() / ".cache" / "huggingface" / "hub" / "models--hexgrad--Kokoro-82M"
+    # DEF-179: download the repo the runtime actually loads
+    # (mlx-community/Kokoro-82M-bf16 via mlx-audio) — NOT hexgrad/Kokoro-82M,
+    # which nothing loads — and pin it to the tested commit.
+    from heyvox.model_pins import KOKORO_REPO, revision_for
+
+    kokoro_cache = (
+        Path.home() / ".cache" / "huggingface" / "hub"
+        / f"models--{KOKORO_REPO.replace('/', '--')}"
+    )
     if kokoro_cache.exists():
         console.print("  [green]✓[/green] Kokoro model already downloaded")
     else:
         console.print("  [yellow]![/yellow] Kokoro model not found (~300 MB download required)")
-        console.print("  [dim]Requires: PyTorch (torch), kokoro, sounddevice[/dim]")
+        console.print("  [dim]Requires: mlx-audio (Metal GPU TTS)[/dim]")
 
         download = console.input("  Download now? [y/N] ").strip().lower()
         if download == "y":
@@ -258,8 +266,8 @@ def run_setup(config) -> None:
                     TextColumn("[progress.description]{task.description}"),
                     console=console,
                 ) as progress:
-                    progress.add_task("Downloading hexgrad/Kokoro-82M...", total=None)
-                    snapshot_download(repo_id="hexgrad/Kokoro-82M")
+                    progress.add_task(f"Downloading {KOKORO_REPO}...", total=None)
+                    snapshot_download(repo_id=KOKORO_REPO, revision=revision_for(KOKORO_REPO))
 
                 console.print("  [green]✓[/green] Kokoro model downloaded successfully")
             except ImportError:

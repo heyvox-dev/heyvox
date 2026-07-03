@@ -59,6 +59,11 @@ _recognizer = None
 
 # MLX lazy-load state
 _mlx_model_id: str = ""
+# DEF-179: the model ref actually passed to mlx_whisper — a local snapshot dir
+# pinned to the tested revision (heyvox/model_pins.py) for a known default model,
+# else the bare repo id (custom model, or pin resolution failed). Resolved once
+# in _load_mlx_model. _mlx_model_id stays the repo string for glossary/logging.
+_mlx_load_ref: str = ""
 _mlx_language: str = ""
 _mlx_loaded = threading.Event()  # Set when model is ready
 _mlx_lock = threading.Lock()
@@ -80,7 +85,7 @@ def _log(msg: str) -> None:
 
 def _load_mlx_model() -> None:
     """Load MLX Whisper model into GPU memory (blocking)."""
-    global _mlx_last_use, _mlx_unavailable
+    global _mlx_last_use, _mlx_unavailable, _mlx_load_ref
     if _mlx_loaded.is_set():
         return
     with _mlx_lock:
@@ -93,10 +98,15 @@ def _load_mlx_model() -> None:
             _log("ERROR: mlx-whisper is not installed. Install with: pip install 'heyvox[apple-silicon]'")
             _log("MLX Whisper requires Apple Silicon. Use engine: sherpa for Intel Macs.")
             return
+        # DEF-179: resolve the pinned-revision load ref once (local snapshot dir
+        # for a known default model, else the repo id unchanged). Never raises.
+        if not _mlx_load_ref:
+            from heyvox.model_pins import resolve_pinned
+            _mlx_load_ref = resolve_pinned(_mlx_model_id, log=_log)
         _log(f"Loading MLX whisper model ({_mlx_model_id})...")
         t0 = time.perf_counter()
         dummy = np.zeros(16000, dtype=np.float32)
-        mlx_whisper.transcribe(dummy, path_or_hf_repo=_mlx_model_id)
+        mlx_whisper.transcribe(dummy, path_or_hf_repo=_mlx_load_ref)
         elapsed = time.perf_counter() - t0
         _mlx_last_use = time.time()
         _mlx_loaded.set()
@@ -205,11 +215,12 @@ def init_local_stt(
         unload_secs: Idle seconds before the MLX model is unloaded from RAM.
     """
     global _recognizer, _mlx_model_id, _mlx_language, _log_fn, _mlx_initial_prompt
-    global _mlx_unload_secs
+    global _mlx_unload_secs, _mlx_load_ref
     _log_fn = log_fn
 
     if engine == "mlx":
         _mlx_model_id = mlx_model
+        _mlx_load_ref = ""  # DEF-179: force pin re-resolution on (re)configure
         _mlx_language = language
         # DEF-152 model-gate: only turbo-class models survive the glossary prompt.
         if initial_prompt and not _model_supports_glossary(mlx_model):
@@ -327,7 +338,7 @@ def transcribe_audio(
         except ImportError:
             _log("ERROR: mlx-whisper is not installed. Install with: pip install 'heyvox[apple-silicon]'")
             return ""
-        kwargs = dict(path_or_hf_repo=_mlx_model_id or mlx_model)
+        kwargs = dict(path_or_hf_repo=_mlx_load_ref or _mlx_model_id or mlx_model)
         if _mlx_language or language:
             kwargs["language"] = _mlx_language or language
         # DEF-075: defensive Whisper config for interactive dictation.

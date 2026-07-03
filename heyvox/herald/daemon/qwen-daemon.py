@@ -34,11 +34,35 @@ PID_FILE = f"{_TMP}/qwen-daemon.pid"
 IDLE_TIMEOUT = int(os.environ.get("QWEN_IDLE_TIMEOUT", "300"))
 
 # bf16 variant for clean audio — avoids the "tinny" 8-bit quant artifacts.
-# Users can override via QWEN_TTS_MODEL env var.
-MLX_MODEL_ID = os.environ.get(
-    "QWEN_TTS_MODEL",
-    "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
-)
+_QWEN_DEFAULT_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
+# DEF-179: validate the QWEN_TTS_MODEL override against the trusted org and pin
+# the default model's tested commit. Canonical registry: heyvox/model_pins.py —
+# inlined here because this daemon runs in a separate interpreter that cannot
+# import heyvox. Keep in sync.
+_TRUSTED_REPO_PREFIX = "mlx-community/"
+_MODEL_REVISIONS = {
+    _QWEN_DEFAULT_MODEL: "1eccf1cb2519b5a4e8a95b5f0544f3303568164f",
+}
+
+
+def _resolve_qwen_model():
+    """Validate the QWEN_TTS_MODEL override and return (model_id, revision|None).
+
+    An override must come from the trusted org or be an existing local dir;
+    anything else (e.g. an attacker-set env value) is rejected and the default
+    is used. The revision is the pinned commit for the resolved model, or None
+    if it is a user override we do not pin. Calls log(), so invoke it only after
+    log() is defined (i.e. from load_model, not at import).
+    """
+    raw = os.environ.get("QWEN_TTS_MODEL", "").strip()
+    if raw and not (raw.startswith(_TRUSTED_REPO_PREFIX) or os.path.isdir(raw)):
+        log(
+            f"QWEN_TTS_MODEL={raw!r} rejected (must start with "
+            f"{_TRUSTED_REPO_PREFIX!r} or be a local dir); using default"
+        )
+        raw = ""
+    model_id = raw or _QWEN_DEFAULT_MODEL
+    return model_id, _MODEL_REVISIONS.get(model_id)
 
 # worker sends short ISO-ish codes (de, ko, ru, pl, ...);
 # Qwen3 expects full English names as lang_code.
@@ -74,10 +98,12 @@ def log(msg):
 # --- Model loading ---
 
 def load_model():
-    log(f"Loading Qwen3-TTS ({MLX_MODEL_ID})...")
+    model_id, revision = _resolve_qwen_model()
+    tag = f"{model_id}@{revision[:8]}" if revision else model_id
+    log(f"Loading Qwen3-TTS ({tag})...")
     t0 = time.time()
     from mlx_audio.tts.utils import load_model as _load
-    model = _load(MLX_MODEL_ID)
+    model = _load(model_id, revision=revision) if revision else _load(model_id)
     # Warm: first generate compiles the MLX graph. Short German phrase
     # touches the actual German codebook path.
     try:

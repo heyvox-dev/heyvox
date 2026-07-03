@@ -43,6 +43,11 @@ ONNX_VOICES_PATH = os.path.expanduser("~/.kokoro-tts/voices-v1.0.bin")
 
 # mlx-audio model ID
 MLX_MODEL_ID = "mlx-community/Kokoro-82M-bf16"
+# DEF-179: pin the exact tested commit so an upstream repo update can't silently
+# swap the weights every install pulls. Canonical registry: heyvox/model_pins.py
+# — inlined here because this daemon runs in a separate interpreter that cannot
+# import heyvox. Keep in sync.
+MLX_MODEL_REVISION = "a71e4d38b236d968966a2002c4c895dbd12b1c3c"
 
 last_activity = time.time()
 _daemon_start_time = time.time()
@@ -89,10 +94,10 @@ def map_lang(lang):
 
 def load_model_mlx():
     """Load Kokoro via mlx-audio (Metal GPU)."""
-    log("Loading Kokoro via mlx-audio (Metal GPU)...")
+    log(f"Loading Kokoro via mlx-audio (Metal GPU) [{MLX_MODEL_ID}@{MLX_MODEL_REVISION[:8]}]...")
     t0 = time.time()
     from mlx_audio.tts.utils import load_model
-    model = load_model(MLX_MODEL_ID)
+    model = load_model(MLX_MODEL_ID, revision=MLX_MODEL_REVISION)
     # Pre-warm: first generate compiles the MLX graph
     for v in ["af_sarah", "af_heart", "af_nova", "af_sky"]:
         try:
