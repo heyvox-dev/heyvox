@@ -356,6 +356,18 @@ def run_gate(
             abs_path = str(clip.resolve())
             if abs_path in done:
                 continue
+            score = _parse_score(clip.name)
+            # Perf: a trusted high-confidence (or curated, score-less) positive
+            # can NEVER be quarantined -- the score gate keeps it regardless of
+            # the transcript -- so skip the expensive ~3.7s transcription
+            # entirely. This alone skips every tp/ and recordings/ clip.
+            if side == "positive" and (score is None or score >= _TRUST_SCORE):
+                _append_result(state_dir, {
+                    "path": abs_path, "side": side, "has_ww": False,
+                    "score": score, "dur": 0.0, "timeout": False,
+                    "text": "", "trusted": True,
+                })
+                continue
             # Perf: RMS pre-gate in the PARENT, before spawning any subprocess.
             try:
                 audio, sr = _load_wav(clip)
