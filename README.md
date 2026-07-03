@@ -90,6 +90,8 @@ heyvox stop               # Stop the service
 heyvox restart            # Restart the service
 heyvox status             # Show status
 heyvox logs               # Tail service logs
+heyvox doctor             # Diagnose permissions, models, and dependencies
+heyvox commands           # List the built-in voice commands
 ```
 
 ### Voice output (TTS)
@@ -98,6 +100,8 @@ heyvox logs               # Tail service logs
 heyvox speak "Hello"      # Speak text via Kokoro TTS
 heyvox skip               # Skip current TTS playback
 heyvox mute               # Toggle TTS mute
+heyvox quiet              # Verbosity → short (first sentence only)
+heyvox verbose full       # Get/set verbosity (full | short | skip)
 
 # Herald CLI (advanced TTS control)
 herald status              # Queue, hold, playing, muted, paused
@@ -113,6 +117,45 @@ herald skip                # Skip current message
 heyvox history             # Show recent transcriptions
 heyvox history -c          # Copy last transcript to clipboard
 ```
+
+### Diagnostics & maintenance
+
+```bash
+heyvox doctor              # Permissions, model presence, and dependency check
+heyvox debug               # Recent STT recordings + why each was kept/discarded
+heyvox log-health          # Daily digest of wake/STT/TTS log signals
+heyvox calibrate           # Calibrate mic noise floor + silence threshold
+heyvox bugreport           # Bundle logs + config into a GitHub-issue report
+```
+
+### MCP registration
+
+```bash
+heyvox register            # Register the MCP server with detected AI agents
+heyvox register cursor     # ...or just one agent
+```
+
+`heyvox setup` also offers to do this. See [MCP Tools](#mcp-tools) below.
+
+### Anonymous telemetry (opt-in, off by default)
+
+```bash
+heyvox telemetry           # Show status
+heyvox telemetry preview   # Show exactly what would be sent
+heyvox telemetry enable    # Opt in   (opt out with: heyvox telemetry disable)
+```
+
+Telemetry sends only a version string, a hashed hostname, and five numeric
+counters — never transcripts, logs, or paths. See [Privacy](#privacy).
+
+### Vocabulary learning (advanced, opt-in, off by default)
+
+```bash
+heyvox learn-vocab         # Improve STT recognition of your recurring terms
+```
+
+This sends recent dictation **transcripts** (text, not audio) to the Anthropic
+API, so it is off by default and only runs when you invoke it. See [Privacy](#privacy).
 
 ### Browser media control (Hush)
 
@@ -291,11 +334,16 @@ This pattern generalizes to any external MCP that returns images, SVGs, or diagr
 
 ## Privacy
 
-HeyVox processes everything locally:
+HeyVox processes everything locally by default:
 - Wake word detection: openwakeword (on-device)
 - Speech-to-text: MLX Whisper or sherpa-onnx (on-device)
 - Text-to-speech: Kokoro (on-device)
-- No audio is sent to any server, ever
+- **No audio is sent to any server, ever** — under any configuration.
+
+Two optional features are **off by default** and only send non-audio data if you
+explicitly enable them: anonymous telemetry (version + hashed hostname + numeric
+counters) and `learn-vocab` (sends dictation *transcripts* to the Anthropic API).
+Full details in the [privacy policy](docs/privacy.html).
 
 ## Development
 
@@ -309,6 +357,39 @@ pytest tests/ -k "not e2e"
 # Lint
 ruff check heyvox/ tests/
 ```
+
+## Troubleshooting
+
+Run `heyvox doctor` first — it checks permissions, model presence, and
+dependencies, and points at most of the issues below.
+
+- **`heyvox start` exits immediately / wake word never fires.** Usually a missing
+  model or a permission. Re-run `heyvox setup`, then `heyvox doctor`. Grant
+  **Microphone**, **Accessibility**, and **Screen Recording** to your terminal in
+  System Settings → Privacy & Security.
+- **Dictation does nothing on an Intel Mac.** MLX Whisper needs Apple Silicon.
+  Set `stt.local.engine: sherpa` in your config (HeyVox now defaults to this on
+  Intel automatically).
+- **No speech / TTS silent.** Install the TTS extra: `pip install 'heyvox[tts]'`.
+  Check it isn't muted (`heyvox mute` toggles) and inspect `herald status`.
+- **Wrong microphone or output device.** See [Audio Devices](#audio-devices);
+  pick the device in the menu-bar HUD. A closed MacBook lid mutes the built-in
+  mic.
+- **Something's wrong and you want to report it.** `heyvox bugreport` bundles logs
+  and config (redacted) for a GitHub issue; `heyvox logs` tails the live log.
+
+## Uninstall
+
+```bash
+bash scripts/uninstall.sh                       # remove HeyVox, keep nothing extra
+bash scripts/uninstall.sh --keep-config --yes   # keep ~/.config/heyvox, no prompts
+```
+
+This removes the HeyVox virtualenv, CLI symlinks, the launchd agent, the Herald
+Claude-Code hooks, and the Hush native-messaging host. Shared system packages
+(Homebrew, portaudio, Python) are left alone; config and model caches are removed
+unless you pass `--keep-config`. Remove the Hush Chrome extension separately from
+`chrome://extensions/`.
 
 ## License
 
