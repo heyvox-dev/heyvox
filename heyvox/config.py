@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 from platformdirs import user_config_dir
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
 from heyvox.constants import LOG_FILE_DEFAULT
 
 
@@ -72,9 +72,19 @@ class WakeWordConfig(BaseModel):
         return self
 
 
+def _default_stt_engine() -> str:
+    """Default STT engine: MLX Whisper on Apple Silicon, sherpa-onnx elsewhere.
+
+    MLX requires arm64 — defaulting Intel Macs to sherpa avoids a 120s hang
+    per dictation when mlx-whisper can't load (DEF-175).
+    """
+    import platform
+    return "mlx" if platform.machine() == "arm64" else "sherpa"
+
+
 class STTLocalConfig(BaseModel):
     """Local STT engine configuration (MLX Whisper or sherpa-onnx)."""
-    engine: str = "mlx"
+    engine: str = Field(default_factory=_default_stt_engine)
     mlx_model: str = "mlx-community/whisper-small-mlx"
     model_dir: str = "models/sherpa-onnx-whisper-small"
     language: str = ""

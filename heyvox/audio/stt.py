@@ -66,6 +66,7 @@ _mlx_last_use: float = 0.0
 _mlx_unload_secs: float = 300.0  # idle → unload; configurable via stt.local.unload_secs (too-short timeouts cause slow reloads under swap pressure)
 _mlx_unloader: threading.Timer | None = None
 _mlx_transcribing: bool = False  # Guard: prevents unload during active transcription
+_mlx_unavailable: bool = False  # True once an mlx-whisper import fails (e.g. Intel Mac) — makes the load wait fail fast instead of blocking _LOAD_TIMEOUT
 _log_fn: Callable[[str], None] | None = None
 _mlx_initial_prompt: str = ""   # Phase 16: glossary bias for the first decode window
 
@@ -79,7 +80,7 @@ def _log(msg: str) -> None:
 
 def _load_mlx_model() -> None:
     """Load MLX Whisper model into GPU memory (blocking)."""
-    global _mlx_last_use
+    global _mlx_last_use, _mlx_unavailable
     if _mlx_loaded.is_set():
         return
     with _mlx_lock:
@@ -88,6 +89,7 @@ def _load_mlx_model() -> None:
         try:
             import mlx_whisper
         except ImportError:
+            _mlx_unavailable = True
             _log("ERROR: mlx-whisper is not installed. Install with: pip install 'heyvox[apple-silicon]'")
             _log("MLX Whisper requires Apple Silicon. Use engine: sherpa for Intel Macs.")
             return
@@ -299,11 +301,26 @@ def transcribe_audio(
         # B1: Always go through _mlx_loaded.wait() so the total block is
         # bounded by _LOAD_TIMEOUT, regardless of whether a background
         # preload thread is already running or we trigger the load here.
+        if _mlx_unavailable:
+            _log("ERROR: MLX unavailable (mlx-whisper not installed). Set "
+                 "stt.local.engine to 'sherpa' on Intel Macs, or install "
+                 "heyvox[apple-silicon].")
+            return ""
         if not _mlx_loaded.is_set():
             threading.Thread(target=_load_mlx_model, daemon=True).start()
-        if not _mlx_loaded.wait(timeout=_LOAD_TIMEOUT):
-            _log(f"ERROR: MLX model failed to load within {_LOAD_TIMEOUT}s")
-            return ""
+        # Poll for load, but bail the instant the load thread reports mlx-whisper
+        # is unavailable — otherwise a missing import blocks the full
+        # _LOAD_TIMEOUT (120s) on the first dictation before failing (DEF-175).
+        _deadline = time.time() + _LOAD_TIMEOUT
+        while not _mlx_loaded.is_set():
+            if _mlx_unavailable:
+                _log("ERROR: MLX unavailable (mlx-whisper not installed) — set "
+                     "stt.local.engine to 'sherpa' or install heyvox[apple-silicon].")
+                return ""
+            if time.time() > _deadline:
+                _log(f"ERROR: MLX model failed to load within {_LOAD_TIMEOUT}s")
+                return ""
+            time.sleep(0.1)
 
         try:
             import mlx_whisper

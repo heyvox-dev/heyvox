@@ -27,7 +27,9 @@ class TestHeyvoxConfigDefaults:
     def test_default_stt(self):
         cfg = HeyvoxConfig()
         assert cfg.stt.backend == "local"
-        assert cfg.stt.local.engine == "mlx"
+        # engine default is machine-dependent: mlx on Apple Silicon, sherpa on Intel (DEF-175)
+        from heyvox.config import _default_stt_engine
+        assert cfg.stt.local.engine == _default_stt_engine()
         assert cfg.stt.local.mlx_model == "mlx-community/whisper-small-mlx"
 
     def test_default_tts(self):

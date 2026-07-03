@@ -133,6 +133,17 @@
 - **Found by**: Launch-readiness onboarding audit (reproduced against PyPI 1.0.0), cross-confirmed by project memory (`project_heyvox_doctor_broken`).
 - **Would have caught earlier**: A CLI smoke test invoking every registered subcommand's `--help` (and a dry-run) would flag any subcommand whose backing module is missing — belongs in the same CI step as the install-test (Blocker 4).
 
+## DEF-175 — Intel Macs hang 120s per dictation (no Apple-Silicon detection; MLX load never fails fast)
+
+- **Date**: 2026-07-03
+- **Category**: platform / timing
+- **Severity**: S1 on Intel Macs (every wake-word-triggered dictation blocks exactly `_LOAD_TIMEOUT`=120s then silently discards the recording — the tool looks frozen); no impact on Apple Silicon.
+- **Symptom**: On an Intel Mac, a fresh install with the default `stt.local.engine: mlx` starts cleanly (wake word has no MLX dependency) but every dictation blocks 120s before returning `""`. No error dialog, no HUD banner, no early warning at setup.
+- **Root cause**: (1) No `platform.machine()` check anywhere — the default `engine: mlx` was used regardless of CPU. mlx-whisper is an optional `[apple-silicon]` extra with no wheel on Intel. (2) `_load_mlx_model()`'s `except ImportError` branch logged and returned without setting any flag or calling `_mlx_loaded.set()`, while `transcribe_audio()` unconditionally did `_mlx_loaded.wait(timeout=_LOAD_TIMEOUT)` — so a missing import blocked the full 120s on every call.
+- **Fix**: (1) `heyvox/audio/stt.py`: added a module flag `_mlx_unavailable`, set True in `_load_mlx_model`'s ImportError branch; `transcribe_audio` now checks it up front and polls (instead of a blind 120s wait), bailing the instant the load thread reports unavailability — a 120s hang becomes a near-instant, clearly-logged failure. (2) `heyvox/config.py`: `STTLocalConfig.engine` default is now machine-dependent via `_default_stt_engine()` — `mlx` on arm64, `sherpa` on Intel — so Intel installs never pick MLX. `heyvox doctor` (DEF-174) already surfaces CPU + mlx-whisper status.
+- **Found by**: Launch-readiness stability audit (flagged the 120s hang and the total absence of arch detection).
+- **Would have caught earlier**: No test exercised the missing-MLX path. Added `tests/test_stt_engine_fallback.py` (fail-fast returns in <5s, not 120s; Intel-defaults-to-sherpa). General pattern: an optional-dependency feature needs an explicit fail-fast plus a test that the *absence* of the dep degrades gracefully rather than hanging.
+
 ## Patterns & Process Gaps
 
 - **P-silent-wrong-device** (DEF-172, sibling to DEF-104/148/150/153): a long-lived PortAudio (pyaudio/sounddevice) stream or context can remain "open" and functionally healthy while bound to a device object that CoreAudio has since superseded, if the underlying device swap doesn't cross a boundary the code actually watches (e.g. transport type staying USB→USB across a reconnect). Unlike DEF-104/153's failure mode (loud errors: `-9986`/`-10851`), this variant throws nothing — recovery logic gated on exceptions (`stale` counters, drop-and-recreate-on-failure) never fires. **Action item**: any code opening a PortAudio-family stream against "the default device" should (a) resolve and pass an explicit device index/UID rather than relying on the library's own default resolution, matching it against a live CoreAudio query, and (b) re-validate that binding periodically, not just at open time — "open succeeded" and "bound to the right device" are different claims and only the fix for DEF-172 checks both.
