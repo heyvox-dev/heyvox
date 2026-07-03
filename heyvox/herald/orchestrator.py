@@ -400,11 +400,30 @@ def _afplay_ceiling(wav_file) -> float:
         return ABS_CAP
 
 
+def _lua_str_escape(value: str) -> str:
+    """Escape a string for safe interpolation inside a single-quoted Lua literal.
+
+    Order matters: escape the backslash first so it cannot consume the quote
+    escape that follows, then the single quote, then neutralize raw CR/LF (a
+    literal newline terminates a single-quoted Lua string). Without this a
+    workspace label or externally-authored Conductor PR title containing a
+    crafted ``\\'`` sequence breaks out of the ``hs -c`` Lua string into
+    attacker-controlled code execution. Matches the escape order already used
+    for AppleScript in injection.py/toast.py.
+    """
+    return (
+        value.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
 def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
     """Send a Hammerspoon notification for a held workspace message."""
     held = list(cfg.hold_dir.glob("*.wav"))
     count = len(held)
-    ws_escaped = workspace.replace("'", "\\'")
+    ws_escaped = _lua_str_escape(workspace)
     hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
     if not Path(hs).exists() or not _hammerspoon_running():
         return
@@ -1263,9 +1282,13 @@ class HeraldOrchestrator:
         hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
         if not Path(hs).exists() or not _hammerspoon_running():
             return
+        # Escape even though current callers pass int-formatted strings: the
+        # message lands in an `hs -c` Lua literal, so any future caller passing
+        # user text would otherwise reopen the DEF-177 Lua string-breakout.
+        safe_message = _lua_str_escape(message)
         try:
             subprocess.Popen(
-                [hs, "-c", f"hs.alert.show('{message}', 1.5)"],
+                [hs, "-c", f"hs.alert.show('{safe_message}', 1.5)"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except Exception:
