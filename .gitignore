@@ -55,5 +55,11 @@ htmlcov/
 models/
 *.onnx
 *.bin
+# Exception: the small (~5 MB) openwakeword models bundled into the wheel for
+# offline-first wake-word boot (heyvox/audio/wakeword.py::_ensure_oww_models).
+!heyvox/models/
+heyvox/models/*
+!heyvox/models/oww/
+!heyvox/models/oww/*.onnx
 !heyvox/hush/extension/icons/
 !heyvox/hush/extension/icons/*.png

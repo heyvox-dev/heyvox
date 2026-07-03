@@ -52,6 +52,9 @@ apple-silicon = [
 ]
 tts = [
     "kokoro>=0.3.0",
+    # mlx-audio is a hard runtime import in herald/daemon/{kokoro,qwen}-daemon.py;
+    # without it `pip install heyvox[tts]` yields a broken TTS daemon.
+    "mlx-audio>=0.4.0",
     "sounddevice>=0.4.0",
     "huggingface_hub>=0.20.0",
 ]
@@ -85,6 +88,9 @@ heyvox = [
     "cues/*.wav", "cues/*.mp3", "cues/*.aiff",
     # Wake word models (custom .onnx, e.g. hey_vox)
     "models/*.onnx",
+    # Bundled openwakeword models (hey_jarvis_v0.1 + feature extractors) so a
+    # fresh `pip install` boots without a network download (DEF-159 follow-up).
+    "models/oww/*.onnx",
     # Herald — TTS orchestration (Python daemon + hook shims)
     "herald/daemon/*.py",
     "herald/hooks/*.sh",

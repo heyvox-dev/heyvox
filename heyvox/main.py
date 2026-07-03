@@ -635,10 +635,23 @@ def _setup(config: HeyvoxConfig):
 
     # Load wake word models
     from heyvox.audio.wakeword import load_models
-    model, use_separate_words = load_models(
-        start_word, stop_word, config.wake_words.models_dir,
-        also_load=config.wake_words.also_load,
-    )
+    try:
+        model, use_separate_words = load_models(
+            start_word, stop_word, config.wake_words.models_dir,
+            also_load=config.wake_words.also_load,
+        )
+    except Exception as e:
+        # Bundled models missing (broken wheel) or a custom wake word with no
+        # .onnx file — surface an actionable message, not a raw traceback.
+        log(f"FATAL: wake word model load failed ({start_word!r}/{stop_word!r}): {e}")
+        _safe_stderr(
+            "\n[heyvox] Wake word model failed to load.\n"
+            f"  start={start_word!r} stop={stop_word!r}\n"
+            "  Fix: run `heyvox setup` to re-provision models, or check that a\n"
+            "  custom wake word has a matching .onnx in ~/.config/heyvox/models/.\n"
+            f"  Details: {e}\n"
+        )
+        raise SystemExit(1)
     _loaded_models = list(model.models.keys()) if hasattr(model, 'models') else []
     _safe_stderr(f"[wakeword] Loaded models: {_loaded_models}, also_load={config.wake_words.also_load}")
     log(f"Wake word models loaded: {_loaded_models}")
