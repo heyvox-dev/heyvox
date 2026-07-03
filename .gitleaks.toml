@@ -1,0 +1,19 @@
+# gitleaks configuration for HeyVox CI secret scanning (DEF-180).
+#
+# Extends the default gitleaks ruleset and allowlists known non-secrets so the
+# CI gate stays green on false positives while still catching real leaks.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secrets (reviewed)"
+# gitleaks matches these regexes against the file path.
+paths = [
+  # The Hush Chrome extension manifest embeds the extension's PUBLIC key
+  # (base64-encoded RSA SubjectPublicKeyInfo, "MIIBIjANBgkqhkiG9w0BAQEF...").
+  # It exists solely to pin the extension ID and is shipped to every user's
+  # browser — public by design, not a credential. gitleaks' generic-api-key
+  # rule flags it on entropy alone.
+  '''heyvox/hush/extension/manifest\.json''',
+]
