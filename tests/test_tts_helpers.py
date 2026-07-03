@@ -171,7 +171,9 @@ class TestExtractLastTTSBlock:
 class TestConstants:
     def test_verbosity_levels_complete(self):
         # If a new level is added, both producers see it via the shared tuple.
-        assert set(VERBOSITY_LEVELS) >= {"full", "summary", "short", "skip"}
+        # "summary" was deprecated (always identical to "full") and dropped.
+        assert set(VERBOSITY_LEVELS) == {"full", "short", "skip"}
+        assert "summary" not in VERBOSITY_LEVELS
 
     def test_mood_voices_cover_all_detected_moods(self):
         """detect_mood's output domain must equal MOOD_VOICES' key set."""

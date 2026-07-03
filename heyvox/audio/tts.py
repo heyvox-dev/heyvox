@@ -44,7 +44,7 @@ _SUBPROCESS_TIMEOUT = 5
 class Verbosity(str, Enum):
     """Controls TTS playback mode."""
     FULL = "full"
-    SUMMARY = "summary"  # Kept for backward compat — treated as FULL
+    SUMMARY = "summary"  # Deprecated alias for FULL — accepted, never surfaced
     SHORT = "short"
     SKIP = "skip"
 
@@ -53,7 +53,7 @@ def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
     """Filter text according to the given TTS playback mode.
 
     Modes:
-    - full/summary: Speak the entire text as-is
+    - full: Speak the entire text as-is
     - short: Speak only the first sentence
     - skip: Drop silently (return None)
     """
@@ -67,7 +67,7 @@ def apply_verbosity(text: str, verbosity: "Verbosity | str") -> Optional[str]:
         if match:
             return text[:match.end()].strip()
         return text[:100]
-    # FULL and SUMMARY both play everything
+    # FULL plays everything (SUMMARY is a deprecated alias)
     return text
 
 

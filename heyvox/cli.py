@@ -224,7 +224,7 @@ def _cmd_quiet(args):
 
 
 def _cmd_verbose(args):
-    """Set TTS verbosity. Levels: full, summary, short, skip.
+    """Set TTS verbosity. Levels: full, short, skip.
 
     Without arguments: show current level.
     With argument: set to that level.
@@ -251,7 +251,7 @@ def _cmd_commands(args):
     # Group by category
     categories = {
         "Playback": ["tts-next", "tts-skip", "tts-stop", "tts-mute", "tts-replay"],
-        "Verbosity": ["verbosity-full", "verbosity-summary", "verbosity-short", "verbosity-skip"],
+        "Verbosity": ["verbosity-full", "verbosity-short", "verbosity-skip"],
     }
     action_to_patterns = {}
     for pattern, (action, feedback) in VOICE_COMMANDS.items():
@@ -1246,7 +1246,7 @@ def main():
         "--verbosity",
         choices=["full", "summary", "short", "skip"],
         default=None,
-        help="Verbosity mode: full (default) | summary | short | skip",
+        help="Verbosity mode: full (default) | short | skip",
     )
     sub_speak.set_defaults(func=_cmd_speak)
 

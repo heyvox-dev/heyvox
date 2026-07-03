@@ -81,7 +81,7 @@ def _init_tts() -> None:
 
 @mcp.tool()
 def voice_speak(text: str, verbosity: str = "full") -> str:
-    """Speak text aloud via TTS. verbosity: full|summary|short|skip"""
+    """Speak text aloud via TTS. verbosity: full|short|skip"""
     from heyvox.audio.tts import speak
     speak(text, verbosity=verbosity)
     return "queued"

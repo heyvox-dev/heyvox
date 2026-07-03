@@ -101,7 +101,7 @@ def mood_voice(text: str) -> str:
 # Verbosity
 # ---------------------------------------------------------------------------
 
-VERBOSITY_LEVELS = ("full", "summary", "short", "skip")
+VERBOSITY_LEVELS = ("full", "short", "skip")
 
 
 def _verbosity_file_path() -> str:

@@ -115,7 +115,7 @@ class TTSConfig(BaseModel):
     # Playback speed multiplier (1.0 = normal)
     speed: float = 1.0
 
-    # Verbosity level: full | summary | short | skip
+    # Verbosity level: full | short | skip
     # Controls how much of each message is spoken.
     verbosity: str = "full"
 
@@ -192,7 +192,12 @@ class TTSConfig(BaseModel):
     @field_validator("verbosity")
     @classmethod
     def validate_verbosity(cls, v: str) -> str:
-        valid = {"full", "summary", "short", "skip"}
+        # "summary" is deprecated — it always behaved identically to "full".
+        # Accept it for backward compat but normalize it away so it disappears
+        # from the visible config surface.
+        if v == "summary":
+            return "full"
+        valid = {"full", "short", "skip"}
         if v not in valid:
             raise ValueError(f"verbosity must be one of {valid}, got '{v}'")
         return v
@@ -1056,7 +1061,7 @@ tts:
   enabled: true            # Phase 3: native Kokoro TTS enabled by default
   voice: af_heart          # Kokoro voice name (af_heart = US English female)
   speed: 1.0               # Playback speed multiplier (0.5–2.0)
-  verbosity: full          # full | summary | short | skip
+  verbosity: full          # full | short | skip
   volume_boost: 10         # Added to system volume during TTS (capped at 100)
   ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
   min_volume: 0.10         # Minimum TTS playback volume [0.0–1.0]. After ducking, Herald sets

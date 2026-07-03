@@ -112,9 +112,14 @@ class TestTTSConfig:
     """TTS config validation — verbosity, ducking, script_path."""
 
     def test_valid_verbosity_values(self):
-        for v in ("full", "summary", "short", "skip"):
+        for v in ("full", "short", "skip"):
             cfg = TTSConfig(verbosity=v)
             assert cfg.verbosity == v
+
+    def test_summary_verbosity_deprecated_normalizes_to_full(self):
+        # "summary" always behaved identically to "full"; deprecated but still
+        # accepted for backward compat, normalized so it leaves the config surface.
+        assert TTSConfig(verbosity="summary").verbosity == "full"
 
     def test_invalid_verbosity_raises(self):
         with pytest.raises(Exception):
