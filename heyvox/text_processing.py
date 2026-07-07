@@ -222,7 +222,26 @@ def is_garbled(
         and stt_secs >= 5.0 and audio_secs >= 5.0
         and stt_secs / audio_secs > 0.6
     ):
-        return True
+        # DEF-191: the catastrophic-ratio guard is a TIME-only proxy for
+        # "temperature fallback thrashed → hallucination". But slow-yet-COHERENT
+        # STT (system load / quiet mic / GPU contention from parallel Conductor
+        # sessions) trips it too and silently discards real dictation. Observed
+        # 2026-07-06: 17.4 s audio → 11.4 s STT (ratio 0.66), text = "Lies bitte
+        # meine Konversation die letzten mit Andrew und hilf mir eine gute Frage"
+        # — fully coherent, DISCARDED, then re-verify burned another 21.2 s and
+        # also discarded it → the whole utterance was lost. A genuine thrash that
+        # the text checks above missed still has a degenerate SHAPE: low word
+        # diversity or very few words. A sentence that cleared every text check
+        # AND shows high word diversity is real speech that was merely slow — do
+        # NOT let wall-clock cost alone kill it. Only the still-suspicious grey
+        # zone (short output or repetitive) is discarded on the time signal.
+        _gwords = cleaned.split()
+        _uniq = (
+            len(set(w.lower() for w in _gwords)) / len(_gwords)
+            if _gwords else 0.0
+        )
+        if not (len(_gwords) >= 5 and _uniq >= 0.5):
+            return True
 
     # DEF-133: "struggled and gave up" — Whisper spent many multiples of its
     # healthy decode time yet returned almost no text from several seconds of

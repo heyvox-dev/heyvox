@@ -1384,6 +1384,116 @@ def test_def104_substring_match_like_find_best_mic():
     )
 
 
+# ---------------------------------------------------------------------------
+# DEF-104 extension (2026-07-05): the CoreAudio *default input* is a self-heal
+# candidate even when it isn't in mic_priority. macOS makes a freshly-plugged
+# USB headset the default input; the priority-only scan missed it (the G435
+# incident — daemon stuck on the built-in fallback, manual pins hit the stale
+# PortAudio cache, no self-heal because G435 wasn't a priority candidate).
+# ---------------------------------------------------------------------------
+
+def test_def104_default_input_not_in_priority_still_heals():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # The exact G435 case: live in CoreAudio + the macOS default input, but
+    # absent from PortAudio's cache and NOT in mic_priority. Must self-heal.
+    missed = detect_missed_hotplug(
+        live_input_names={"g435 wireless gaming headset", "macbook pro microphone"},
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["MacBook Pro Microphone"],  # G435 deliberately not listed
+        current_dev_name="MacBook Pro Microphone",
+        default_input_name="G435 Wireless Gaming Headset",
+    )
+    assert missed == "G435 Wireless Gaming Headset", (
+        "DEF-104: an actively-used mic macOS set as the default input must "
+        "self-heal even when it isn't in mic_priority"
+    )
+
+
+def test_def104_default_input_already_current_no_restart():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # The default input is already the mic in use → nothing to heal, no churn.
+    missed = detect_missed_hotplug(
+        live_input_names={"g435 wireless gaming headset"},
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["MacBook Pro Microphone"],
+        current_dev_name="G435 Wireless Gaming Headset",
+        default_input_name="G435 Wireless Gaming Headset",
+    )
+    assert missed is None, (
+        "DEF-104: if the daemon is already on the default-input device, a "
+        "restart is pointless — must not fire"
+    )
+
+
+def test_def104_default_input_visible_to_portaudio_no_restart():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # PortAudio already enumerates the default input → the normal scan/switch
+    # picks it up; restarting would be churn.
+    missed = detect_missed_hotplug(
+        live_input_names={"g435 wireless gaming headset", "macbook pro microphone"},
+        pa_input_names={"g435 wireless gaming headset", "macbook pro microphone"},
+        mic_priority=["MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+        default_input_name="G435 Wireless Gaming Headset",
+    )
+    assert missed is None, (
+        "DEF-104: a default input PortAudio can already see is handled by the "
+        "normal mic switch — no restart"
+    )
+
+
+def test_def104_priority_wins_over_default_input():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # Both a priority device and the default input are missed. The priority
+    # device must win (it's the explicit user preference).
+    missed = detect_missed_hotplug(
+        live_input_names={
+            "jabra link 390",
+            "g435 wireless gaming headset",
+            "macbook pro microphone",
+        },
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["Jabra Link 390", "MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+        default_input_name="G435 Wireless Gaming Headset",
+    )
+    assert missed == "Jabra Link 390", (
+        "DEF-104: an explicit mic_priority hotplug outranks the default-input "
+        "fallback"
+    )
+
+
+def test_def104_default_input_heals_with_empty_priority():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # Empty/None priority list must not short-circuit the default-input path.
+    missed = detect_missed_hotplug(
+        live_input_names={"g435 wireless gaming headset"},
+        pa_input_names=set(),
+        mic_priority=[],
+        current_dev_name="MacBook Pro Microphone",
+        default_input_name="G435 Wireless Gaming Headset",
+    )
+    assert missed == "G435 Wireless Gaming Headset", (
+        "DEF-104: an empty mic_priority must still allow the default-input "
+        "self-heal (the early-return now gates on CoreAudio data, not priority)"
+    )
+
+
+def test_def104_default_input_no_false_fire_coreaudio_unavailable():
+    from heyvox.audio.device_handle import detect_missed_hotplug
+    # Empty live set = CoreAudio down. Even with a default input passed, no-op.
+    missed = detect_missed_hotplug(
+        live_input_names=set(),
+        pa_input_names={"macbook pro microphone"},
+        mic_priority=["MacBook Pro Microphone"],
+        current_dev_name="MacBook Pro Microphone",
+        default_input_name="G435 Wireless Gaming Headset",
+    )
+    assert missed is None, (
+        "DEF-104: no CoreAudio data → never fire, even for a named default input"
+    )
+
+
 def test_def104_empty_or_none_priority_is_noop():
     from heyvox.audio.device_handle import detect_missed_hotplug
     assert detect_missed_hotplug({"x"}, set(), [], None) is None
@@ -1833,3 +1943,30 @@ def test_def164_preload_model_still_spawns_load_when_not_loaded():
             stt._mlx_loaded.set()
         else:
             stt._mlx_loaded.clear()
+
+
+def test_def191_ratio_guard_keeps_coherent_slow_stt():
+    """DEF-191: the catastrophic-ratio guard (stt/audio > 0.6 on >=5s) must NOT
+    discard coherent dictation that was merely slow (system load / quiet mic /
+    GPU contention). A real thrash-hallucination still has a degenerate shape
+    (low word diversity or very few words) and stays caught."""
+    from heyvox.text_processing import is_garbled
+
+    coherent = (
+        "Lies bitte meine Konversation die letzten mit Andrew "
+        "und hilf mir eine gute Frage"
+    )
+    # Slow (ratio 0.66) but coherent -> KEPT (the regression this fixes).
+    assert is_garbled(coherent, stt_secs=11.4, audio_secs=17.4) is False
+    # No timing supplied -> also kept (unchanged behaviour).
+    assert is_garbled(coherent) is False
+    # Real thrash loop + slow -> still discarded (guard still works).
+    assert is_garbled(
+        "doc doc doc doc doc doc doc doc doc doc", stt_secs=8.6, audio_secs=13.0
+    ) is True
+    # Grey zone: passes text checks (uniq 0.44) but not coherent + slow -> discarded.
+    assert is_garbled(
+        "the cat the cat the dog the dog run", stt_secs=9.0, audio_secs=13.0
+    ) is True
+    # Short output + slow -> discarded.
+    assert is_garbled("k nud so", stt_secs=6.0, audio_secs=11.0) is True

@@ -202,6 +202,7 @@ def detect_missed_hotplug(
     pa_input_names: set[str],
     mic_priority: list[str] | None,
     current_dev_name: Optional[str],
+    default_input_name: Optional[str] = None,
 ) -> Optional[str]:
     """Return a ``mic_priority`` entry that is the DEF-104 signature, else None.
 
@@ -220,32 +221,56 @@ def detect_missed_hotplug(
         pa_input_names: lowercase names PortAudio currently enumerates (in_ch>0).
         mic_priority: configured priority list (substrings, highest first).
         current_dev_name: the mic the daemon is using now (any case), or None.
+        default_input_name: the macOS CoreAudio default input device name (any
+            case), or None. DEF-104 fallback candidate — when no priority device
+            matches, an actively-used default input showing the same
+            live-but-uncached signature is flagged too (macOS makes a freshly
+            hotplugged USB headset the default input even when it isn't in
+            mic_priority). BT exclusion + restart-loop guard are the caller's.
 
     Returns:
         The highest-ranked priority entry matching the signature, or None. When
         ``live_input_names`` is empty (CoreAudio unavailable) this returns None
         rather than false-firing — detection degrades to a no-op.
     """
-    if not mic_priority or not live_input_names:
-        return None
+    if not live_input_names:
+        return None  # CoreAudio unavailable — never false-fire a restart.
 
-    # Rank of the device in use now. Unmatched / None → worst rank, so any
-    # live-but-uncached priority device counts as an upgrade.
-    cur = (current_dev_name or "").lower()
-    current_rank = len(mic_priority)
-    for rank, prio_name in enumerate(mic_priority):
-        if cur and prio_name.lower() in cur:
-            current_rank = rank
-            break
+    if mic_priority:
+        # Rank of the device in use now. Unmatched / None → worst rank, so any
+        # live-but-uncached priority device counts as an upgrade.
+        cur = (current_dev_name or "").lower()
+        current_rank = len(mic_priority)
+        for rank, prio_name in enumerate(mic_priority):
+            if cur and prio_name.lower() in cur:
+                current_rank = rank
+                break
 
-    for rank, prio_name in enumerate(mic_priority):
-        if rank >= current_rank:
-            # Not an upgrade over the current mic — stop (list is ordered).
-            break
-        if _matches(prio_name, live_input_names) and not _matches(
-            prio_name, pa_input_names
+        for rank, prio_name in enumerate(mic_priority):
+            if rank >= current_rank:
+                # Not an upgrade over the current mic — stop (list is ordered).
+                break
+            if _matches(prio_name, live_input_names) and not _matches(
+                prio_name, pa_input_names
+            ):
+                return prio_name
+
+    # DEF-104 fallback (2026-07-05): the priority scan above only heals listed
+    # devices. macOS makes a freshly-hotplugged USB headset the *default input*,
+    # which carries the same signature (live in CoreAudio, absent from
+    # PortAudio's cache) without being in mic_priority. Treat it as a candidate
+    # so an actively-used mic self-heals too — unless it's already the mic we're
+    # on. (BT exclusion + restart-loop guard are applied by the caller.)
+    if default_input_name:
+        d = default_input_name.lower()
+        cur = (current_dev_name or "").lower()
+        already_current = bool(cur) and (d in cur or cur in d)
+        if (
+            not already_current
+            and _matches(default_input_name, live_input_names)
+            and not _matches(default_input_name, pa_input_names)
         ):
-            return prio_name
+            return default_input_name
     return None
 
 

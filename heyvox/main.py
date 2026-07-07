@@ -50,7 +50,7 @@ from heyvox.constants import (
     cleanup_ipc_files,
 )
 from heyvox.audio.cues import is_suppressed
-from heyvox.audio.stt import init_local_stt
+from heyvox.audio.stt import init_local_stt, preload_model
 from heyvox.hud.process import (
     launch_hud_overlay,
     stop_hud_overlay,
@@ -288,6 +288,7 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
     try:
         from heyvox.audio.mic import (
             get_live_input_device_names,
+            get_default_input_device_name,
             _enumerate_pa_signature,
         )
         from heyvox.audio.device_handle import detect_missed_hotplug
@@ -304,12 +305,16 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
             for _i, n, c in _enumerate_pa_signature(devices.pa)
             if c > 0
         }
+        # DEF-104 (2026-07-05): the CoreAudio default input is a self-heal
+        # candidate even when it isn't in mic_priority — macOS makes a
+        # freshly-plugged USB headset the default input (the G435 incident).
+        default_name = get_default_input_device_name()
     except Exception as e:
         log(f"[hotplug] enumeration failed (skipping check): {e}")
         return
 
     missed = detect_missed_hotplug(
-        live, pa_names, config.mic_priority, devices.dev_name
+        live, pa_names, config.mic_priority, devices.dev_name, default_name
     )
     if not missed:
         return
@@ -576,6 +581,17 @@ def _setup(config: HeyvoxConfig):
             initial_prompt=config.stt.local.initial_prompt,   # Phase 16
             unload_secs=config.stt.local.unload_secs,
         )
+        # Start-preload: warm the MLX model at daemon startup instead of lazily
+        # on the first recording. Every daemon (re)start otherwise makes the
+        # first command pay a full cold-load (~6.5s avg); with frequent SIGTERM
+        # restarts (8 in one day observed) that is the dominant tail-latency
+        # source now that unload_secs=86400 keeps the model warm between
+        # recordings. Non-blocking: preload_model() spawns a daemon thread;
+        # _load_mlx_model is double-guarded against a race with the first
+        # wake-word preload. MLX-only (sherpa has no preload path).
+        if config.stt.local.engine == "mlx":
+            preload_model()
+            log("STT: warming MLX model at startup (start-preload)")
 
     # Build adapter and create RecordingStateMachine
     ctx.adapter = _build_adapter(config)
@@ -917,7 +933,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     # model's feature-window lag (user says "Hey Vox", model reports high score
     # on trailing silence). Kept ≤ the feature window (~1 s) so dead-mic silence
     # bursts still fall inside the silent gate within a couple of chunks.
-    _VAD_SILENT_GRACE = 0.5
+    # DEF-190 (2026-07-05): 0.5 -> 0.3. At 0.5, a stop "Hey Vox" appended to an
+    # utterance with only a <0.5s word-boundary pause never registered a silent
+    # frame, so the DEF-096 pre-silence gate blocked the stop unless score
+    # >= 0.999 (ultra bypass) — the "start works, stop needs 2-5 tries" symptom
+    # (G535: ambient VAD ~6, so silence_threshold was never the issue; the gap
+    # was the grace, not the level). 0.3 lets a normal pause count as silence so
+    # the DEF-096-B discount / window path can fire. Trade-off (user-accepted,
+    # 2026-07-05): slightly higher mid-sentence false-stop risk. Still << the
+    # ~1s feature window, so dead-mic silence bursts still register.
+    _VAD_SILENT_GRACE = 0.3
     _last_nonsilent_time: float = 0.0
 
     # DEF-096: pre-silence-aware stop-wake adjustments. The wake-word model's

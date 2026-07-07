@@ -335,6 +335,94 @@ def get_bluetooth_input_device_names() -> set[str]:
     }
 
 
+def get_default_input_device_name() -> str | None:
+    """Return the lowercase name of the current macOS default input device.
+
+    Reads ``kAudioHardwarePropertyDefaultInputDevice`` from the **live** HAL via
+    ctypes, so it reflects the device macOS actually routes input to right now —
+    including a USB headset just hotplugged that PortAudio's per-process cache
+    hasn't picked up yet.
+
+    DEF-104 (2026-07-05 extension) uses this so the hotplug self-restart can fire
+    for the user's *active* mic even when it isn't in ``mic_priority``: macOS
+    makes a freshly-plugged USB headset the default input, which is a strong
+    "the user wants this mic" signal that the priority list alone misses (the
+    exact G435 incident — the daemon stayed on the built-in fallback because the
+    only self-heal candidates were priority-list devices).
+
+    Returns None on any failure or if no default is set (graceful degradation —
+    detection no-ops rather than false-firing a restart).
+    """
+    try:
+        ca_path = ctypes.util.find_library("CoreAudio")
+        cf_path = ctypes.util.find_library("CoreFoundation")
+        if not ca_path or not cf_path:
+            return None
+        ca = ctypes.cdll.LoadLibrary(ca_path)
+        cf = ctypes.cdll.LoadLibrary(cf_path)
+
+        cf.CFStringGetCStringPtr.restype = ctypes.c_char_p
+        cf.CFStringGetCStringPtr.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        cf.CFStringGetLength.restype = ctypes.c_long
+        cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32,
+        ]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+        # Read the default-input AudioDeviceID from the live HAL.
+        default_addr = _AudioObjectPropertyAddress(
+            _kAudioHardwarePropertyDefaultInputDevice,
+            _kAudioObjectPropertyScopeGlobal,
+            _kAudioObjectPropertyElementMain,
+        )
+        dev_id = ctypes.c_uint32(0)
+        io_size = ctypes.c_uint32(ctypes.sizeof(dev_id))
+        status = ca.AudioObjectGetPropertyData(
+            ctypes.c_uint32(_kAudioObjectSystemObject),
+            ctypes.byref(default_addr),
+            ctypes.c_uint32(0), None,
+            ctypes.byref(io_size), ctypes.byref(dev_id),
+        )
+        if status != 0 or dev_id.value == 0:
+            return None
+
+        # Map the ID to its device name.
+        name_addr = _AudioObjectPropertyAddress(
+            _kAudioObjectPropertyName,
+            _kAudioObjectPropertyScopeGlobal,
+            _kAudioObjectPropertyElementMain,
+        )
+        cfstr = ctypes.c_void_p(0)
+        name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
+        status = ca.AudioObjectGetPropertyData(
+            ctypes.c_uint32(dev_id.value), ctypes.byref(name_addr),
+            ctypes.c_uint32(0), None, ctypes.byref(name_size),
+            ctypes.byref(cfstr),
+        )
+        if status != 0 or not cfstr.value:
+            return None
+        ptr = cf.CFStringGetCStringPtr(cfstr, _kCFStringEncodingUTF8)
+        if ptr:
+            name = ptr.decode("utf-8")
+        else:
+            length = cf.CFStringGetLength(cfstr) * 4 + 1
+            nbuf = ctypes.create_string_buffer(length)
+            name = (
+                nbuf.value.decode("utf-8")
+                if cf.CFStringGetCString(
+                    cfstr, nbuf, length, _kCFStringEncodingUTF8
+                )
+                else ""
+            )
+        cf.CFRelease(cfstr)
+        return name.lower() or None
+    except Exception as e:
+        _log(f"  CoreAudio default-input read failed: {e}")
+        return None
+
+
 def force_os_default_input(name_substr: str) -> bool:
     """Set the macOS default input device by name via CoreAudio ctypes.
 
