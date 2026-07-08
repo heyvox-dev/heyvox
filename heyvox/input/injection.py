@@ -465,6 +465,59 @@ def _post_return_key(count: int = 1) -> bool:
         return False
 
 
+# US/German-QWERTY physical virtual-keycodes for letters+digits — enough to
+# post a Cmd+<char> focus shortcut via CGEvent. 'l' (Conductor) = 0x25. Letters
+# sit in the same physical position on US-QWERTY and German-QWERTZ, so this map
+# holds for both; an unmapped char falls back to the osascript keystroke.
+_CHAR_TO_VK = {
+    'a': 0x00, 's': 0x01, 'd': 0x02, 'f': 0x03, 'h': 0x04, 'g': 0x05, 'z': 0x06,
+    'x': 0x07, 'c': 0x08, 'v': 0x09, 'b': 0x0B, 'q': 0x0C, 'w': 0x0D, 'e': 0x0E,
+    'r': 0x0F, 'y': 0x10, 't': 0x11, 'o': 0x1F, 'u': 0x20, 'i': 0x22, 'p': 0x23,
+    'l': 0x25, 'j': 0x26, 'k': 0x28, 'n': 0x2D, 'm': 0x2E,
+    '1': 0x12, '2': 0x13, '3': 0x14, '4': 0x15, '5': 0x17, '6': 0x16, '7': 0x1A,
+    '8': 0x1C, '9': 0x19, '0': 0x1D,
+}
+_kVK_Command = 0x37
+
+
+def _post_focus_shortcut(char: str) -> bool:
+    """Post Cmd+<char> via CGEvent (in-process, no subprocess) to the frontmost app.
+
+    ~5ms vs ~200-480ms for an osascript `keystroke` (the subprocess spawn +
+    Apple-Events IPC dominates under system load) — this is the DEF-192 focus
+    step, the last big cost after the CGEvent-Enter win. The Command modifier is
+    posted as an explicit key press/release AROUND the char (not just an event
+    flag) so the app reliably sees the Cmd-down state — plain flag-only Cmd
+    combos are the finicky part of synthetic modifier events. Returns False if
+    the char isn't mappable or Quartz is unavailable (caller falls back to
+    osascript). Correctness is still guarded downstream by the AX read-back
+    verify, so a misfire degrades to the fallback rather than a wrong paste.
+    """
+    keycode = _CHAR_TO_VK.get(char.lower())
+    if keycode is None:
+        return False
+    try:
+        import Quartz  # lazy: pyobjc-framework-Quartz
+    except Exception as e:
+        _log(f"_post_focus_shortcut: Quartz unavailable ({e})")
+        return False
+    try:
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        cmd = Quartz.kCGEventFlagMaskCommand
+        cmd_down = Quartz.CGEventCreateKeyboardEvent(src, _kVK_Command, True)
+        key_down = Quartz.CGEventCreateKeyboardEvent(src, keycode, True)
+        Quartz.CGEventSetFlags(key_down, cmd)
+        key_up = Quartz.CGEventCreateKeyboardEvent(src, keycode, False)
+        Quartz.CGEventSetFlags(key_up, cmd)
+        cmd_up = Quartz.CGEventCreateKeyboardEvent(src, _kVK_Command, False)
+        for ev in (cmd_down, key_down, key_up, cmd_up):
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        return True
+    except Exception as e:
+        _log(f"_post_focus_shortcut: post failed ({e})")
+        return False
+
+
 def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     """DEF-192: fast, mouse-independent paste for workspace-managed Electron.
 
@@ -474,6 +527,10 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     failure so app_fast_paste falls back to the proven osascript Cmd+V path
     (the clipboard is already set).
 
+    Requires the target to be ALREADY frontmost (defers to the fallback
+    otherwise) so it can skip the costly Electron set-frontmost activation cycle
+    that both slows the path and resets web-view focus.
+
     Behind HEYVOX_AX_CONDUCTOR. Reads app_pid from the record-start lock; the
     field is located from the LIVE keyboard focus, not the mouse.
     """
@@ -481,35 +538,36 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     pid = getattr(snap, "app_pid", 0)
     if not pid:
         return False
-    process_name = _get_frontmost_app()
-    if not process_name or process_name == "?":
-        process_name = profile.name
-    safe_name = process_name.replace('\\', '\\\\').replace('"', '\\"')
 
-    # 1. Bring the app frontmost + focus the chat field. Single osascript, same
-    #    set-frontmost + focus_shortcut as the consolidated path, MINUS the Cmd+V
-    #    and the Electron settle_delay (the AX-set below replaces both).
-    focus_lines = ["set frontmost to true", "delay 0.05"]
-    if profile.focus_shortcut:
-        focus_lines.append(
-            f'keystroke "{profile.focus_shortcut}" using command down'
-        )
-    focus_block = "\n        ".join(focus_lines)
-    focus_script = (
-        f'tell application "System Events"\n'
-        f'    tell process "{safe_name}"\n'
-        f'        {focus_block}\n'
-        f'    end tell\n'
-        f'end tell'
-    )
-    r = subprocess.run(
-        ["osascript", "-e", focus_script],
-        capture_output=True, timeout=SUBPROCESS_TIMEOUT,
-    )
-    if r.returncode != 0:
-        _log(f"AX conductor: focus osascript failed rc={r.returncode} — fallback")
+    # 1. Focus the chat field. Per project_set_frontmost_focus_disruption, an
+    #    unnecessary `set frontmost` on an ALREADY-frontmost Electron app costs a
+    #    ~300-450ms activation cycle AND resets the web-view focus. So this fast
+    #    path runs ONLY when the target is already frontmost (the dictation
+    #    norm); otherwise it defers to the osascript Cmd+V fallback, which
+    #    handles activation itself (and avoids us activating the wrong app). That
+    #    lets the focus step drop both set-frontmost and the process-name lookup
+    #    — just a bare Cmd+L to the frontmost app. (DEF-192 focus step: this cut
+    #    the 557ms focus block, the last big cost after the CGEvent-Enter win.)
+    if save_frontmost_pid() != pid:
+        _log("AX conductor: target not frontmost — deferring to osascript path")
         return False
-    time.sleep(0.08)  # focus settle (shorter than the Cmd+V path's IPC settle)
+    if profile.focus_shortcut:
+        # Prefer in-process CGEvent Cmd+<shortcut> (no subprocess); fall back to
+        # the osascript keystroke only if Quartz / the char-map is unavailable.
+        if not _post_focus_shortcut(profile.focus_shortcut):
+            focus_script = (
+                f'tell application "System Events"\n'
+                f'    keystroke "{profile.focus_shortcut}" using command down\n'
+                f'end tell'
+            )
+            r = subprocess.run(
+                ["osascript", "-e", focus_script],
+                capture_output=True, timeout=SUBPROCESS_TIMEOUT,
+            )
+            if r.returncode != 0:
+                _log(f"AX conductor: focus osascript failed rc={r.returncode} — fallback")
+                return False
+        time.sleep(0.03)  # brief; the AX poll below absorbs focus readiness
     t_focus = time.time()
 
     # 2. AX-set on the LIVE focused field (mouse-independent — fixes DEF-192
@@ -521,9 +579,9 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     # 3. Submit with Enter via CGEvent (in-process, NO second subprocess). The
     #    osascript Enter cost ~400ms and made the whole AX path SLOWER than the
     #    consolidated Cmd+V path (DEF-192 first live test: 1268ms vs 1036ms).
-    #    CGEvent goes to the frontmost app (Conductor, from step 1) with no
-    #    set-frontmost → no DEF-089 focus-steal race. osascript is the fallback
-    #    only when Quartz is unavailable.
+    #    CGEvent goes to the frontmost app (Conductor — verified above) with no
+    #    set-frontmost → no DEF-089 focus-steal race. The osascript fallback is a
+    #    bare keystroke (also frontmost-targeted) for the rare Quartz-missing case.
     if enter_count > 0:
         if not _post_return_key(enter_count):
             enter_lines = []
@@ -531,12 +589,10 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
                 enter_lines.append("keystroke return")
                 if i < enter_count - 1:
                     enter_lines.append("delay 0.05")
-            enter_block = "\n        ".join(enter_lines)
+            enter_block = "\n    ".join(enter_lines)
             enter_script = (
                 f'tell application "System Events"\n'
-                f'    tell process "{safe_name}"\n'
-                f'        {enter_block}\n'
-                f'    end tell\n'
+                f'    {enter_block}\n'
                 f'end tell'
             )
             er = subprocess.run(
