@@ -344,29 +344,78 @@ class TestFocusVerification:
 class TestAXFastPath:
     """AX fast-path for native AppKit text fields (PASTE-04)."""
 
-    def test_injects_into_axtextfield(self):
-        """Returns True for AXTextField with successful AXUIElementSetAttributeValue."""
-        snap = _make_snap("AXTextField")
-        fake_focused = object()
+    @staticmethod
+    def _stateful_ax_field(fake_focused, state):
+        """Mock ApplicationServices simulating a working AX text field: Set stores
+        the value, read-back returns it (so DEF-192's verify passes)."""
+        def _copy(el, attr, _):
+            if attr == "AXFocusedUIElement":
+                return (0, fake_focused)
+            if attr == "AXValue":
+                return (0, state["val"])
+            return (0, None)
+
+        def _set(el, attr, val):
+            if attr == "AXValue":
+                state["val"] = val
+            return 0
+
         mock_ax = MagicMock()
         mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
-        mock_ax.AXUIElementCopyAttributeValue = MagicMock(return_value=(0, fake_focused))
-        mock_ax.AXUIElementSetAttributeValue = MagicMock(return_value=0)
+        mock_ax.AXUIElementCopyAttributeValue = MagicMock(side_effect=_copy)
+        mock_ax.AXUIElementSetAttributeValue = MagicMock(side_effect=_set)
+        return mock_ax
+
+    def test_injects_into_axtextfield(self):
+        """Returns True for AXTextField: set succeeds and read-back verify sees the text."""
+        snap = _make_snap("AXTextField")
+        state = {"val": ""}
+        mock_ax = self._stateful_ax_field(object(), state)
         with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
             result = _ax_inject_text(snap, "hello")
         assert result is True
+        assert "hello" in state["val"]  # DEF-192: value actually stuck
 
     def test_injects_into_axtextarea(self):
-        """Returns True for AXTextArea with successful AXUIElementSetAttributeValue."""
+        """Returns True for AXTextArea: set succeeds and read-back verify sees the text."""
         snap = _make_snap("AXTextArea")
-        fake_focused = object()
-        mock_ax = MagicMock()
-        mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
-        mock_ax.AXUIElementCopyAttributeValue = MagicMock(return_value=(0, fake_focused))
-        mock_ax.AXUIElementSetAttributeValue = MagicMock(return_value=0)
+        state = {"val": ""}
+        mock_ax = self._stateful_ax_field(object(), state)
         with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
             result = _ax_inject_text(snap, "hello")
         assert result is True
+        assert "hello" in state["val"]  # DEF-192: value actually stuck
+
+    def test_verify_fail_restores_and_returns_false(self):
+        """DEF-192: if the read-back verify never sees the text, restore prior value + False.
+
+        This is the hard guard against the old Conductor bug where AXValue set
+        returned err=0 but the value didn't take.
+        """
+        snap = _make_snap("AXTextArea")
+        fake_focused = object()
+        set_calls = []
+
+        def _copy(el, attr, _):
+            if attr == "AXFocusedUIElement":
+                return (0, fake_focused)
+            if attr == "AXValue":
+                return (0, "")  # read-back never contains the text → verify fails
+            return (0, None)
+
+        def _set(el, attr, val):
+            if attr == "AXValue":
+                set_calls.append(val)
+            return 0
+
+        mock_ax = MagicMock()
+        mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
+        mock_ax.AXUIElementCopyAttributeValue = MagicMock(side_effect=_copy)
+        mock_ax.AXUIElementSetAttributeValue = MagicMock(side_effect=_set)
+        with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
+            result = _ax_inject_text(snap, "hello")
+        assert result is False
+        assert set_calls[-1] == ""  # prior (empty) value restored, no lingering insert
 
     def test_skips_webarea(self):
         """Returns False for AXWebArea — not a native text field."""

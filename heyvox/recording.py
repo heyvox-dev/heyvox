@@ -1218,6 +1218,7 @@ class RecordingStateMachine:
                         # — fix for the PTT double-paste-then-send bug.
                         paste_ok = app_fast_paste(
                             profile, paste_text, enter_count=combined_enter,
+                            snap=recording_target,  # DEF-192: enables AX fast-path
                         )
                     else:
                         injection_cfg = getattr(self.config, "injection", None)
