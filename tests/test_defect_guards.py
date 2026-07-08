@@ -2081,3 +2081,44 @@ def test_def193_torch_suppressor_opt_out_via_env():
     assert "active=False" in result, result
     assert "blocks=False" in result, result
     assert "filtered=False" in result, result
+
+
+# ---------------------------------------------------------------------------
+# DEF-194: TTS spoke raw markdown ("asterisk"/"backtick"/"backslash") from
+# prose spliced between literal <tts> mentions (backtick-wrapped) whenever a
+# response discussed the TTS mechanism. Strip code spans before matching;
+# scrub markup from the final speech.
+# ---------------------------------------------------------------------------
+
+def test_def194_extraction_ignores_literal_tts_in_backticks():
+    """A response mentioning `<tts>` literally (in backticks) plus a real
+    block must extract ONLY the real block — no prose fragment with markdown."""
+    from heyvox.herald.worker import HeraldWorker
+
+    w = HeraldWorker.__new__(HeraldWorker)
+    resp = (
+        "Der Worker nutzt `^<tts>(.*?)</tts>` mit **DOTALL**.\n"
+        "Meine `<tts>`-Blöcke sind `immer` Englisch.\n\n"
+        "<tts>This is the real English speech.</tts>"
+    )
+    assert w._extract_tts_blocks(resp) == ["This is the real English speech."]
+
+
+def test_def194_multiple_real_inline_blocks_not_regressed():
+    """Genuine inline multi-block extraction must still work (no backticks)."""
+    from heyvox.herald.worker import HeraldWorker
+
+    w = HeraldWorker.__new__(HeraldWorker)
+    assert w._extract_tts_blocks(
+        "<tts>Hello</tts> other <tts>World</tts>"
+    ) == ["Hello", "World"]
+
+
+def test_def194_strip_speech_markup_removes_spoken_symbols():
+    """Markdown/escape marks are removed so TTS never voices them literally."""
+    from heyvox.herald.tts_helpers import strip_speech_markup
+
+    out = strip_speech_markup("say **bold** and `code`, path a\\b, # heading")
+    for ch in "*`\\#":
+        assert ch not in out, (ch, out)
+    assert "bold" in out and "code" in out and "heading" in out

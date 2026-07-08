@@ -51,6 +51,8 @@ from heyvox.herald.tts_helpers import (
     MOOD_VOICES,
     detect_mood,
     get_verbosity as _shared_get_verbosity,
+    strip_code_spans,
+    strip_speech_markup,
 )
 
 # DEF-120 root cause: when this module runs as `python -m heyvox.herald.worker`
@@ -362,7 +364,10 @@ class HeraldWorker:
             )
             return True
 
-        speech = texts[-1].strip()
+        # DEF-194: strip residual markdown/escape marks so Kokoro never voices
+        # "asterisk"/"backtick"/"backslash" literally, even if a real block
+        # slipped some in against the "no markdown in <tts>" rule.
+        speech = strip_speech_markup(texts[-1].strip())
 
         # Validate content
         if not speech or speech == "SKIP" or len(speech) < 5:
@@ -464,21 +469,18 @@ class HeraldWorker:
     # ------------------------------------------------------------------
 
     def _extract_tts_blocks(self, text: str) -> list[str]:
-        """Extract all <tts>...</tts> blocks (DOTALL, multiline).
+        """Extract all <tts>...</tts> blocks (DOTALL).
 
+        DEF-194: strip markdown code (fenced ```blocks``` and inline `spans`)
+        BEFORE matching. When the assistant explains the TTS mechanism it
+        writes `<tts>`/`</tts>` literally inside backticks; the old matcher
+        (anchored-first, then widened to every non-anchored match) spliced the
+        prose between two such literals into speech, so Kokoro read raw
+        markdown aloud. Real <tts> blocks are never wrapped in code
+        formatting, so removing code spans leaves only genuine blocks — and
+        the plain matcher still handles multiple inline blocks (see tests).
         """
-        # Try anchored form first (at start of line, as Claude often emits)
-        matches = re.findall(r"^<tts>(.*?)</tts>", text, re.DOTALL | re.MULTILINE)
-        if not matches:
-            # Fallback: anywhere in text (handles same-line and inline blocks)
-            matches = re.findall(r"<tts>(.*?)</tts>", text, re.DOTALL)
-        else:
-            # Even if anchored matched some, also get any non-anchored ones
-            # to handle mixed content (like tests with both anchored and inline)
-            all_matches = re.findall(r"<tts>(.*?)</tts>", text, re.DOTALL)
-            if len(all_matches) > len(matches):
-                matches = all_matches
-        return matches
+        return re.findall(r"<tts>(.*?)</tts>", strip_code_spans(text), re.DOTALL)
 
     def _select_voice(self, mood: str, lang: str, lang_voice: str | None) -> str:
         """Select TTS voice name from mood + language + agent context.

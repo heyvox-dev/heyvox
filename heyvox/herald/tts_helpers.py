@@ -148,6 +148,37 @@ def apply_verbosity(text: str, verbosity: str) -> Optional[str]:
 
 _TTS_BLOCK_RE = re.compile(r"<tts>(.*?)</tts>", re.DOTALL)
 
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+_SPEECH_MARKUP_RE = re.compile(r"[*`#\\]")
+
+
+def strip_code_spans(text: str) -> str:
+    """Remove markdown code (fenced blocks + inline `spans`) from text.
+
+    DEF-194: when the assistant explains the TTS mechanism it writes
+    ``<tts>``/``</tts>`` literally inside backticks. Matching
+    ``<tts>...</tts>`` anywhere then spliced the prose between two such
+    literals into the spoken text, so Kokoro voiced raw markdown aloud
+    ("backtick", "asterisk", "backslash"). Real <tts> blocks are never
+    wrapped in code formatting, so dropping code spans first leaves only
+    genuine blocks.
+    """
+    text = _CODE_FENCE_RE.sub("", text)
+    return _INLINE_CODE_RE.sub("", text)
+
+
+def strip_speech_markup(text: str) -> str:
+    """Strip markdown/escape marks a TTS engine would mis-voice (DEF-194).
+
+    Fenced code is dropped (code isn't speech); stray emphasis, heading,
+    backtick and backslash characters are removed so Kokoro never reads
+    "asterisk"/"backtick"/"backslash" literally. Word content is kept.
+    """
+    text = _CODE_FENCE_RE.sub("", text)
+    text = _SPEECH_MARKUP_RE.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
 
 def extract_last_tts_block(
     text: str,
@@ -174,6 +205,7 @@ def extract_last_tts_block(
     """
     if not text:
         return None
+    text = strip_code_spans(text)  # DEF-194: drop literal `<tts>` mentions in code
     matches = _TTS_BLOCK_RE.findall(text)
     if not matches:
         return None
@@ -192,6 +224,8 @@ def extract_last_tts_block(
 
 __all__ = [
     "MOOD_VOICES",
+    "strip_code_spans",
+    "strip_speech_markup",
     "DEFAULT_VOICE",
     "ALERT_WORDS",
     "CHEERFUL_WORDS",
