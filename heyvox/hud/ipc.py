@@ -6,6 +6,7 @@ Protocol: newline-delimited JSON messages over a Unix domain socket.
 
 Message types:
 - {"type": "state", "state": "idle|listening|processing|speaking"}
+  Optional for processing: {"audio_secs": float, "estimate_secs": float, "warm": bool}
 - {"type": "audio_level", "level": 0.0-1.0}
 - {"type": "transcript", "text": "..."}
 - {"type": "tts_start", "text": "..."}

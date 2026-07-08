@@ -22,6 +22,7 @@ import json
 import os
 import signal
 import sys
+import time
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,7 @@ from heyvox.constants import HUD_POSITION_FILE as POSITION_FILE  # Persists user
 _MENU_BAR_ONLY = False  # Set by main() — when True, only show menu bar icon, no pill
 _LAST_STATE = "idle"    # DEF-135: last state applied; lets the overlay-mode toggle re-apply it
 _REAPPLY_STATE = None   # DEF-135: set by main() — re-applies _LAST_STATE to pill + menu bar
+_PROCESSING_TIMER = None
 
 _MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.png")
 
@@ -148,6 +150,126 @@ def _save_position(x, y):
             json.dump({"x": x, "y": y}, f)
     except OSError:
         pass
+
+
+def _estimate_transcription_secs(audio_secs, warm=True):
+    """Return a conservative HUD-only ETA for local STT.
+
+    Whisper/MLX does not expose streaming progress here, so this is an
+    expectation based on clip duration and whether the model was already warm.
+    The UI caps progress below 100% until the transcript actually arrives.
+    """
+    try:
+        audio_secs = float(audio_secs or 0.0)
+    except (TypeError, ValueError):
+        audio_secs = 0.0
+    if warm is None:
+        warm = True
+    base = 0.9 if warm else 3.5
+    per_second = 0.22 if warm else 0.34
+    return max(1.4, min(45.0, base + audio_secs * per_second))
+
+
+def _processing_progress_snapshot(started_at, estimate_secs, now=None):
+    """Return (progress, remaining_secs) for the processing HUD.
+
+    Progress intentionally tops out at 95% until transcription completes, so the
+    indicator never claims success while the blocking STT call is still running.
+    """
+    now = time.time() if now is None else now
+    try:
+        estimate_secs = float(estimate_secs or 0.0)
+    except (TypeError, ValueError):
+        estimate_secs = 0.0
+    estimate_secs = max(0.1, estimate_secs)
+    elapsed = max(0.0, now - started_at)
+    progress = min(0.95, elapsed / estimate_secs)
+    remaining = max(1, int(round(max(0.0, estimate_secs - elapsed))))
+    return progress, remaining
+
+
+def _processing_progress_label(progress, remaining_secs):
+    pct = int(round(max(0.0, min(0.95, progress)) * 100))
+    return f"{pct}%  ~{remaining_secs}s"
+
+
+def _processing_status_title(progress):
+    pct = int(round(max(0.0, min(1.0, progress)) * 100))
+    return f"\U0001f7e1 {pct}%"
+
+
+def _set_processing_status_progress(status_item, progress, remaining_secs):
+    if status_item is None:
+        return
+    try:
+        status_item.setLength_(64)
+        btn = status_item.button()
+        btn.setImage_(None)
+        btn.setTitle_(_processing_status_title(progress))
+        btn.setToolTip_(f"Transcribing, about {remaining_secs}s remaining")
+    except Exception:
+        pass
+
+
+def _set_processing_progress(processing_views, progress):
+    if not processing_views:
+        return
+    track_view, fill_view = processing_views
+    track_view.setHidden_(False)
+    fill_view.setHidden_(False)
+    track_frame = track_view.frame()
+    fill_w = max(2.0, track_frame.size.width * max(0.0, min(1.0, progress)))
+    fill_view.setFrame_(((0, 0), (fill_w, track_frame.size.height)))
+
+
+def _hide_processing_progress(processing_views):
+    if not processing_views:
+        return
+    track_view, fill_view = processing_views
+    track_view.setHidden_(True)
+    fill_view.setHidden_(True)
+
+
+def _stop_processing_progress(processing_views=None):
+    global _PROCESSING_TIMER
+    if _PROCESSING_TIMER is not None:
+        try:
+            _PROCESSING_TIMER.invalidate()
+        except Exception:
+            pass
+        _PROCESSING_TIMER = None
+    _hide_processing_progress(processing_views)
+
+
+def _start_processing_progress(
+    transcript_label, processing_views, estimate_secs, status_item=None,
+):
+    global _PROCESSING_TIMER
+    from Foundation import NSTimer
+
+    _stop_processing_progress(processing_views)
+    started_at = time.time()
+    try:
+        estimate_secs = float(estimate_secs or 0.1)
+    except (TypeError, ValueError):
+        estimate_secs = 0.1
+    estimate_secs = max(0.1, estimate_secs)
+
+    def _tick(timer):
+        if _LAST_STATE != "processing":
+            _stop_processing_progress(processing_views)
+            return
+        progress, remaining = _processing_progress_snapshot(started_at, estimate_secs)
+        transcript_label.setStringValue_(
+            _processing_progress_label(progress, remaining)
+        )
+        _set_processing_progress(processing_views, progress)
+        _set_processing_status_progress(status_item, progress, remaining)
+
+    _tick(None)
+    _PROCESSING_TIMER = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+        0.2, True, _tick,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -302,10 +424,14 @@ def _apply_state(
     transcript_label,
     tts_controls,
     color_overlay,
+    processing_progress_views=None,
     idle_label=None,
     tts_text=None,
     status_item=None,
     update_status_menu=None,
+    processing_audio_secs=None,
+    processing_estimate_secs=None,
+    processing_warm=True,
 ):
     """Apply HUD visual state on the main thread.
 
@@ -319,6 +445,9 @@ def _apply_state(
     # un-painted window.
     global _LAST_STATE
     _LAST_STATE = state_str
+
+    if state_str != "processing":
+        _stop_processing_progress(processing_progress_views)
 
     # Update menu bar status icon + label
     _STATUS_LABELS = {
@@ -550,8 +679,20 @@ def _apply_state(
     label_visible = state_str in ("processing", "speaking")
     transcript_label.setHidden_(not label_visible)
     if state_str == "processing":
-        transcript_label.setStringValue_("Transcribing...")
+        transcript_label.setFrame_(((4, 10), (PILL_W - 8, 14)))
+        estimate_secs = processing_estimate_secs
+        if estimate_secs is None:
+            estimate_secs = _estimate_transcription_secs(
+                processing_audio_secs, warm=processing_warm,
+            )
+        _start_processing_progress(
+            transcript_label,
+            processing_progress_views,
+            estimate_secs,
+            status_item,
+        )
     elif state_str == "speaking" and tts_text:
+        transcript_label.setFrame_(((4, 1), (PILL_W - 48, PILL_H - 2)))
         snippet = tts_text[:40] + "..." if len(tts_text) > 40 else tts_text
         transcript_label.setStringValue_(snippet)
 
@@ -569,7 +710,18 @@ def _apply_state(
 # NSObject dispatcher for thread-safe UI updates
 # ---------------------------------------------------------------------------
 
-def _make_dispatcher_class(window, content_view, waveform_view, transcript_label, tts_controls, color_overlay, idle_label=None, status_item=None, update_status_menu=None):
+def _make_dispatcher_class(
+    window,
+    content_view,
+    waveform_view,
+    transcript_label,
+    tts_controls,
+    color_overlay,
+    processing_progress_views=None,
+    idle_label=None,
+    status_item=None,
+    update_status_menu=None,
+):
     """Build a _Dispatcher NSObject that applies incoming IPC messages."""
     from Foundation import NSObject
 
@@ -591,9 +743,13 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                 _apply_state(
                     state, window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
+                    processing_progress_views=processing_progress_views,
                     idle_label=idle_label, tts_text=text,
                     status_item=status_item,
                     update_status_menu=update_status_menu,
+                    processing_audio_secs=msg_dict.get("audio_secs"),
+                    processing_estimate_secs=msg_dict.get("estimate_secs"),
+                    processing_warm=msg_dict.get("warm", True),
                 )
 
             elif msg_type == "audio_level":
@@ -601,6 +757,9 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                 waveform_view.setLevel_(level)
 
             elif msg_type == "transcript":
+                _set_processing_progress(processing_progress_views, 1.0)
+                _set_processing_status_progress(status_item, 1.0, 0)
+                _stop_processing_progress(processing_progress_views)
                 text = msg_dict.get("text", "")
                 transcript_label.setStringValue_(text)
                 transcript_label.setHidden_(False)
@@ -610,6 +769,7 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                 _apply_state(
                     "speaking", window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
+                    processing_progress_views=processing_progress_views,
                     idle_label=idle_label, tts_text=text,
                     status_item=status_item, update_status_menu=update_status_menu,
                 )
@@ -618,6 +778,7 @@ def _make_dispatcher_class(window, content_view, waveform_view, transcript_label
                 _apply_state(
                     "idle", window, content_view,
                     waveform_view, transcript_label, tts_controls, color_overlay,
+                    processing_progress_views=processing_progress_views,
                     idle_label=idle_label,
                     status_item=status_item, update_status_menu=update_status_menu,
                 )
@@ -1896,6 +2057,27 @@ def main(menu_bar_only: bool = False):
     transcript_label.setHidden_(True)
     content_view.addSubview_(transcript_label)
 
+    # ---- Processing progress bar (estimated; hidden outside STT) ----
+    progress_track = NSView.alloc().initWithFrame_(((8, 5), (PILL_W - 16, 3)))
+    progress_track.setWantsLayer_(True)
+    progress_track.layer().setCornerRadius_(1.5)
+    progress_track.layer().setMasksToBounds_(True)
+    progress_track.setBackgroundColor_(
+        NSColor.whiteColor().colorWithAlphaComponent_(0.25)
+    )
+    progress_track.setHidden_(True)
+    progress_fill = NSView.alloc().initWithFrame_(((0, 0), (2, 3)))
+    progress_fill.setWantsLayer_(True)
+    progress_fill.layer().setCornerRadius_(1.5)
+    progress_fill.layer().setMasksToBounds_(True)
+    progress_fill.setBackgroundColor_(
+        NSColor.whiteColor().colorWithAlphaComponent_(0.9)
+    )
+    progress_fill.setHidden_(True)
+    progress_track.addSubview_(progress_fill)
+    content_view.addSubview_(progress_track)
+    processing_progress_views = (progress_track, progress_fill)
+
     # ---- Idle label (brand glyph + "HeyVox" centered in idle pill) ----
     NSFont = __import__("AppKit", fromlist=["NSFont"]).NSFont
     idle_label_h = 18
@@ -2024,6 +2206,7 @@ def main(menu_bar_only: bool = False):
     # ---- Dispatcher (thread-safe UI updates) ----
     DispatcherClass = _make_dispatcher_class(
         window, content_view, waveform_view, transcript_label, tts_controls, color_overlay,
+        processing_progress_views=processing_progress_views,
         idle_label=idle_label,
         status_item=status_item, update_status_menu=_update_status_menu,
     )
@@ -2051,6 +2234,7 @@ def main(menu_bar_only: bool = False):
     _apply_state(
         "idle", window, content_view, waveform_view,
         transcript_label, tts_controls, color_overlay,
+        processing_progress_views=processing_progress_views,
         idle_label=idle_label,
         status_item=status_item, update_status_menu=_update_status_menu,
     )

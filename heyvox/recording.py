@@ -527,7 +527,18 @@ class RecordingStateMachine:
 
         _stop_t0 = time.time()
         self._log("Stopping recording...")
-        self._hud_send({"type": "state", "state": "processing"})
+        _processing_msg = {
+            "type": "state",
+            "state": "processing",
+            "audio_secs": round(duration, 1),
+        }
+        try:
+            if self.config.stt.backend == "local":
+                from heyvox.audio.stt import model_loaded as _mlx_model_loaded
+                _processing_msg["warm"] = _mlx_model_loaded()
+        except Exception:
+            pass
+        self._hud_send(_processing_msg)
 
         # Zombie stream detection: track consecutive failed recordings (AUDIO-12)
         if len(recorded_chunks) == 0:

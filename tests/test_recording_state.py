@@ -387,6 +387,46 @@ def test_stop_passes_raw_wav_path_kwarg_to_send_local(isolate_flags):
     assert "raw_wav_path" in captured
 
 
+def test_stop_processing_hud_includes_progress_metadata(isolate_flags):
+    """The processing HUD state should carry enough data for an estimated ETA."""
+    import numpy as np
+
+    ctx = AppContext()
+    config = MagicMock()
+    config.min_recording_secs = 0.5
+    config.cues_dir = None
+    config.stt.backend = "local"
+    config.audio.sample_rate = 16000
+    config.audio.chunk_size = 1280
+
+    hud_messages = []
+    rsm = RecordingStateMachine(
+        ctx=ctx, config=config, log_fn=lambda s: None, hud_send=hud_messages.append
+    )
+    ctx.is_recording = True
+    ctx.recording_start_time = time.time() - 5.0
+    ctx.triggered_by_ptt = False
+    ctx.handsfree = False
+    ctx.recording_target = object()
+    ctx.audio_buffer = [np.full(1280, 800, dtype=np.int16) for _ in range(100)]
+
+    with patch.object(rsm, "_send_local"), \
+         patch("heyvox.recording.threading.Thread", _SyncThread), \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.ipc.update_state"), \
+         patch("heyvox.audio.stt.model_loaded", return_value=True), \
+         patch("heyvox.recording._save_debug_audio", return_value=None):
+        rsm.stop()
+
+    processing = next(
+        msg for msg in hud_messages
+        if msg.get("type") == "state" and msg.get("state") == "processing"
+    )
+    assert processing["audio_secs"] >= 4.0
+    assert processing["warm"] is True
+
+
 def _send_local_garbled_config():
     config = MagicMock()
     config.cues_dir = None
