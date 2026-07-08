@@ -539,6 +539,14 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     if not pid:
         return False
 
+    # Guard the unverified >2040-char AXUIElementSetAttributeValue EXC_BAD_ACCESS
+    # report (an EXC would kill the daemon): cap the AX path to safe lengths;
+    # long transcripts take the osascript Cmd+V fallback (rare — 2000 chars is
+    # ~400 words). Remove once long-text is validated.
+    if len(text) > 2000:
+        _log(f"AX conductor: text too long ({len(text)} chars) — deferring to osascript")
+        return False
+
     # 1. Focus the chat field. Per project_set_frontmost_focus_disruption, an
     #    unnecessary `set frontmost` on an ALREADY-frontmost Electron app costs a
     #    ~300-450ms activation cycle AND resets the web-view focus. So this fast
