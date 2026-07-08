@@ -1219,6 +1219,10 @@ class RecordingStateMachine:
                         paste_ok = app_fast_paste(
                             profile, paste_text, enter_count=combined_enter,
                             snap=recording_target,  # DEF-192: enables AX fast-path
+                            ax_conductor=getattr(
+                                getattr(self.config, "injection", None),
+                                "ax_conductor", False,
+                            ),
                         )
                     else:
                         injection_cfg = getattr(self.config, "injection", None)

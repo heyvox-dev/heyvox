@@ -1009,7 +1009,8 @@ def focus_input(app_name: str, shortcuts: dict[str, str] | None = None) -> None:
         )
 
 
-def app_fast_paste(profile, text: str, enter_count: int | None = None, snap=None) -> bool:
+def app_fast_paste(profile, text: str, enter_count: int | None = None, snap=None,
+                   ax_conductor: bool = False) -> bool:
     """One-shot paste using profile-driven shortcuts: focus-shortcut -> Cmd+V -> Enter*N.
 
     Combines focus + paste + Enter into a single osascript subprocess call
@@ -1023,11 +1024,13 @@ def app_fast_paste(profile, text: str, enter_count: int | None = None, snap=None
         enter_count: Optional override for the number of Enter presses.
             Pass 0 to suppress auto-send (e.g. PTT mode). Pass None to use
             profile.enter_count (the wake-word default).
-        snap: Optional TargetLock from record-start. When set AND
-            HEYVOX_AX_CONDUCTOR is enabled AND the lock is a workspace-managed
-            Electron app (conductor_workspace_id), the AX fast-path is tried
-            first (mouse-independent, no Electron settle_delay), falling back to
-            the osascript Cmd+V path below on any failure. DEF-192.
+        snap: Optional TargetLock from record-start. When set AND the AX path is
+            enabled AND the lock is a workspace-managed Electron app
+            (conductor_workspace_id), the AX fast-path is tried first
+            (mouse-independent, no Electron settle_delay), falling back to the
+            osascript Cmd+V path below on any failure. DEF-192.
+        ax_conductor: Enable the AX fast-path (from config.injection.ax_conductor).
+            The HEYVOX_AX_CONDUCTOR env var OR-overrides it for quick testing.
 
     Returns True on success, False on failure.
 
@@ -1067,7 +1070,7 @@ def app_fast_paste(profile, text: str, enter_count: int | None = None, snap=None
     # path below on any failure — the clipboard is already set as the fallback.
     if (
         snap is not None
-        and os.environ.get("HEYVOX_AX_CONDUCTOR")
+        and (ax_conductor or os.environ.get("HEYVOX_AX_CONDUCTOR"))
         and getattr(snap, "conductor_workspace_id", None)
     ):
         if _ax_conductor_paste(profile, text, effective_enter_count, snap):

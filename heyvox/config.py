@@ -472,6 +472,12 @@ class InjectionConfig(BaseModel):
         "iTerm2": 0.03,
         "Terminal": 0.03,
     }
+    # DEF-192: enable the mouse-independent AX fast-path for workspace-managed
+    # Electron (Conductor) — sets the value via Accessibility + in-process
+    # CGEvent keystrokes instead of the osascript Cmd+V path (~1036ms → ~130ms).
+    # Off by default (still validating long text / non-US layouts); the
+    # HEYVOX_AX_CONDUCTOR env var OR-overrides this for quick testing.
+    ax_conductor: bool = False
 
 
 class EchoSuppressionConfig(BaseModel):
