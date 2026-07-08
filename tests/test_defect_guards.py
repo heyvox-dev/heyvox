@@ -1521,6 +1521,53 @@ def test_def104_main_loop_wires_hotplug_check():
     )
 
 
+def test_def104_manual_usb_cache_miss_bypasses_bt_hfp_probe():
+    # File-text inspection (no pyaudio import): when the user manually selects a
+    # USB/Lightspeed mic that CoreAudio already sees but PortAudio's cached list
+    # does not, DeviceManager must request the DEF-104 restart directly. Treating
+    # that state as "likely BT A2DP" causes repeated HFP probes and visible
+    # fallback to the built-in mic before the later periodic hotplug check fires.
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "device_manager.py")).read()
+    assert "_is_coreaudio_live_portaudio_miss" in src, (
+        "DEF-104: manual mic switch must distinguish USB PA-cache misses from "
+        "Bluetooth A2DP no-input states"
+    )
+    assert "get_live_input_device_names" in src, (
+        "DEF-104: manual cache-miss detection must consult live CoreAudio input names"
+    )
+    assert "get_bluetooth_input_device_names" in src, (
+        "DEF-147: manual cache-miss detection must exclude Bluetooth before restart"
+    )
+    manual_start = src.find("if requested_name:")
+    manual_end = src.find("# Check if the default output device changed", manual_start)
+    manual_block = src[manual_start:manual_end]
+    hfp_idx = manual_block.find("triggering HFP switch")
+    restart_idx = manual_block.find("_request_hotplug_restart")
+    assert manual_start != -1 and manual_end != -1
+    assert restart_idx != -1 and hfp_idx != -1
+    assert restart_idx < hfp_idx, (
+        "DEF-104: manual USB/Lightspeed cache miss must request restart before "
+        "falling through to the Bluetooth HFP probe"
+    )
+
+
+def test_def104_main_loop_honors_manual_hotplug_restart_request():
+    import os
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    assert "pop_hotplug_restart_request" in src, (
+        "DEF-104: DeviceManager's manual hotplug restart request must be consumed"
+    )
+    assert "_restart_for_hotplug_candidate(" in src, (
+        "DEF-104: manual cache-miss request must reuse the guarded restart helper"
+    )
+    request_idx = src.find("pop_hotplug_restart_request")
+    restart_idx = src.find("_restart_for_hotplug_candidate(", request_idx)
+    assert request_idx != -1 and restart_idx != -1 and request_idx < restart_idx
+
+
 # ---------------------------------------------------------------------------
 # DEF-101: per-mic software capture gain (BT-HFP G435 low-level workaround)
 #
@@ -1970,3 +2017,67 @@ def test_def191_ratio_guard_keeps_coherent_slow_stt():
     ) is True
     # Short output + slow -> discarded.
     assert is_garbled("k nud so", stt_secs=6.0, audio_secs=11.0) is True
+
+
+# ---------------------------------------------------------------------------
+# DEF-193: torch is dead weight in the Kokoro daemon — thinc eager-imports it
+# (via misaki.en -> spacy for English g2p) but the MLX path never uses it.
+# torch_suppressor blocks it in-process. Guard the suppressor mechanics so a
+# refactor can't silently stop blocking torch and re-inflate the daemon ~230MB.
+# ---------------------------------------------------------------------------
+
+def _run_torch_suppressor_probe(env_extra=None):
+    """Run the suppressor in a fresh interpreter and report its effect.
+
+    A subprocess is required: the suppressor mutates process-global state
+    (sys.meta_path + importlib.metadata.entry_points) that would leak into
+    other tests. Uses the finder's own find_spec() so the assertion holds
+    whether or not torch is actually installed in the test env (CI has none).
+    """
+    code = (
+        "import sys\n"
+        "from heyvox.herald.torch_suppressor import "
+        "install_torch_suppressor, _TorchBlockingFinder\n"
+        "active = install_torch_suppressor()\n"
+        "finder = next((f for f in sys.meta_path "
+        "if isinstance(f, _TorchBlockingFinder)), None)\n"
+        "blocks = False\n"
+        "if finder is not None:\n"
+        "    try:\n"
+        "        finder.find_spec('torch', None)\n"
+        "    except ModuleNotFoundError:\n"
+        "        blocks = True\n"
+        "passes = finder.find_spec('json', None) is None if finder else False\n"
+        "import importlib.metadata as md\n"
+        "filtered = getattr(md.entry_points, '_kokoro_filtered', False)\n"
+        "print(f'active={active} blocks={blocks} passes={passes} filtered={filtered}')\n"
+    )
+    env = dict(os.environ)
+    if env_extra:
+        env.update(env_extra)
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert out.returncode == 0, f"probe failed: {out.stderr}"
+    return out.stdout.strip()
+
+
+def test_def193_torch_suppressor_blocks_torch_and_hides_curated():
+    """Default: torch import blocked, non-torch deferred, curated eps hidden."""
+    result = _run_torch_suppressor_probe()
+    assert "active=True" in result, result
+    assert "blocks=True" in result, result   # import torch -> ModuleNotFoundError
+    assert "passes=True" in result, result   # non-torch names still resolve
+    assert "filtered=True" in result, result  # entry_points wrapper installed
+
+
+def test_def193_torch_suppressor_opt_out_via_env():
+    """KOKORO_ALLOW_TORCH=1 disables suppression entirely (no finder installed)."""
+    result = _run_torch_suppressor_probe({"KOKORO_ALLOW_TORCH": "1"})
+    assert "active=False" in result, result
+    assert "blocks=False" in result, result
+    assert "filtered=False" in result, result

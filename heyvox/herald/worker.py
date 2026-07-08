@@ -906,11 +906,30 @@ class HeraldWorker:
 
         python_exe = self._find_kokoro_python()
         try:
+            env = os.environ.copy()
+            try:
+                from heyvox.config import load_config
+
+                cfg = load_config()
+                if "KOKORO_IDLE_TIMEOUT" not in env:
+                    idle_timeout = getattr(cfg.tts, "kokoro_idle_timeout", 120)
+                    env["KOKORO_IDLE_TIMEOUT"] = str(idle_timeout)
+                if "KOKORO_WARMUP_VOICES" not in env:
+                    warmup_voice = (
+                        getattr(cfg.tts, "voice_override", None)
+                        or getattr(cfg.tts, "voice", None)
+                    )
+                    if warmup_voice:
+                        env["KOKORO_WARMUP_VOICES"] = warmup_voice
+            except Exception as exc:
+                log.debug("Could not derive Kokoro daemon env from config: %s", exc)
+
             subprocess.Popen(
                 [python_exe, str(daemon_script)],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=open(HERALD_DEBUG_LOG, "a"),
+                env=env,
                 start_new_session=True,
             )
         except OSError as exc:

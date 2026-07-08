@@ -156,6 +156,10 @@ class TTSConfig(BaseModel):
     # Uses macOS MediaRemote to send explicit pause/play commands.
     pause_media: bool = False
 
+    # Kokoro daemon lifecycle. Lower values free MLX/Metal memory sooner after
+    # speech bursts; env KOKORO_IDLE_TIMEOUT still wins for ad-hoc overrides.
+    kokoro_idle_timeout: int = 120
+
     # Allowed output languages.
     #   "auto"           — detect + route freely (default; includes Qwen3 for DE etc.)
     #   ["en-us"]        — English only; foreign text gets demoted to en-us voice
@@ -1083,6 +1087,7 @@ tts:
   min_volume: 0.10         # Minimum TTS playback volume [0.0–1.0]. After ducking, Herald sets
                            # max(your_pre_duck_volume, min_volume). 0.0 = fully respect your slider.
   pause_media: false       # Pause YouTube/Spotify/etc. during TTS, resume after
+  kokoro_idle_timeout: 120 # Seconds before warm Kokoro daemon exits and frees MLX/Metal memory
 
   # Allowed output languages. "auto" = detect + route freely.
   # List form forces a fallback: text in any language not listed is spoken

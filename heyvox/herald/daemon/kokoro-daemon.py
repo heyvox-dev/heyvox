@@ -18,6 +18,7 @@ Fallback: kokoro-onnx (CPU) if mlx-audio is not available.
 """
 
 import fcntl
+import gc
 import json
 import os
 import re
@@ -30,12 +31,28 @@ import wave
 
 import numpy as np
 
+# DEF-193: Block dead torch weight before any TTS import. thinc (pulled in by
+# misaki.en -> spacy for English g2p) eager-imports torch just to probe for a
+# backend the MLX Kokoro path never uses; on the shared venv that maps ~230MB of
+# libtorch into this daemon for nothing. Best-effort — must never break startup.
+# Opt out with KOKORO_ALLOW_TORCH=1.
+try:
+    from heyvox.herald.torch_suppressor import install_torch_suppressor
+
+    install_torch_suppressor()
+except Exception:
+    pass
+
 # User-scoped temp dir (cannot import heyvox.constants — runs as standalone script).
 _TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 
 SOCKET_PATH = f"{_TMP}/kokoro-daemon.sock"
 PID_FILE = f"{_TMP}/kokoro-daemon.pid"
-IDLE_TIMEOUT = int(os.environ.get("KOKORO_IDLE_TIMEOUT", "300"))
+IDLE_TIMEOUT = int(os.environ.get("KOKORO_IDLE_TIMEOUT", "120"))
+MLX_CLEAR_CACHE = os.environ.get("KOKORO_MLX_CLEAR_CACHE", "1").lower() not in {
+    "0", "false", "no", "off",
+}
+MLX_CACHE_LIMIT_MB = os.environ.get("KOKORO_MLX_CACHE_LIMIT_MB")
 
 # Legacy kokoro-onnx paths (used for fallback)
 ONNX_MODEL_PATH = os.path.expanduser("~/.kokoro-tts/kokoro-v1.0.onnx")
@@ -64,6 +81,65 @@ _pid_lock_fd = None
 def log(msg):
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] kokoro-daemon: {msg}", file=sys.stderr, flush=True)
+
+
+def _configured_warmup_voices():
+    """Return Kokoro voices to pre-warm.
+
+    KOKORO_WARMUP_VOICES wins and accepts a comma-separated list. Without it,
+    prefer the configured Kokoro override/default voice instead of compiling all
+    mood voices up front.
+    """
+    env_voices = os.environ.get("KOKORO_WARMUP_VOICES", "").strip()
+    if env_voices:
+        voices = [v.strip() for v in env_voices.split(",") if v.strip()]
+        if voices:
+            return voices
+
+    try:
+        from heyvox.config import load_config
+
+        cfg = load_config()
+        voice = getattr(cfg.tts, "voice_override", None) or getattr(cfg.tts, "voice", None)
+        if voice:
+            return [voice]
+    except Exception as exc:
+        log(f"Could not read configured Kokoro warmup voice: {exc}")
+
+    return ["af_heart"]
+
+
+def _configure_mlx_cache():
+    if not MLX_CACHE_LIMIT_MB:
+        return
+    try:
+        import mlx.core as mx
+
+        limit = max(0, int(MLX_CACHE_LIMIT_MB)) * 1024 * 1024
+        previous = mx.set_cache_limit(limit)
+        limit_mb = limit // 1024 // 1024
+        previous_mb = previous // 1024 // 1024
+        log(f"MLX cache limit set to {limit_mb}MB (was {previous_mb}MB)")
+    except Exception as exc:
+        log(f"Could not set MLX cache limit: {exc}")
+
+
+def _clear_mlx_cache(reason):
+    if not MLX_CLEAR_CACHE or ENGINE != "mlx":
+        return
+    try:
+        import mlx.core as mx
+
+        gc.collect()
+        before = mx.get_cache_memory()
+        mx.clear_cache()
+        after = mx.get_cache_memory()
+        if before:
+            before_mb = before // 1024 // 1024
+            after_mb = after // 1024 // 1024
+            log(f"Cleared MLX cache after {reason}: {before_mb}MB -> {after_mb}MB")
+    except Exception as exc:
+        log(f"Could not clear MLX cache after {reason}: {exc}")
 
 
 # --- Language code mapping ---
@@ -96,16 +172,23 @@ def load_model_mlx():
     """Load Kokoro via mlx-audio (Metal GPU)."""
     log(f"Loading Kokoro via mlx-audio (Metal GPU) [{MLX_MODEL_ID}@{MLX_MODEL_REVISION[:8]}]...")
     t0 = time.time()
+    _configure_mlx_cache()
     from mlx_audio.tts.utils import load_model
     model = load_model(MLX_MODEL_ID, revision=MLX_MODEL_REVISION)
     # Pre-warm: first generate compiles the MLX graph
-    for v in ["af_sarah", "af_heart", "af_nova", "af_sky"]:
+    warmup_voices = _configured_warmup_voices()
+    for v in warmup_voices:
         try:
             for _ in model.generate("warmup", voice=v, speed=1.0, lang_code="a"):
                 pass
         except Exception:
             pass
-    log(f"mlx-audio loaded + warmed 4 voices in {time.time() - t0:.1f}s")
+    _clear_mlx_cache("warmup")
+    warmed = ",".join(warmup_voices)
+    log(
+        f"mlx-audio loaded + warmed {len(warmup_voices)} voice(s) "
+        f"({warmed}) in {time.time() - t0:.1f}s"
+    )
     return model
 
 
@@ -289,10 +372,13 @@ def generate_onnx(model, text, voice, lang, speed, output_path):
 
 
 def generate_tts(model, text, voice, lang, speed, output_path):
-    if ENGINE == "mlx":
-        return generate_mlx(model, text, voice, lang, speed, output_path)
-    else:
-        return generate_onnx(model, text, voice, lang, speed, output_path)
+    try:
+        if ENGINE == "mlx":
+            return generate_mlx(model, text, voice, lang, speed, output_path)
+        else:
+            return generate_onnx(model, text, voice, lang, speed, output_path)
+    finally:
+        _clear_mlx_cache("generation")
 
 
 # --- Client handling ---
