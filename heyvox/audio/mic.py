@@ -11,16 +11,31 @@ import ctypes.util
 import hashlib
 import threading
 import time
-from contextlib import contextmanager
 from typing import Callable
 
 import numpy as np
 import pyaudio
 
 from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
+from heyvox.audio._coreaudio import (
+    _AudioObjectPropertyAddress,
+    _enumerate_coreaudio_inputs,
+    _kAudioHardwarePropertyDefaultInputDevice,
+    _kAudioObjectPropertyElementMain,
+    _kAudioObjectPropertyName,
+    _kAudioObjectPropertyScopeGlobal,
+    _kAudioObjectSystemObject,
+    _kCFStringEncodingUTF8,
+)
 
-# Re-export for use by hotplug scan in main.py
-__all__ = ["find_best_mic", "open_mic_stream", "detect_headset", "get_dead_input_device_names", "clear_device_cooldowns", "clear_device_cooldown", "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic", "mute_output_during_bt_switch", "start_pa_hotplug_watcher", "stop_pa_hotplug_watcher"]
+__all__ = [
+    "find_best_mic", "open_mic_stream", "detect_headset",
+    "get_dead_input_device_names", "get_live_input_device_names",
+    "get_default_input_device_name", "force_os_default_input",
+    "clear_device_cooldowns", "clear_device_cooldown",
+    "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic",
+    "start_pa_hotplug_watcher", "stop_pa_hotplug_watcher",
+]
 
 
 def _log(msg: str) -> None:
@@ -28,42 +43,6 @@ def _log(msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
-
-@contextmanager
-def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
-    """Mute system output while opening a BT mic stream.
-
-    A2DP → HFP profile switches emit a pop/static burst. Muting output during
-    the stream open (and for settle_secs after) hides that artifact.
-
-    Skipped for built-in mics (no profile switch). Silently no-op if volume
-    helpers aren't importable (e.g. during CLI-only invocation).
-    """
-    if is_builtin_mic(device_name):
-        yield
-        return
-
-    _was_muted = None
-    try:
-        from heyvox.herald.coreaudio import is_system_muted, set_system_muted
-        _was_muted = is_system_muted()
-        if not _was_muted:
-            _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' muting output")
-            set_system_muted(True)
-    except Exception:
-        pass
-
-    try:
-        yield
-    finally:
-        if _was_muted is False:
-            time.sleep(settle_secs)
-            try:
-                from heyvox.herald.coreaudio import set_system_muted
-                set_system_muted(False)
-                _log(f"[VOL] mute_output_during_bt_switch: device='{device_name}' unmuted")
-            except Exception:
-                pass
 
 # Built-in mic name substrings — these devices are physically always present
 # and should never be put in cooldown or rejected for low audio levels.
@@ -98,185 +77,8 @@ def _get_adaptive_cooldown(device_key: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# CoreAudio device-alive check (filters disconnected Bluetooth devices)
+# CoreAudio device queries (hotplug detection, alive-check, default input)
 # ---------------------------------------------------------------------------
-
-def _fourcc(s: str) -> int:
-    return int.from_bytes(s.encode("ascii"), byteorder="big")
-
-
-class _AudioObjectPropertyAddress(ctypes.Structure):
-    _fields_ = [
-        ("mSelector", ctypes.c_uint32),
-        ("mScope", ctypes.c_uint32),
-        ("mElement", ctypes.c_uint32),
-    ]
-
-
-_kAudioObjectSystemObject = 1
-_kAudioHardwarePropertyDevices = _fourcc("dev#")
-_kAudioHardwarePropertyDefaultInputDevice = _fourcc("dIn ")
-_kAudioObjectPropertyScopeGlobal = _fourcc("glob")
-_kAudioObjectPropertyScopeInput = _fourcc("inpt")
-_kAudioObjectPropertyElementMain = 0
-_kAudioObjectPropertyName = _fourcc("lnam")
-_kAudioDevicePropertyDeviceIsAlive = _fourcc("livn")
-_kAudioDevicePropertyStreams = _fourcc("stm#")
-_kAudioDevicePropertyTransportType = _fourcc("tran")
-_kAudioDeviceTransportTypeBluetooth = _fourcc("blue")
-_kAudioDeviceTransportTypeBluetoothLE = _fourcc("blea")
-_kCFStringEncodingUTF8 = 0x08000100
-
-
-def _enumerate_coreaudio_inputs() -> list[tuple[str, bool, int]]:
-    """Return ``[(device_name, is_alive, transport)]`` for every CoreAudio
-    device that has input streams. ``transport`` is the CoreAudio transport-type
-    four-char-code (e.g. 'blue' = Bluetooth) used to exclude BT from DEF-104.
-
-    Hits the **live** CoreAudio HAL directly via ctypes, bypassing PortAudio's
-    per-process device cache. That cache is the root of DEF-104: a device
-    hotplugged after the daemon's first PortAudio init is invisible to every
-    PortAudio code path (``get_device_count``, ``find_best_mic``, the hotplug
-    watcher) until the process restarts — but it shows up here immediately.
-    ``get_live_input_device_names`` uses this to detect that exact mismatch.
-
-    Returns ``[]`` if CoreAudio is unavailable (graceful degradation).
-    """
-    try:
-        ca_path = ctypes.util.find_library("CoreAudio")
-        cf_path = ctypes.util.find_library("CoreFoundation")
-        if not ca_path or not cf_path:
-            return []
-
-        ca = ctypes.cdll.LoadLibrary(ca_path)
-        cf = ctypes.cdll.LoadLibrary(cf_path)
-
-        # Setup CFString helpers
-        cf.CFStringGetCStringPtr.restype = ctypes.c_char_p
-        cf.CFStringGetCStringPtr.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        cf.CFStringGetLength.restype = ctypes.c_long
-        cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
-        cf.CFStringGetCString.restype = ctypes.c_bool
-        cf.CFStringGetCString.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32,
-        ]
-        cf.CFRelease.argtypes = [ctypes.c_void_p]
-
-        def cfstr_to_str(cfstr) -> str:
-            if not cfstr:
-                return ""
-            ptr = cf.CFStringGetCStringPtr(cfstr, _kCFStringEncodingUTF8)
-            if ptr:
-                return ptr.decode("utf-8")
-            length = cf.CFStringGetLength(cfstr) * 4 + 1
-            buf = ctypes.create_string_buffer(length)
-            if cf.CFStringGetCString(cfstr, buf, length, _kCFStringEncodingUTF8):
-                return buf.value.decode("utf-8")
-            return ""
-
-        # Get all device IDs
-        addr = _AudioObjectPropertyAddress(
-            _kAudioHardwarePropertyDevices,
-            _kAudioObjectPropertyScopeGlobal,
-            _kAudioObjectPropertyElementMain,
-        )
-        size = ctypes.c_uint32(0)
-        status = ca.AudioObjectGetPropertyDataSize(
-            ctypes.c_uint32(_kAudioObjectSystemObject), ctypes.byref(addr),
-            ctypes.c_uint32(0), None, ctypes.byref(size),
-        )
-        if status != 0 or size.value == 0:
-            return set()
-
-        buf = (ctypes.c_char * size.value)()
-        io_size = ctypes.c_uint32(size.value)
-        status = ca.AudioObjectGetPropertyData(
-            ctypes.c_uint32(_kAudioObjectSystemObject), ctypes.byref(addr),
-            ctypes.c_uint32(0), None, ctypes.byref(io_size), buf,
-        )
-        if status != 0:
-            return set()
-
-        device_count = io_size.value // 4
-        device_ids = [
-            int.from_bytes(bytes(buf)[i * 4:(i + 1) * 4], byteorder="little")
-            for i in range(device_count)
-        ]
-
-        results: list[tuple[str, bool, int]] = []
-        for did in device_ids:
-            # Check if device has input streams
-            stream_addr = _AudioObjectPropertyAddress(
-                _kAudioDevicePropertyStreams,
-                _kAudioObjectPropertyScopeInput,
-                _kAudioObjectPropertyElementMain,
-            )
-            stream_size = ctypes.c_uint32(0)
-            status = ca.AudioObjectGetPropertyDataSize(
-                ctypes.c_uint32(did), ctypes.byref(stream_addr),
-                ctypes.c_uint32(0), None, ctypes.byref(stream_size),
-            )
-            if status != 0 or stream_size.value == 0:
-                continue  # Not an input device
-
-            # Check DeviceIsAlive
-            alive_addr = _AudioObjectPropertyAddress(
-                _kAudioDevicePropertyDeviceIsAlive,
-                _kAudioObjectPropertyScopeGlobal,
-                _kAudioObjectPropertyElementMain,
-            )
-            alive_val = ctypes.c_uint32(0)
-            alive_size = ctypes.c_uint32(4)
-            status = ca.AudioObjectGetPropertyData(
-                ctypes.c_uint32(did), ctypes.byref(alive_addr),
-                ctypes.c_uint32(0), None, ctypes.byref(alive_size),
-                ctypes.byref(alive_val),
-            )
-            if status != 0:
-                continue
-            is_alive = alive_val.value != 0
-
-            # Fetch the name for EVERY input device (the original code only
-            # named dead ones; live detection needs names for live ones too).
-            name_addr = _AudioObjectPropertyAddress(
-                _kAudioObjectPropertyName,
-                _kAudioObjectPropertyScopeGlobal,
-                _kAudioObjectPropertyElementMain,
-            )
-            cfstr = ctypes.c_void_p(0)
-            name_size = ctypes.c_uint32(ctypes.sizeof(cfstr))
-            status = ca.AudioObjectGetPropertyData(
-                ctypes.c_uint32(did), ctypes.byref(name_addr),
-                ctypes.c_uint32(0), None, ctypes.byref(name_size),
-                ctypes.byref(cfstr),
-            )
-            if status == 0 and cfstr.value:
-                name = cfstr_to_str(cfstr.value)
-                cf.CFRelease(cfstr)
-                if name:
-                    # Transport type (four-char-code) — used to exclude
-                    # Bluetooth mics from the DEF-104 self-restart (DEF-147).
-                    transport = 0
-                    trans_addr = _AudioObjectPropertyAddress(
-                        _kAudioDevicePropertyTransportType,
-                        _kAudioObjectPropertyScopeGlobal,
-                        _kAudioObjectPropertyElementMain,
-                    )
-                    trans_val = ctypes.c_uint32(0)
-                    trans_size = ctypes.c_uint32(4)
-                    if ca.AudioObjectGetPropertyData(
-                        ctypes.c_uint32(did), ctypes.byref(trans_addr),
-                        ctypes.c_uint32(0), None, ctypes.byref(trans_size),
-                        ctypes.byref(trans_val),
-                    ) == 0:
-                        transport = trans_val.value
-                    results.append((name, is_alive, transport))
-
-        return results
-    except Exception as e:
-        _log(f"  CoreAudio enumeration failed: {e}")
-        return []
-
 
 def get_dead_input_device_names() -> set[str]:
     """Return names (lowercase) of CoreAudio input devices that are NOT alive.
@@ -307,32 +109,6 @@ def get_live_input_device_names() -> set[str]:
     no-ops rather than false-firing a restart).
     """
     return {name.lower() for name, alive, _t in _enumerate_coreaudio_inputs() if alive}
-
-
-def get_bluetooth_input_device_names() -> set[str]:
-    """Return names (lowercase) of CoreAudio input devices on a Bluetooth
-    transport (classic BT or BLE).
-
-    DEF-147: the DEF-104 hotplug self-restart must NEVER fire for a Bluetooth
-    mic. A BT-HFP device is chronically "live in CoreAudio but absent from
-    PortAudio" as it flaps between A2DP (output-only) and HFP (bidirectional),
-    so the DEF-104 detector misreads it as a fresh USB hotplug and restarts the
-    daemon — and each restart tears the fragile SCO link apart, killing the mic
-    (the exact regression a user hit: G435 over BT died repeatedly, then was
-    stable the moment HeyVox was stopped). BT has its own A2DP->HFP path
-    (``_bt_trigger_hfp_switch``) and never needs a process restart. Empty set if
-    CoreAudio is unavailable (graceful degradation — the BT exclusion simply
-    doesn't apply, leaving DEF-104's prior behaviour intact).
-    """
-    bt_types = {
-        _kAudioDeviceTransportTypeBluetooth,
-        _kAudioDeviceTransportTypeBluetoothLE,
-    }
-    return {
-        name.lower()
-        for name, _alive, transport in _enumerate_coreaudio_inputs()
-        if transport in bt_types
-    }
 
 
 def get_default_input_device_name() -> str | None:
@@ -768,7 +544,8 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             # Skip this fallback during dead-mic recovery (require_audio=True).
             if rank == 0 and not require_audio and max_level == 0:
                 try:
-                    with mute_output_during_bt_switch(dev_name):
+                    from heyvox.audio.bt import mute_output_during_bt_switch as _mute_bt
+                    with _mute_bt(dev_name):
                         s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
                                     input=True, input_device_index=index, frames_per_buffer=chunk_size)
                         s.close()
