@@ -327,7 +327,7 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
     # A2DP->HFP path (_bt_trigger_hfp_switch) and never needs a process restart;
     # DEF-104 is strictly for USB devices the PortAudio cache missed.
     try:
-        from heyvox.audio.mic import get_bluetooth_input_device_names
+        from heyvox.audio.bt import get_bluetooth_input_device_names
         bt_names = get_bluetooth_input_device_names()
         if any(missed.lower() in n for n in bt_names):
             log(

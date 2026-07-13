@@ -918,9 +918,12 @@ def test_def124_hfp_path_uses_expected_reinit():
     """The BT HFP probe-fallback must call reinit with expected=True so the
     user-visible banners stay quiet when the user is the one who triggered
     the flush."""
-    src = _read_device_manager_src()
+    import heyvox
+    bt_src = open(os.path.join(os.path.dirname(heyvox.__file__), "audio", "bt.py")).read()
+    src = _read_device_manager_src() + bt_src
     # Look for any reinit() call carrying expected=True; the HFP path is
-    # the canonical caller introduced by DEF-124.
+    # the canonical caller introduced by DEF-124. After the BT isolation
+    # refactor (issue #16) this call lives in BtHfpMixin in audio/bt.py.
     assert re.search(r"reinit\([^)]*expected\s*=\s*True", src), (
         "BT HFP probe-fallback (or any expected-reinit caller) must invoke "
         "reinit(expected=True) (DEF-124). Otherwise the misleading "
@@ -1659,7 +1662,7 @@ def test_def147_bluetooth_helper_returns_set():
     # Must import and return a set even with no BT hardware (graceful
     # degradation — empty set, never raises).
     pytest.importorskip("pyaudio")
-    from heyvox.audio.mic import get_bluetooth_input_device_names
+    from heyvox.audio.bt import get_bluetooth_input_device_names
     assert isinstance(get_bluetooth_input_device_names(), set)
 
 

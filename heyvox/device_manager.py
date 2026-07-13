@@ -23,9 +23,8 @@ from heyvox.audio.mic import (
     add_device_cooldown,
     clear_device_cooldown,
     is_device_cooled_down,
-    mute_output_during_bt_switch as _mute_during_bt_switch,
-    force_os_default_input,
 )
+from heyvox.audio.bt import BtHfpMixin, mute_output_during_bt_switch as _mute_during_bt_switch
 from heyvox.audio.cues import device_change_cue
 from heyvox.audio.profile import MicProfileManager, MicProfileEntry
 from heyvox.constants import ACTIVE_MIC_FILE, MIC_SWITCH_REQUEST_FILE
@@ -37,7 +36,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class DeviceManager:
+class DeviceManager(BtHfpMixin):
     """Manages microphone lifecycle for the heyvox main event loop.
 
     Encapsulates all device management that was previously inline in main.py:
@@ -566,16 +565,6 @@ class DeviceManager:
     # Bluetooth HFP wait + mic switch
     # -------------------------------------------------------------------------
 
-    # Non-blocking BT HFP retry state (checked each scan cycle instead of blocking)
-    _bt_hfp_target: str = ""        # device name we're waiting for
-    _bt_hfp_trigger_time: float = 0 # when we first triggered the HFP switch
-    _bt_hfp_attempts: int = 0       # how many re-checks so far
-    _bt_hfp_pin_mode: bool = False  # True = user-requested pin (HUD menu);
-                                    # False = priority auto-switch
-
-    _BT_HFP_RETRY_INTERVAL = 2.0   # seconds between re-checks
-    _BT_HFP_MAX_ATTEMPTS = 5       # give up after this many (Jabras need more time than G435)
-
     def _try_switch_to_better_mic(
         self,
         target_name: str,
@@ -599,164 +588,20 @@ class DeviceManager:
         )
 
         if not has_input:
-            # A2DP mode — trigger HFP switch and schedule non-blocking retries
-            self._log(f"BT device '{target_name}' has no input yet (A2DP), triggering HFP switch...")
-            self._bt_trigger_hfp_switch(target_name, sample_rate, chunk_size)
-            self._bt_hfp_target = target_name
-            self._bt_hfp_trigger_time = time.time()
-            self._bt_hfp_attempts = 0
+            from heyvox.audio.bt import is_bluetooth_device
+            if is_bluetooth_device(target_name):
+                # A2DP mode — trigger HFP switch and schedule non-blocking retries
+                self._log(f"BT device '{target_name}' has no input yet (A2DP), triggering HFP switch...")
+                self._bt_trigger_hfp_switch(target_name, sample_rate, chunk_size)
+                self._bt_hfp_target = target_name
+                self._bt_hfp_trigger_time = time.time()
+                self._bt_hfp_attempts = 0
+            else:
+                self._log(f"Device '{target_name}' has no input — skipping (not Bluetooth)")
             return False
 
         # Input device exists — proceed with actual switch
         return self._do_mic_switch(target_name, mic_priority, sample_rate, chunk_size)
-
-    def _bt_trigger_hfp_switch(
-        self, target_name: str, sample_rate: int, chunk_size: int,
-    ) -> None:
-        """Briefly open a mic stream on a BT device to trigger A2DP → HFP switch."""
-        try:
-            _pa = pyaudio.PyAudio()
-            try:
-                found = False
-                for _i in range(_pa.get_device_count()):
-                    _d = _pa.get_device_info_by_index(_i)
-                    if (target_name.lower() in _d['name'].lower()
-                            and _d['maxInputChannels'] > 0):
-                        found = True
-                        with _mute_during_bt_switch(target_name):
-                            try:
-                                _s = _pa.open(
-                                    format=pyaudio.paInt16, channels=1,
-                                    rate=sample_rate, input=True,
-                                    input_device_index=_i,
-                                    frames_per_buffer=chunk_size,
-                                )
-                                _s.close()
-                            except Exception as probe_err:
-                                self._log(
-                                    f"BT HFP probe open failed for '{_d['name']}' "
-                                    f"(idx={_i}, rate={sample_rate}, chunk={chunk_size}): "
-                                    f"{type(probe_err).__name__}: {probe_err}"
-                                )
-                        break
-                if not found:
-                    self._log(
-                        f"BT HFP probe: no input device matching '{target_name}' in "
-                        f"current enumeration (device likely still in A2DP-only mode)"
-                    )
-                    # Fallback: bypass PyAudio's per-process HAL cache and ask
-                    # CoreAudio directly to switch the default input. This is
-                    # what nudges macOS to actually engage HFP for the headset
-                    # when PortAudio's cached enumeration doesn't yet list an
-                    # input entry for it (DEF-060).
-                    with _mute_during_bt_switch(target_name):
-                        if force_os_default_input(target_name):
-                            self._log(
-                                f"BT HFP probe: CoreAudio default-input write "
-                                f"succeeded for '{target_name}' — HFP negotiation "
-                                f"kicked off at the OS layer"
-                            )
-            finally:
-                _pa.terminate()
-        except Exception as e:
-            self._log(f"BT HFP trigger failed: {e}")
-
-    def _continue_bt_hfp_wait(
-        self, mic_priority: list[str] | None, sample_rate: int, chunk_size: int,
-    ) -> bool:
-        """Non-blocking check: has the BT device switched to HFP yet?
-
-        Called from scan() on each cycle. Returns True if the switch completed
-        and mic was switched, False if still waiting or gave up.
-        """
-        if not self._bt_hfp_target:
-            return False
-
-        elapsed = time.time() - self._bt_hfp_trigger_time
-        next_check_at = (self._bt_hfp_attempts + 1) * self._BT_HFP_RETRY_INTERVAL
-
-        if elapsed < next_check_at:
-            return False  # Not time to check yet
-
-        self._bt_hfp_attempts += 1
-
-        # Re-enumerate and look for input device
-        try:
-            _pa = pyaudio.PyAudio()
-            try:
-                has_input = False
-                for _i in range(_pa.get_device_count()):
-                    _d = _pa.get_device_info_by_index(_i)
-                    if (self._bt_hfp_target.lower() in _d['name'].lower()
-                            and _d['maxInputChannels'] > 0):
-                        has_input = True
-                        break
-            finally:
-                _pa.terminate()
-        except Exception as e:
-            self._log(f"BT HFP re-check failed: {e}")
-            has_input = False
-
-        if has_input:
-            self._log(f"BT HFP switch completed after {elapsed:.1f}s — switching mic")
-            target = self._bt_hfp_target
-            pin_mode = self._bt_hfp_pin_mode
-            self._bt_hfp_target = ""
-            self._bt_hfp_pin_mode = False
-            if pin_mode:
-                return self._do_manual_pin(target, sample_rate, chunk_size)
-            return self._do_mic_switch(
-                target, mic_priority, sample_rate, chunk_size,
-            )
-
-        if self._bt_hfp_attempts >= self._BT_HFP_MAX_ATTEMPTS:
-            # Last resort: PortAudio caches device enumeration per-process and
-            # throwaway pyaudio.PyAudio() instances inherit the stale cache
-            # (DEF-060). Flush the long-lived self.pa instance by calling
-            # reinit() before giving up — find_best_mic then runs against a
-            # fresh HAL snapshot and may pick up the BT input that just
-            # became HFP-available.
-            target = self._bt_hfp_target
-            pin_mode = self._bt_hfp_pin_mode
-            self._log(
-                f"BT HFP attempt {self._bt_hfp_attempts}/{self._BT_HFP_MAX_ATTEMPTS} "
-                f"exhausted after {elapsed:.1f}s — flushing PyAudio HAL cache via reinit"
-            )
-            self._bt_hfp_target = ""
-            self._bt_hfp_pin_mode = False
-            # scan() guards on (not is_recording and not busy), so reinit()
-            # is safe here without additional checks.
-            # DEF-124: pass expected=True — this reinit is the *intentional*
-            # PortAudio HAL cache flush triggered by the user's HUD-menu
-            # headset switch, not an unexpected zombie. Suppresses the
-            # "Mic silent — check mute (MacBook Pro Microphone)" warn banner
-            # and the "Mic zombie: reinitializing" error toast, both of
-            # which misled the user during the 2026-05-28 G435 plug-in case.
-            if self.reinit(require_audio=True, expected=True):
-                # After reinit the device list is fresh; if the BT input
-                # landed, self.dev_name will now be the target and we're
-                # done. Otherwise emit the original give-up log.
-                if target.lower() in (self.dev_name or "").lower():
-                    self._log(
-                        f"BT HFP switch completed via post-reinit find_best_mic "
-                        f"— now on '{self.dev_name}'"
-                    )
-                    return True
-                if pin_mode:
-                    # Honour the user pin by trying the explicit switch path.
-                    if self._do_manual_pin(target, sample_rate, chunk_size):
-                        return True
-            self._log(
-                f"BT HFP switch failed after {elapsed:.1f}s / "
-                f"{self._BT_HFP_MAX_ATTEMPTS} attempts + cache flush "
-                f"— keeping current mic, preserving headset_mode={self.headset_mode}"
-            )
-            return False
-
-        # Re-trigger in case the first attempt didn't stick
-        self._log(f"BT HFP attempt {self._bt_hfp_attempts}/{self._BT_HFP_MAX_ATTEMPTS} — still no input, re-triggering...")
-        self._bt_trigger_hfp_switch(self._bt_hfp_target, sample_rate, chunk_size)
-        return False
 
     def _do_mic_switch(
         self,
