@@ -23,7 +23,6 @@ from heyvox.audio.mic import (
     add_device_cooldown,
     clear_device_cooldown,
     is_device_cooled_down,
-    force_os_default_input,
 )
 from heyvox.audio.bt import BtHfpMixin, mute_output_during_bt_switch as _mute_during_bt_switch
 from heyvox.audio.cues import device_change_cue

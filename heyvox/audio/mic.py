@@ -20,10 +20,13 @@ from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
 from heyvox.audio._coreaudio import (
     _AudioObjectPropertyAddress,
     _enumerate_coreaudio_inputs,
+    _kAudioDevicePropertyStreams,
     _kAudioHardwarePropertyDefaultInputDevice,
+    _kAudioHardwarePropertyDevices,
     _kAudioObjectPropertyElementMain,
     _kAudioObjectPropertyName,
     _kAudioObjectPropertyScopeGlobal,
+    _kAudioObjectPropertyScopeInput,
     _kAudioObjectSystemObject,
     _kCFStringEncodingUTF8,
 )
