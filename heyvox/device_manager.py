@@ -24,6 +24,7 @@ from heyvox.audio.mic import (
     get_live_input_device_names,
     add_device_cooldown,
     clear_device_cooldown,
+    is_builtin_mic,
     is_device_cooled_down,
     is_usb_transport,
     probe_device_level,
@@ -159,6 +160,7 @@ class DeviceManager(BtHfpMixin):
             f"Headset detected: {self.headset_mode} "
             f"(echo suppression {'inactive' if self.headset_mode else 'active'})"
         )
+        self._maybe_surface_demotion(mic_priority)
 
         # Initialise AUDIO-13 timer
         self.ctx.last_good_audio_time = time.time()
@@ -200,6 +202,41 @@ class DeviceManager(BtHfpMixin):
         """
         self.ctx.last_read_time = time.monotonic()
         self.ctx.mic_just_switched = True
+
+    # -------------------------------------------------------------------------
+    # Demotion visibility (DEF-208, ported from the lost DEF-202 build)
+    # -------------------------------------------------------------------------
+
+    def _maybe_surface_demotion(self, mic_priority: list[str] | None) -> None:
+        """Surface a menu-bar warning when selection landed on the built-in mic
+        despite a configured non-built-in priority device.
+
+        Every demotion path (find_best_mic fallback, _do_mic_switch,
+        handle_io_error) previously only logged to file — unlike reinit()'s
+        DEF-124 zombie banner there was no visible "your preferred mic is gone
+        and you're on the worse built-in fallback" signal. Distinct source
+        ("mic-demoted") so it never collides with the zombie banner; cleared
+        symmetrically once a non-built-in device is active again.
+
+        No-op if there is nothing to demote from (mic_priority empty/None or
+        every entry is itself a built-in name).
+        """
+        if not mic_priority or all(is_builtin_mic(p) for p in mic_priority):
+            return
+        try:
+            from heyvox.hud.surface import HUDSurface
+            if is_builtin_mic(self.dev_name):
+                from heyvox.constants import MIC_WARN_TTL_SECS
+                HUDSurface.banner(
+                    level="warn",
+                    source="mic-demoted",
+                    text="Demoted to built-in mic (preferred device unavailable/cooling down)",
+                    ttl_secs=MIC_WARN_TTL_SECS,
+                )
+            else:
+                HUDSurface.clear("mic-demoted")
+        except Exception:
+            pass
 
     # -------------------------------------------------------------------------
     # Manual hotplug restart request (DEF-104)
@@ -305,6 +342,9 @@ class DeviceManager(BtHfpMixin):
             self.ctx.dead_mic_zero_chunks = 0
             self.ctx.dead_mic_low_chunks = 0
             self._arm_post_switch_grace()  # DEF-132
+            self._maybe_surface_demotion(
+                self.config.mic_priority if self.config else None
+            )
             self._log(
                 f"[usb-retry] same-device reopen recovered: [{idx}] {self.dev_name} "
                 f"(level={level}, DEF-208)"
@@ -531,6 +571,7 @@ class DeviceManager(BtHfpMixin):
         self.ctx.dead_mic_zero_chunks = 0
         self.ctx.dead_mic_low_chunks = 0
         self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
+        self._maybe_surface_demotion(mic_priority)
         return True
 
     # -------------------------------------------------------------------------
@@ -695,6 +736,7 @@ class DeviceManager(BtHfpMixin):
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
         self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
+        self._maybe_surface_demotion(mic_priority)
         return True
 
     # -------------------------------------------------------------------------
@@ -812,6 +854,7 @@ class DeviceManager(BtHfpMixin):
             self._write_active_mic(self.dev_name)
             device_change_cue(self.dev_name, "input")
             self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+            self._maybe_surface_demotion(mic_priority)
             return True
 
         # find_best_mic failed — reopen current device, preserve headset_mode

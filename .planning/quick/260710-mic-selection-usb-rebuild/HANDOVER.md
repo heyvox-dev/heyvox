@@ -4,6 +4,16 @@
 
 ## Execution summary (2026-07-14)
 
+**Correction discovered post-execution:** this rebuild had ALREADY been built once,
+on 2026-07-10 09:08–09:31 (an hour after this handover froze the status as
+"SCAFFOLDED") — committed to `heyvox/launch-p1-install` as DEF-202/203/204
+(`74309c73c`, `2fd390d50`, `58b0fe2a8`) and validated live (its storm watchdog
+auto-restarted the daemon on 2026-07-13 09:52). A Conductor branch switch stranded
+those commits; this session re-implemented the same goals as DEF-208/209/210 on
+`release-1.1.1` (the live line now), then ported the one missing feature from the
+lost build (`_maybe_surface_demotion` banner). See DEFECT-LOG DEF-211 for the full
+loss forensics.
+
 All three rebuild goals shipped, plus one discovery:
 
 1. **Transport-aware selection (DEF-208)** — `mic.get_device_transport`/`is_usb_transport`

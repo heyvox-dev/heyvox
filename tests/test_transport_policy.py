@@ -284,6 +284,35 @@ def test_usb_retry_declines_when_still_silent(monkeypatch):
     assert dm._usb_same_device_retry(_G535, 16000, 1280) is False
 
 
+def test_demotion_banner_surfaces_and_clears(monkeypatch):
+    """DEF-208 (ported from the lost DEF-202 build): landing on the built-in
+    mic despite a configured non-built-in priority device must surface a
+    menu-bar banner; a non-built-in device clears it."""
+    import heyvox.device_manager as dmod
+    from heyvox.hud.surface import HUDSurface
+
+    calls = []
+    monkeypatch.setattr(HUDSurface, "banner", classmethod(
+        lambda cls, **kw: calls.append(("banner", kw.get("source")))))
+    monkeypatch.setattr(HUDSurface, "clear", classmethod(
+        lambda cls, source: calls.append(("clear", source))))
+
+    dm = _make_dm([{"name": "MacBook Pro Microphone", "maxInputChannels": 1}])
+    dm.dev_name = "MacBook Pro Microphone"
+    dm._maybe_surface_demotion([_G535, "MacBook Pro Microphone"])
+    assert ("banner", "mic-demoted") in calls
+
+    calls.clear()
+    dm.dev_name = _G535
+    dm._maybe_surface_demotion([_G535, "MacBook Pro Microphone"])
+    assert ("clear", "mic-demoted") in calls
+
+    calls.clear()
+    dm.dev_name = "MacBook Pro Microphone"
+    dm._maybe_surface_demotion(["MacBook Pro Microphone"])  # nothing to demote from
+    assert calls == []
+
+
 def test_reinit_usb_retry_skips_cooldown_and_demotion(monkeypatch):
     """reinit() on a healthy USB device must re-adopt it — no cooldown, no
     fallback to the built-in mic (the DEF-208 core behavior)."""
