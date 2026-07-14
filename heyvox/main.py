@@ -507,6 +507,10 @@ def _start_wedge_supervisor(heartbeat: dict, ctx, log, hud_send) -> None:
 
     import threading
     threading.Thread(target=_loop, name="wedge-supervisor", daemon=True).start()
+    log(
+        f"Wedge supervisor armed (DEF-210): restart after "
+        f"{_WEDGE_RESTART_SECS:.0f}s without a main-loop heartbeat"
+    )
 
 
 def _stop_tts_from_escape(hud_send_fn) -> None:

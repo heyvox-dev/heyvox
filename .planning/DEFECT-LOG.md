@@ -408,6 +408,17 @@
 - **Found by**: Full local test run during the DEF-208/209/210 rebuild; cross-checked against origin/main and the CI run logs.
 - **Would have caught earlier**: Treating red CI on main as a merge blocker (branch protection / required checks), and never staging guard tests separately from the code they guard. Action item: before merging, confirm the PR's test additions pass against the PR's own tree, and keep main's CI green as a standing release gate. See pattern **P-orphaned-guard-test**.
 
+## DEF-212 — Four stale guard tests: DEF-191/192/207 changed behavior intentionally but only updated their own new tests, leaving older guards pinning the outdated behavior (CI red)
+
+- **Date**: 2026-07-14
+- **Category**: regression / integration
+- **Severity**: S3 (test-only; the production code was correct in all four cases — but the red CI it caused is release-blocking and masks real regressions)
+- **Symptom**: On main CI (red since 2026-07-13) and locally: `test_garbled_catastrophic_stt_ratio` (expects the pre-DEF-191 "wall-clock alone discards clean text" behavior), `test_ax_fastpath_for_native_textfield` + 2 `test_target_lock` AX tests (static AX mocks that can't satisfy the DEF-192 read-back verify), and `test_aborts_on_verify_mismatch` (uses `subprocess.run` call-count as a "no Cmd-V" proxy; the abort path's error cue now shells out via DEF-207's afconvert resample). A fifth (`test_aborts_on_clipboard_write_failure`) only passed by accident: the neighbouring test primed the cue cache, hiding the same defect — fixing the neighbour exposed it (cross-test cache coupling).
+- **Root cause**: Each behavior change (DEF-191 ratio-guard narrowing, DEF-192 AX read-back verify, DEF-207 cue resampling) added NEW guard tests but did not sweep EXISTING tests that pinned the old behavior or mocked the old call shape. The DEF-191 commit even recorded "149 passed" — a subset run, not the full suite.
+- **Fix**: Updated the four tests to the current intended semantics: ratio guard discards only degenerate-shape text (clean+diverse survives, 'doc doc doc' still dies); stateful AX mocks that return what was written (satisfying the read-back verify like a real field); error-cue calls mocked so `subprocess.run` counts stay a pure "no osascript paste" signal, independent of cue-cache state.
+- **Found by**: Full-suite run during the DEF-208..211 rebuild; cross-checked against the main CI logs (same failures there — the standing "local env coupling, CI green" assumption was outdated).
+- **Would have caught earlier**: Running the FULL suite (not a subset) before committing a behavior change, and treating any red main-CI as a stop-the-line signal. Same family as **P-orphaned-guard-test**.
+
 ## Patterns & Process Gaps
 
 - **P-transport-blind-policy** (DEF-208, siblings DEF-101/DEF-146/DEF-147): device-robustness policies (cooldowns, fallbacks, retries, gain) encode assumptions about a transport's failure model; applying BT-era policy to USB made a stable device unstable. **Action item**: any policy keyed on "device failed" must ask "which transport, and what does failure mean THERE?" — classify via the CoreAudio transport type (now available as `mic.get_device_transport`) before choosing the response.
