@@ -21,6 +21,12 @@ RECORDING_FLAG = f"{_TMP}/heyvox-recording"
 # stays invisible to PortAudio even after a restart.
 HOTPLUG_RESTART_MARKER = f"{_TMP}/heyvox-hotplug-restart"
 
+# DEF-209: marker written just before a -9986-storm self-restart. If the storm
+# re-appears while the marker is younger than the cooldown, the daemon does NOT
+# restart again (a corruption that survives a full process restart won't be
+# fixed by more restarts) — it surfaces a banner instead.
+PA_STORM_RESTART_MARKER = f"{_TMP}/heyvox-pa-storm-restart"
+
 # Default log file location
 LOG_FILE_DEFAULT = f"{_TMP}/heyvox.log"
 

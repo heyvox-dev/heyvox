@@ -38,6 +38,8 @@ _kAudioDevicePropertyStreams = _fourcc("stm#")
 _kAudioDevicePropertyTransportType = _fourcc("tran")
 _kAudioDeviceTransportTypeBluetooth = _fourcc("blue")
 _kAudioDeviceTransportTypeBluetoothLE = _fourcc("blea")
+_kAudioDeviceTransportTypeUSB = _fourcc("usb ")
+_kAudioDeviceTransportTypeBuiltIn = _fourcc("bltn")
 _kCFStringEncodingUTF8 = 0x08000100
 
 

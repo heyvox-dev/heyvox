@@ -27,6 +27,7 @@ from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
     HOTPLUG_RESTART_MARKER,
+    PA_STORM_RESTART_MARKER,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
@@ -319,6 +320,19 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
     if not missed:
         return
 
+    _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown)
+
+
+def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown) -> None:
+    """Guarded DEF-104 restart for a named cache-miss candidate.
+
+    Shared by the periodic ``_maybe_restart_for_hotplug`` scan and the manual
+    HUD-menu path (DeviceManager's ``pop_hotplug_restart_request``): both end
+    up with a device that is live in CoreAudio but invisible to PortAudio's
+    process-wide cache, and both must pass the same guards — never restart for
+    Bluetooth (DEF-147) and never loop on a device that stays invisible even
+    after a restart (marker cooldown).
+    """
     # DEF-147: never self-restart for a Bluetooth mic. A BT-HFP device is
     # chronically "live in CoreAudio but absent from PortAudio" as it flaps
     # A2DP<->HFP, so detect_missed_hotplug misreads it as a USB cache-miss
@@ -369,6 +383,130 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
             [sys.executable, "-m", "heyvox.main"], start_new_session=True
         )
         ctx.shutdown.set()
+
+
+# ---------------------------------------------------------------------------
+# DEF-209: -9986 PortAudio-corruption storm → self-restart
+# ---------------------------------------------------------------------------
+
+_PA_STORM_CHECK_INTERVAL = 5.0
+_PA_STORM_RESTART_COOLDOWN = 600.0
+
+
+def _maybe_restart_for_pa_storm(log, hud_send, ctx) -> None:
+    """Restart the process when a -9986 open-failure storm is detected.
+
+    -9986 (paInternalError) on stream opens across MULTIPLE devices means the
+    process-wide PortAudio context is corrupted. In-process recovery
+    (terminate + fresh ``PyAudio()``) is proven insufficient — 2026-07-10 the
+    storm survived it all night; only a full process restart cleared it.
+
+    Loop guard: if the storm re-appears while the restart marker is younger
+    than ``_PA_STORM_RESTART_COOLDOWN``, we do NOT restart again — a
+    corruption that survives a fresh process won't be fixed by more restarts
+    (coreaudiod / USB hardware state needs external help). Surface a banner
+    and go quiet instead.
+    """
+    from heyvox.audio.mic import pa_storm_detected, clear_pa_storm
+    if not pa_storm_detected():
+        return
+    try:
+        marker_age = time.time() - os.path.getmtime(PA_STORM_RESTART_MARKER)
+    except OSError:
+        marker_age = None
+    if marker_age is not None and marker_age < _PA_STORM_RESTART_COOLDOWN:
+        log(
+            f"PA_STORM: -9986 storm re-detected {marker_age:.0f}s after a storm "
+            f"restart — NOT restarting again (cooldown "
+            f"{_PA_STORM_RESTART_COOLDOWN:.0f}s); audio state needs external help"
+        )
+        try:
+            from heyvox.hud.surface import HUDSurface
+            HUDSurface.banner(
+                level="error",
+                source="pa-storm",
+                text="Audio system wedged (-9986) — replug the headset or restart the Mac",
+                ttl_secs=600,
+            )
+        except Exception:
+            pass
+        clear_pa_storm()  # stop re-firing every check interval
+        return
+    log(
+        "PA_STORM: -9986 on stream opens across devices — PortAudio context "
+        "corrupted, in-process recovery can't clear it; self-restarting (DEF-209)"
+    )
+    try:
+        hud_send({"type": "error", "text": "Audio subsystem corrupted — restarting"})
+    except Exception:
+        pass
+    try:
+        with open(PA_STORM_RESTART_MARKER, "w") as f:
+            f.write(f"{time.time()}\n")
+    except OSError:
+        pass
+    time.sleep(0.3)
+    _release_singleton()
+    try:
+        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+    except Exception as exc:
+        log(f"PA_STORM: execv failed ({exc}), falling back to subprocess restart")
+        import subprocess as _sp
+        _sp.Popen([sys.executable, "-m", "heyvox.main"], start_new_session=True)
+        ctx.shutdown.set()
+
+
+# ---------------------------------------------------------------------------
+# DEF-210: main-loop wedge supervisor
+# ---------------------------------------------------------------------------
+
+_WEDGE_RESTART_SECS = 300.0
+_WEDGE_CHECK_INTERVAL = 30.0
+
+
+def _start_wedge_supervisor(heartbeat: dict, ctx, log, hud_send) -> None:
+    """Force-restart when the main loop stops iterating (DEF-210).
+
+    2026-07-10 the daemon wedged at ~21:16 (a PortAudio call never returned)
+    and sat dead for 10.75h. Every existing watchdog (DEF-104 hotplug,
+    DEF-163 keepalive-stale, memory) lives INSIDE the main loop, so none of
+    them could act. This supervisor is a separate daemon thread watching the
+    in-process heartbeat the loop updates every ``_HEARTBEAT_INTERVAL``: no
+    update for ``_WEDGE_RESTART_SECS`` means the loop is stuck in a call that
+    will never return, and the only recovery is a fresh process.
+
+    The threshold is deliberately generous — legitimate main-loop blocking
+    (STT model cold-load, paste-injection hangs, BT HFP settling) tops out
+    around 60-90s. Restart via execv; if that fails, ``os._exit(1)`` lets
+    launchd's ``KeepAlive/SuccessfulExit=false`` relaunch us.
+
+    Limitation: if the wedged C call holds the GIL, no Python thread —
+    including this one — can run. The observed incident did not (the
+    keepalive thread kept logging all night), so the heartbeat supervisor
+    covers the failure mode we have actually seen.
+    """
+    def _loop() -> None:
+        while not ctx.shutdown.wait(_WEDGE_CHECK_INTERVAL):
+            age = time.time() - heartbeat["ts"]
+            if age <= _WEDGE_RESTART_SECS:
+                continue
+            log(
+                f"SUPERVISOR: main loop wedged — no heartbeat for {age:.0f}s "
+                f"(threshold {_WEDGE_RESTART_SECS:.0f}s), force-restarting (DEF-210)"
+            )
+            try:
+                hud_send({"type": "error", "text": "Voice daemon wedged — restarting"})
+            except Exception:
+                pass
+            _release_singleton()
+            try:
+                os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+            except Exception as exc:
+                log(f"SUPERVISOR: execv failed ({exc}) — hard exit for launchd relaunch")
+                os._exit(1)
+
+    import threading
+    threading.Thread(target=_loop, name="wedge-supervisor", daemon=True).start()
 
 
 def _stop_tts_from_escape(hud_send_fn) -> None:
@@ -828,6 +966,14 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _HEARTBEAT_INTERVAL = 10.0
     _last_heartbeat = 0.0
 
+    # DEF-210: wedge supervisor — separate thread that force-restarts when the
+    # loop below stops iterating (all other watchdogs live inside the loop).
+    _heartbeat = {"ts": time.time()}
+    _start_wedge_supervisor(_heartbeat, ctx, log, hud_send)
+
+    # DEF-209: -9986 storm check timer
+    _last_pa_storm_check = time.time()
+
     # ECHO-01: Post-TTS cooldown
     _tts_last_seen = 0.0
 
@@ -1015,6 +1161,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         while not ctx.shutdown.is_set():
             # Heartbeat: touch file periodically as proof of life
             _now_hb = time.time()
+            _heartbeat["ts"] = _now_hb  # DEF-210: in-process liveness for the supervisor
             if _now_hb - _last_heartbeat >= _HEARTBEAT_INTERVAL:
                 _last_heartbeat = _now_hb
                 try:
@@ -1022,6 +1169,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         _hbf.write(f"{int(_now_hb)}\n")
                 except Exception:
                     pass
+
+            # DEF-209: -9986 storm check. Placed BEFORE the read/IOError paths
+            # because an active storm keeps those paths in `continue` loops
+            # that never reach the idle watchdog block further down.
+            if _now_hb - _last_pa_storm_check >= _PA_STORM_CHECK_INTERVAL:
+                _last_pa_storm_check = _now_hb
+                _maybe_restart_for_pa_storm(log, hud_send, ctx)
 
             # Handle deferred cancel from SIGUSR1 (signal-safe: no I/O in handler)
             if ctx.cancel_requested.is_set():
@@ -1340,6 +1494,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             # Device hotplug -- delegated to DeviceManager
             devices.scan()
+
+            # DEF-104: a manual HUD-menu pick of a USB mic that PortAudio's
+            # cache can't see yet (scan flags it instead of misrouting it into
+            # the BT HFP probe) is fulfilled here via the guarded restart.
+            _manual_hotplug_missed = devices.pop_hotplug_restart_request()
+            if _manual_hotplug_missed:
+                _restart_for_hotplug_candidate(
+                    _manual_hotplug_missed, log, hud_send, ctx,
+                    cooldown=_HOTPLUG_RESTART_COOLDOWN,
+                )
 
             # After scan, update silence_threshold if device changed.
             # DEF-097: reject 0 from profile (stale hardware-gated calibration).
