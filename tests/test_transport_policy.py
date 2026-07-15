@@ -16,7 +16,6 @@ import time
 import types
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 
 import heyvox.audio.mic as mic
@@ -288,7 +287,6 @@ def test_demotion_banner_surfaces_and_clears(monkeypatch):
     """DEF-208 (ported from the lost DEF-202 build): landing on the built-in
     mic despite a configured non-built-in priority device must surface a
     menu-bar banner; a non-built-in device clears it."""
-    import heyvox.device_manager as dmod
     from heyvox.hud.surface import HUDSurface
 
     calls = []
@@ -316,7 +314,6 @@ def test_demotion_banner_surfaces_and_clears(monkeypatch):
 def test_reinit_usb_retry_skips_cooldown_and_demotion(monkeypatch):
     """reinit() on a healthy USB device must re-adopt it — no cooldown, no
     fallback to the built-in mic (the DEF-208 core behavior)."""
-    import heyvox.device_manager as dmod
 
     dmod_patched = _patch_retry_deps(monkeypatch)
     dm = _make_dm([{"name": _G535, "maxInputChannels": 1}])
