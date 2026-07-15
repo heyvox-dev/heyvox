@@ -69,8 +69,13 @@ class TestTypeText:
         with patch.dict("sys.modules", {"AppKit": mock_appkit}):
             with patch("heyvox.input.injection.subprocess.run") as mock_run:
                 with patch("heyvox.input.injection.time.sleep"):
-                    mock_run.return_value = MagicMock(returncode=0)
-                    type_text("hello")
+                    # The abort path plays an error cue, which itself shells out
+                    # (afplay / DEF-207 afconvert resample) — mock it so
+                    # call_count stays a pure "no Cmd-V osascript" signal.
+                    with patch("heyvox.input.injection.audio_cue"):
+                        mock_run.return_value = MagicMock(returncode=0)
+                        result = type_text("hello")
+        assert result is False
         # Cmd-V should NOT be sent when clipboard verify fails
         assert mock_run.call_count == 0
 
@@ -81,8 +86,13 @@ class TestTypeText:
         with patch.dict("sys.modules", {"AppKit": mock_appkit}):
             with patch("heyvox.input.injection.subprocess.run") as mock_run:
                 with patch("heyvox.input.injection.time.sleep"):
-                    mock_run.return_value = MagicMock(returncode=0)
-                    type_text("hello")
+                    # Abort path plays an error cue that shells out — mock it
+                    # so call_count stays a pure "no Cmd-V osascript" signal
+                    # (and doesn't depend on another test priming the cue cache).
+                    with patch("heyvox.input.injection.audio_cue"):
+                        mock_run.return_value = MagicMock(returncode=0)
+                        result = type_text("hello")
+        assert result is False
         # No osascript paste call on clipboard write failure
         assert mock_run.call_count == 0
 

@@ -21,6 +21,7 @@ from heyvox.audio._coreaudio import (
     _AudioObjectPropertyAddress,
     _enumerate_coreaudio_inputs,
     _kAudioDevicePropertyStreams,
+    _kAudioDeviceTransportTypeUSB,
     _kAudioHardwarePropertyDefaultInputDevice,
     _kAudioHardwarePropertyDevices,
     _kAudioObjectPropertyElementMain,
@@ -38,6 +39,9 @@ __all__ = [
     "clear_device_cooldowns", "clear_device_cooldown",
     "add_device_cooldown", "is_device_cooled_down", "is_builtin_mic",
     "start_pa_hotplug_watcher", "stop_pa_hotplug_watcher",
+    "get_device_transport", "is_usb_transport", "probe_device_level",
+    "record_pa_open_failure", "record_pa_open_success", "pa_storm_detected",
+    "MIN_AUDIO_LEVEL",
 ]
 
 
@@ -58,6 +62,115 @@ def is_builtin_mic(device_name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Transport classification (DEF-208)
+# ---------------------------------------------------------------------------
+#
+# CoreAudio reports a transport type per device ('usb ', 'blue'/'blea', 'bltn',
+# 'virt', ...). The escalating cooldown below was designed for genuinely-flaky
+# Bluetooth links; applying it to a stable USB (Lightspeed dongle) transport
+# demotes a fundamentally-healthy headset to the built-in mic for up to 30min
+# on a transient blip. Selection policy therefore needs to know the transport.
+#
+# The map is cached briefly: cooldown decisions happen inside find_best_mic
+# loops which may probe several devices per pass, and the HAL enumeration
+# (~ms via ctypes) shouldn't run per device.
+
+_transport_cache: dict[str, int] = {}
+_transport_cache_ts: float = 0.0
+_TRANSPORT_CACHE_TTL = 30.0
+
+
+def get_device_transport(device_name: str) -> int:
+    """Return the CoreAudio transport four-char-code for an input device.
+
+    0 when the device is unknown to the live HAL (unplugged) or CoreAudio is
+    unavailable — callers treat 0 as "not USB", i.e. the conservative BT-era
+    policy applies.
+    """
+    global _transport_cache, _transport_cache_ts
+    now = time.monotonic()
+    if now - _transport_cache_ts > _TRANSPORT_CACHE_TTL:
+        try:
+            _transport_cache = {
+                name.lower(): transport
+                for name, _alive, transport in _enumerate_coreaudio_inputs()
+            }
+        except Exception:
+            _transport_cache = {}
+        _transport_cache_ts = now
+    return _transport_cache.get(device_name.lower(), 0)
+
+
+def is_usb_transport(device_name: str) -> bool:
+    """True when the device sits on a USB transport (incl. Lightspeed dongles)."""
+    return get_device_transport(device_name) == _kAudioDeviceTransportTypeUSB
+
+
+# ---------------------------------------------------------------------------
+# PortAudio-corruption storm detection (DEF-209)
+# ---------------------------------------------------------------------------
+#
+# -9986 (paInternalError) on Pa_OpenStream can mean the process-wide PortAudio
+# context is corrupted. Observed 2026-07-10: EVERY device failed with -9986 and
+# in-process recovery (terminate + fresh PyAudio()) did NOT clear it — only a
+# full process restart did. These hooks let every open path report its outcome;
+# main.py restarts the process when a storm is detected.
+#
+# Storm = at least _PA_STORM_MIN_FAILURES -9986 failures across at least
+# _PA_STORM_MIN_DEVICES distinct devices within _PA_STORM_WINDOW_SECS, with no
+# successful open in between (any success clears the tally). The multi-device
+# requirement separates context corruption from a single flaky device — the
+# latter is what cooldowns are for, not a restart.
+
+_PA_STORM_ERRNO = -9986
+_PA_STORM_WINDOW_SECS = 120.0
+_PA_STORM_MIN_FAILURES = 6
+_PA_STORM_MIN_DEVICES = 2
+
+_pa_storm_lock = threading.Lock()
+_pa_storm_events: list[tuple[float, str]] = []  # (monotonic ts, device key)
+
+
+def _is_pa_internal_error(exc: BaseException) -> bool:
+    if getattr(exc, "errno", None) == _PA_STORM_ERRNO:
+        return True
+    return str(_PA_STORM_ERRNO) in str(exc)
+
+
+def record_pa_open_failure(device_name: str, exc: BaseException) -> None:
+    """Report a failed stream open. Only -9986 counts toward the storm."""
+    if not _is_pa_internal_error(exc):
+        return
+    now = time.monotonic()
+    with _pa_storm_lock:
+        _pa_storm_events.append((now, device_name.lower()))
+        cutoff = now - _PA_STORM_WINDOW_SECS
+        while _pa_storm_events and _pa_storm_events[0][0] < cutoff:
+            _pa_storm_events.pop(0)
+
+
+def record_pa_open_success() -> None:
+    """Report a successful stream open — clears the storm tally."""
+    with _pa_storm_lock:
+        _pa_storm_events.clear()
+
+
+def pa_storm_detected() -> bool:
+    """True when the -9986 failure pattern indicates PA context corruption."""
+    cutoff = time.monotonic() - _PA_STORM_WINDOW_SECS
+    with _pa_storm_lock:
+        recent = [(t, d) for t, d in _pa_storm_events if t >= cutoff]
+        if len(recent) < _PA_STORM_MIN_FAILURES:
+            return False
+        return len({d for _t, d in recent}) >= _PA_STORM_MIN_DEVICES
+
+
+def clear_pa_storm() -> None:
+    """Reset the storm tally (used after a suppressed restart to stop re-firing)."""
+    record_pa_open_success()
+
+
+# ---------------------------------------------------------------------------
 # Device cooldown — prevents re-selecting a dead Bluetooth device every cycle
 # ---------------------------------------------------------------------------
 
@@ -68,15 +181,25 @@ _device_cooldowns: dict[str, float] = {}
 _device_failure_counts: dict[str, int] = {}
 
 # Adaptive cooldown tiers (seconds) — indexed by failure count (0-based, capped).
-_COOLDOWN_TIERS = [120, 300, 600, 1800]  # 2min, 5min, 10min, 30min cap
+# BT links legitimately fail-and-fail-again, so escalation up to 30min is the
+# right call there. A USB transport is stable by construction: a failure is a
+# transient blip or a hardware mute, both of which deserve a quick retry, never
+# a 30min demotion to the built-in mic (DEF-208).
+_COOLDOWN_TIERS = [120, 300, 600, 1800]  # BT-era: 2min, 5min, 10min, 30min cap
+_COOLDOWN_TIERS_USB = [15, 30, 60]       # USB: gentle, capped at 60s
 
 
 def _get_adaptive_cooldown(device_key: str) -> float:
-    """Return the current cooldown duration for a device based on failure count."""
+    """Return the current cooldown duration for a device based on failure count.
+
+    Tier table depends on the device's transport: USB gets short, capped
+    cooldowns; everything else keeps the BT-era escalation (DEF-208).
+    """
     count = _device_failure_counts.get(device_key, 0)
+    tiers = _COOLDOWN_TIERS_USB if is_usb_transport(device_key) else _COOLDOWN_TIERS
     # count is 1-based (incremented before calling), so subtract 1 for 0-based tier index
-    tier = min(max(0, count - 1), len(_COOLDOWN_TIERS) - 1)
-    return _COOLDOWN_TIERS[tier]
+    tier = min(max(0, count - 1), len(tiers) - 1)
+    return tiers[tier]
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +474,116 @@ def force_os_default_input(name_substr: str) -> bool:
         return False
 
 
+# Minimum audio level to consider a device producing real audio.
+# Disconnected Bluetooth devices produce quantization noise at level 1-5.
+# A real connected mic in a quiet room produces ambient noise above 10.
+# Matches the silent-mic health check threshold in main.py.
+MIN_AUDIO_LEVEL = 10
+
+
+def probe_device_level(
+    pa: pyaudio.PyAudio,
+    index: int,
+    name: str,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    frames: int = 15,
+) -> int:
+    """Open a test stream and return the peak audio level (0 on error).
+
+    Runs the pa.open + read loop on a watchdog thread because CoreAudio
+    AUHAL err=-50 (paramErr) leaves PortAudio with a zombie stream: pa.open
+    returns normally (error only printed to stderr) but the first
+    stream.read() then spins forever in Pa_Sleep. Prior to the watchdog
+    a single bad probe would freeze the entire main loop (DEF-057).
+
+    Every open outcome is reported to the DEF-209 storm detector.
+    """
+    # 15 frames × chunk_size @ 16 kHz ≈ 1.2 s for a healthy probe, plus
+    # the 0.8 s unmute settle. 4 s gives safe margin on the happy path
+    # while still bounding the hang on AUHAL zombie streams.
+    DEADLINE = 4.0
+
+    result = {"level": 0, "err": None, "stream": None}
+    done = threading.Event()
+
+    # Mute output while probing to hide the A2DP→HFP pop. Use the OS mute
+    # flag rather than setting volume=0 so Bluetooth headsets in HFP mode
+    # do not receive a volume=0 HFP command (which the G435 and similar
+    # headsets remember and later re-report, causing macOS to reset the
+    # system volume to 0).
+    _probe_was_muted = None
+    if not is_builtin_mic(name):
+        try:
+            from heyvox.herald.coreaudio import is_system_muted, set_system_muted
+            _probe_was_muted = is_system_muted()
+            if not _probe_was_muted:
+                _log(f"[VOL] probe_level mute: device='{name}' muting output")
+                set_system_muted(True)
+        except Exception:
+            _probe_was_muted = None
+
+    def _probe() -> None:
+        try:
+            s = pa.open(
+                format=pyaudio.paInt16, channels=1,
+                rate=sample_rate, input=True,
+                input_device_index=index, frames_per_buffer=chunk_size,
+            )
+            result["stream"] = s
+            record_pa_open_success()
+            max_level = 0
+            for _ in range(frames):
+                data = np.frombuffer(
+                    s.read(chunk_size, exception_on_overflow=False),
+                    dtype=np.int16,
+                )
+                max_level = max(max_level, int(np.abs(data).max()))
+            result["level"] = max_level
+        except Exception as e:
+            if result["stream"] is None:
+                record_pa_open_failure(name, e)
+            result["err"] = repr(e)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_probe, daemon=True, name=f"probe-{name}")
+    t.start()
+    try:
+        if not done.wait(timeout=DEADLINE):
+            _log(f"  [{index}] {name}: PROBE TIMEOUT ({DEADLINE}s) — AUHAL zombie (err=-50?), abandoning thread")
+            # Best-effort close; may no-op or raise on a broken stream.
+            s = result.get("stream")
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            return 0
+        if result["err"]:
+            _log(f"  [{index}] {name}: error - {result['err']}")
+            return 0
+        _log(f"  [{index}] {name}: max_level={result['level']}")
+        return result["level"]
+    finally:
+        s = result.get("stream")
+        if s is not None and not done.is_set():
+            pass  # thread still owns the stream, don't double-close
+        elif s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+        if _probe_was_muted is False:
+            time.sleep(0.8)
+            try:
+                from heyvox.herald.coreaudio import set_system_muted
+                set_system_muted(False)
+                _log(f"[VOL] probe_level unmute: device='{name}'")
+            except Exception:
+                pass
+
+
 def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sample_rate: int = DEFAULT_SAMPLE_RATE, chunk_size: int = DEFAULT_CHUNK_SIZE, require_audio: bool = False) -> int | None:
     """Find the best working microphone based on priority list.
 
@@ -396,103 +629,6 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         if not matched:
             other_devices.append((i, d['name']))
 
-    # Minimum audio level to consider a device producing real audio.
-    # Disconnected Bluetooth devices produce quantization noise at level 1-5.
-    # A real connected mic in a quiet room produces ambient noise above 10.
-    # Matches the silent-mic health check threshold in main.py.
-    MIN_AUDIO_LEVEL = 10
-
-    def test_mic(index, name, frames=15) -> int:
-        """Open a test stream and return the peak audio level (0 on error).
-
-        Runs the pa.open + read loop on a watchdog thread because CoreAudio
-        AUHAL err=-50 (paramErr) leaves PortAudio with a zombie stream: pa.open
-        returns normally (error only printed to stderr) but the first
-        stream.read() then spins forever in Pa_Sleep. Prior to the watchdog
-        a single bad probe would freeze the entire main loop (DEF-057).
-        """
-        import threading
-        # 15 frames × chunk_size @ 16 kHz ≈ 1.2 s for a healthy probe, plus
-        # the 0.8 s unmute settle. 4 s gives safe margin on the happy path
-        # while still bounding the hang on AUHAL zombie streams.
-        DEADLINE = 4.0
-
-        result = {"level": 0, "err": None, "stream": None}
-        done = threading.Event()
-
-        # Mute output while probing to hide the A2DP→HFP pop. Use the OS mute
-        # flag rather than setting volume=0 so Bluetooth headsets in HFP mode
-        # do not receive a volume=0 HFP command (which the G435 and similar
-        # headsets remember and later re-report, causing macOS to reset the
-        # system volume to 0).
-        _probe_was_muted = None
-        if not is_builtin_mic(name):
-            try:
-                from heyvox.herald.coreaudio import is_system_muted, set_system_muted
-                _probe_was_muted = is_system_muted()
-                if not _probe_was_muted:
-                    _log(f"[VOL] probe_level mute: device='{name}' muting output")
-                    set_system_muted(True)
-            except Exception:
-                _probe_was_muted = None
-
-        def _probe() -> None:
-            try:
-                s = pa.open(
-                    format=pyaudio.paInt16, channels=1,
-                    rate=sample_rate, input=True,
-                    input_device_index=index, frames_per_buffer=chunk_size,
-                )
-                result["stream"] = s
-                max_level = 0
-                for _ in range(frames):
-                    data = np.frombuffer(
-                        s.read(chunk_size, exception_on_overflow=False),
-                        dtype=np.int16,
-                    )
-                    max_level = max(max_level, int(np.abs(data).max()))
-                result["level"] = max_level
-            except Exception as e:
-                result["err"] = repr(e)
-            finally:
-                done.set()
-
-        t = threading.Thread(target=_probe, daemon=True, name=f"probe-{name}")
-        t.start()
-        try:
-            if not done.wait(timeout=DEADLINE):
-                _log(f"  [{index}] {name}: PROBE TIMEOUT ({DEADLINE}s) — AUHAL zombie (err=-50?), abandoning thread")
-                # Best-effort close; may no-op or raise on a broken stream.
-                s = result.get("stream")
-                if s is not None:
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
-                return 0
-            if result["err"]:
-                _log(f"  [{index}] {name}: error - {result['err']}")
-                return 0
-            _log(f"  [{index}] {name}: max_level={result['level']}")
-            return result["level"]
-        finally:
-            s = result.get("stream")
-            if s is not None and not done.is_set():
-                pass  # thread still owns the stream, don't double-close
-            elif s is not None:
-                try:
-                    s.close()
-                except Exception:
-                    pass
-            if _probe_was_muted is False:
-                time.sleep(0.8)
-                try:
-                    from heyvox.herald.coreaudio import set_system_muted
-                    set_system_muted(False)
-                    _log(f"[VOL] probe_level unmute: device='{name}'")
-                except Exception:
-                    pass
-
     now = time.time()
 
     for rank, prio_name in enumerate(mic_priority):
@@ -504,8 +640,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             # Just verify the stream opens successfully.
             if _is_builtin:
                 try:
-                    s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
-                                input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                    s = open_mic_stream(pa, index, sample_rate=sample_rate, chunk_size=chunk_size)
                     s.close()
                     _log(f"  [{index}] {dev_name}: built-in mic, accepting (always trusted)")
                     _device_cooldowns.pop(dev_key, None)
@@ -526,7 +661,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                 continue
 
             _log(f"Testing {dev_name}...")
-            max_level = test_mic(index, dev_name)
+            max_level = probe_device_level(pa, index, dev_name, sample_rate, chunk_size)
 
             if max_level >= MIN_AUDIO_LEVEL:
                 # Device is producing real audio — clear any prior cooldown and
@@ -549,8 +684,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
                 try:
                     from heyvox.audio.bt import mute_output_during_bt_switch as _mute_bt
                     with _mute_bt(dev_name):
-                        s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
-                                    input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                        s = open_mic_stream(pa, index, sample_rate=sample_rate, chunk_size=chunk_size)
                         s.close()
                     _log(f"  [{index}] {dev_name}: no audio but stream OK (first priority), accepting")
                     # Don't penalise virtual/first-priority devices with a cooldown.
@@ -566,8 +700,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         # Built-in mic: always accept if stream opens (no cooldown, no level test).
         if _is_builtin:
             try:
-                s = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
-                            input=True, input_device_index=index, frames_per_buffer=chunk_size)
+                s = open_mic_stream(pa, index, sample_rate=sample_rate, chunk_size=chunk_size)
                 s.close()
                 _log(f"  [{index}] {dev_name}: built-in mic, accepting (always trusted)")
                 _device_cooldowns.pop(dev_key, None)
@@ -586,7 +719,7 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
             continue
 
         _log(f"Testing fallback {dev_name}...")
-        max_level = test_mic(index, dev_name)
+        max_level = probe_device_level(pa, index, dev_name, sample_rate, chunk_size)
         if max_level >= MIN_AUDIO_LEVEL:
             _device_cooldowns.pop(dev_key, None)
             _device_failure_counts.pop(dev_key, None)
@@ -628,15 +761,27 @@ def open_mic_stream(pa: pyaudio.PyAudio, dev_index: int, sample_rate: int = DEFA
 
     Returns:
         Open PyAudio stream.
+
+    Reports the open outcome to the DEF-209 storm detector.
     """
-    return pa.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=sample_rate,
-        input=True,
-        input_device_index=dev_index,
-        frames_per_buffer=chunk_size,
-    )
+    try:
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=sample_rate,
+            input=True,
+            input_device_index=dev_index,
+            frames_per_buffer=chunk_size,
+        )
+    except Exception as e:
+        try:
+            _dev_name = pa.get_device_info_by_index(dev_index).get("name", "")
+        except Exception:
+            _dev_name = ""
+        record_pa_open_failure(_dev_name or f"index-{dev_index}", e)
+        raise
+    record_pa_open_success()
+    return stream
 
 
 def detect_headset(pa, selected_input_index: int) -> bool:
@@ -698,7 +843,11 @@ def add_device_cooldown(device_name: str) -> None:
     _device_failure_counts[key] = _device_failure_counts.get(key, 0) + 1
     _device_cooldowns[key] = time.time()
     cooldown_secs = _get_adaptive_cooldown(key)
-    _log(f"Device '{device_name}' added to cooldown for {cooldown_secs}s (failure #{_device_failure_counts[key]})")
+    _transport_tag = "usb" if is_usb_transport(key) else "bt-era"
+    _log(
+        f"Device '{device_name}' added to cooldown for {cooldown_secs}s "
+        f"(failure #{_device_failure_counts[key]}, {_transport_tag} tiers)"
+    )
 
 
 def is_device_cooled_down(device_name: str) -> bool:

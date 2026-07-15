@@ -19,12 +19,14 @@ signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 _cue_suppress_until: float = 0.0
 _suppress_lock = threading.Lock()
 
-# Cache of decoded cue audio: cue_file path -> (data, samplerate). Populated on
-# first successful soundfile.read() per cue file, reused thereafter to avoid
-# disk I/O on the wake-word audible-feedback critical path. Plain dict is safe
-# here: worst-case concurrent access is a redundant re-read of the same file
-# under the GIL, never corruption.
-_cue_cache: dict[str, tuple] = {}
+# Cache of decoded cue audio: (cue_file path, target_samplerate) -> (data,
+# samplerate). Keyed by target rate too since the same cue gets resampled
+# differently depending on which output device is currently default.
+# Populated on first successful read per (file, rate) pair, reused thereafter
+# to avoid disk I/O and afconvert spawns on the wake-word audible-feedback
+# critical path. Plain dict is safe here: worst-case concurrent access is a
+# redundant re-read of the same file under the GIL, never corruption.
+_cue_cache: dict[tuple[str, int | None], tuple] = {}
 
 
 def get_cues_dir(config_cues_dir: str = "") -> str:
@@ -77,6 +79,55 @@ def _resolve_sounddevice_output_index():
     return None
 
 
+def _resolve_target_samplerate(device_index: int | None) -> int | None:
+    """Return the resolved output device's native sample rate, or None if
+    unresolved -- caller then skips resampling and plays at the cue file's
+    own rate (the pre-DEF-207 behavior).
+    """
+    if device_index is None:
+        return None
+    try:
+        import sounddevice
+        rate = sounddevice.query_devices(device_index).get("default_samplerate")
+        return int(rate) if rate else None
+    except Exception:
+        return None
+
+
+def _resample_cue(cue_file: str, target_rate: int):
+    """Resample a cue file to target_rate via afconvert (mono, 16-bit) -- the
+    same approach keepalive.py already uses for USB output. Cue files are
+    22050Hz; feeding that straight into a device with a different native
+    rate (e.g. built-in speakers at 48000Hz) with no resampling makes
+    PortAudio convert on the fly on a cold, ~0.5s one-shot stream, audibly
+    (DEF-207).
+
+    Returns (data, samplerate) like soundfile.read(), or None on any
+    failure -- caller falls back to reading the file at its own native rate.
+    """
+    import subprocess
+    import tempfile
+
+    tmp = tempfile.mktemp(suffix=".wav")
+    try:
+        r = subprocess.run(
+            ["afconvert", "-f", "WAVE", "-d", f"LEI16@{target_rate}",
+             "-c", "1", cue_file, tmp],
+            capture_output=True,
+        )
+        if r.returncode != 0 or not os.path.exists(tmp):
+            return None
+        import soundfile
+        return soundfile.read(tmp)
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _play_via_sounddevice(cue_file: str) -> bool:
     """Play a cue file via sounddevice using a pre-loaded, cached PCM buffer.
 
@@ -84,11 +135,14 @@ def _play_via_sounddevice(cue_file: str) -> bool:
     direct sounddevice.play() call, eliminating process-spawn latency on the
     wake-word audible-feedback critical path (WW_LATENCY).
 
-    On cache miss, decodes the file via soundfile.read() and caches the
-    result keyed by cue_file path. On cache hit, skips the disk read
-    entirely. Any failure (missing/corrupt file, sounddevice/soundfile
-    unavailable, device busy or removed mid-call) is swallowed and reported
-    as False -- callers must fall back to the existing afplay path.
+    On cache miss, resamples the file to the resolved output device's native
+    rate via afconvert (_resample_cue) and caches the result keyed by
+    (cue_file, target_rate) -- falls back to the file's own rate if the
+    device or its rate can't be resolved. On cache hit, skips the disk
+    read/resample entirely. Any failure (missing/corrupt file,
+    sounddevice/soundfile unavailable, device busy or removed mid-call) is
+    swallowed and reported as False -- callers must fall back to the
+    existing afplay path.
 
     Args:
         cue_file: Absolute path to the cue file (as constructed by audio_cue()).
@@ -98,15 +152,22 @@ def _play_via_sounddevice(cue_file: str) -> bool:
         step failed and the caller should fall back to afplay.
     """
     try:
-        if cue_file in _cue_cache:
-            data, samplerate = _cue_cache[cue_file]
+        device_index = _resolve_sounddevice_output_index()
+        target_rate = _resolve_target_samplerate(device_index)
+        cache_key = (cue_file, target_rate)
+
+        if cache_key in _cue_cache:
+            data, samplerate = _cue_cache[cache_key]
         else:
-            import soundfile
-            data, samplerate = soundfile.read(cue_file)
-            _cue_cache[cue_file] = (data, samplerate)
+            result = _resample_cue(cue_file, target_rate) if target_rate else None
+            if result is None:
+                import soundfile
+                result = soundfile.read(cue_file)
+            data, samplerate = result
+            _cue_cache[cache_key] = (data, samplerate)
 
         import sounddevice
-        sounddevice.play(data, samplerate, device=_resolve_sounddevice_output_index())
+        sounddevice.play(data, samplerate, device=device_index)
         return True
     except Exception:
         return False

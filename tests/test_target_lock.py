@@ -418,6 +418,37 @@ def test_executor_no_thread_leak_across_30_capture_lock_calls(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _make_stateful_ax(initial: str = ""):
+    """ApplicationServices mock behaving like a well-behaved native field.
+
+    The DEF-192 hard guard reads AXValue back after the set and only claims
+    success when the injected text is actually present — a static
+    ``return_value=(0, <object>)`` mock therefore fails the verify. This mock
+    stores whatever AXUIElementSetAttributeValue wrote and returns it on the
+    next AXValue read, like a real AXTextField/AXTextArea does.
+    """
+    state = {"value": initial}
+    focused = MagicMock()
+    mock_ax = MagicMock()
+    mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
+
+    def _copy(el, attr, out):
+        if attr == "AXFocusedUIElement":
+            return (0, focused)
+        if attr == "AXValue":
+            return (0, state["value"])
+        return (0, MagicMock())
+
+    def _set(el, attr, val):
+        if attr == "AXValue":
+            state["value"] = val
+        return 0
+
+    mock_ax.AXUIElementCopyAttributeValue = MagicMock(side_effect=_copy)
+    mock_ax.AXUIElementSetAttributeValue = MagicMock(side_effect=_set)
+    return mock_ax
+
+
 def test_ax_inject_text_accepts_target_lock_with_leaf_role(monkeypatch):
     from heyvox.input.injection import _ax_inject_text
     from heyvox.input.target import TargetLock
@@ -431,11 +462,7 @@ def test_ax_inject_text_accepts_target_lock_with_leaf_role(monkeypatch):
         conductor_workspace_id=None,
     )
 
-    fake_focused = object()
-    mock_ax = MagicMock()
-    mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
-    mock_ax.AXUIElementCopyAttributeValue.return_value = (0, fake_focused)
-    mock_ax.AXUIElementSetAttributeValue.return_value = 0
+    mock_ax = _make_stateful_ax()
 
     with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
         result = _ax_inject_text(lock, "hello")
@@ -504,11 +531,7 @@ def test_ax_inject_text_phase12_fastpath_remains_under_5ms():
         conductor_workspace_id=None,
     )
 
-    fake_focused = object()
-    mock_ax = MagicMock()
-    mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
-    mock_ax.AXUIElementCopyAttributeValue.return_value = (0, fake_focused)
-    mock_ax.AXUIElementSetAttributeValue.return_value = 0
+    mock_ax = _make_stateful_ax()
 
     with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
         durations = []

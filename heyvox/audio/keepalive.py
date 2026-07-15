@@ -60,6 +60,16 @@ _SCOPE_GLOBAL = _fourcc("glob")
 _ELEM_MAIN = 0
 _USB = _fourcc("usb ")                 # kAudioDeviceTransportTypeUSB
 
+# DEF-214: HUD visibility for a real output stall, not a single blip. The
+# monitor tick interval defaults to 5.0s (see OutputKeepAlive.__init__), so
+# 3 consecutive open failures ~= 15s of continuous silence before the first
+# warning — long enough to skip a single self-correcting hiccup, far short of
+# the 2-minute DEF-104 escalation below. TTL is generous (2.5min) so the
+# banner survives the typical stall-then-restart cycle even if the explicit
+# clear on recovery is somehow missed.
+_OUTPUT_DOWN_WARN_THRESHOLD = 3
+_OUTPUT_DOWN_BANNER_TTL = 150.0
+
 
 def default_output_transport() -> int:
     """Return the transport four-char-code (int) of the current default OUTPUT
@@ -159,6 +169,7 @@ class OutputKeepAlive:
         self._stop.set()
         self._close_stream()
         self._drop_pa()
+        self._clear_output_down()
 
     # -- cue playback over the warm stream --------------------------------
 
@@ -281,6 +292,7 @@ class OutputKeepAlive:
             if self._open_fails:
                 self._log(f"[keepalive] stream recovered after "
                           f"{self._open_fails} failed attempt(s) — fresh PA context (DEF-153)")
+                self._clear_output_down()
             self._open_fails = 0
             self._log(f"[keepalive] USB output detected — holding silent stream "
                       f"open on device_index={target_index} + routing cues through it (DEF-148/150)")
@@ -296,10 +308,39 @@ class OutputKeepAlive:
             if self._open_fails == 1 or self._open_fails % 12 == 0:
                 self._log(f"[keepalive] could not open silent stream "
                           f"(attempt {self._open_fails}, PA context dropped for fresh retry): {e}")
+            if self._open_fails == _OUTPUT_DOWN_WARN_THRESHOLD:
+                self._surface_output_down(
+                    "warn", "Audio output stalled — recovering automatically"
+                )
             if self._open_fails == 24:
                 self._log("[keepalive] fresh PA contexts keep failing for 2min — "
                           "process-level PA staleness (DEF-104 class), signalling auto-restart")
                 self.stale.set()
+                self._surface_output_down(
+                    "error", "Audio output down 2+ min — restarting automatically"
+                )
+
+    def _surface_output_down(self, level: str, text: str) -> None:
+        """HUD banner for a real (multi-attempt) output stall — DEF-214.
+
+        Mirrors device_manager.py's ``_maybe_surface_demotion`` pattern: a
+        detector that already existed (this failure counter, DEF-153) only
+        ever logged to herald-debug.log — "why is there no audio" required
+        reading the log after the fact. Distinct source ("output-down") so
+        it never collides with the mic-zombie/mic-demoted/vol-zero banners.
+        """
+        try:
+            from heyvox.hud.surface import HUDSurface
+            HUDSurface.banner(level, "output-down", text, ttl_secs=_OUTPUT_DOWN_BANNER_TTL)
+        except Exception:
+            pass
+
+    def _clear_output_down(self) -> None:
+        try:
+            from heyvox.hud.surface import HUDSurface
+            HUDSurface.clear("output-down")
+        except Exception:
+            pass
 
     def _close_stream(self, reason: str = "[keepalive] output no longer USB — released silent stream") -> None:
         global _ACTIVE

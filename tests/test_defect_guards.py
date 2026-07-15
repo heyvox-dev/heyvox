@@ -1800,6 +1800,95 @@ def test_def153_keepalive_recreates_pa_context_after_open_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# DEF-214: the DEF-153 open-failure counter only ever logged to
+# herald-debug.log — "no audio, why?" required reading the log after the
+# fact. A real (multi-attempt) stall must surface a HUD banner, escalate to
+# "error" at the 2-minute DEF-104 mark, and clear itself on recovery.
+# ---------------------------------------------------------------------------
+
+def test_def214_output_down_banner_fires_after_threshold_and_clears_on_recovery(monkeypatch):
+    pytest.importorskip("pyaudio")
+    import pyaudio
+    from heyvox.audio import keepalive as ka_mod
+    from heyvox.audio.keepalive import OutputKeepAlive
+    from heyvox.hud.surface import HUDSurface
+
+    class FakeStream:
+        def start_stream(self):
+            pass
+
+        def stop_stream(self):
+            pass
+
+        def close(self):
+            pass
+
+    state = {"fail": True}
+
+    class FakePA:
+        def __init__(self):
+            self.terminated = False
+
+        def open(self, **kw):
+            if state["fail"]:
+                raise OSError(-9986, "Internal PortAudio error")
+            return FakeStream()
+
+        def terminate(self):
+            self.terminated = True
+
+    monkeypatch.setattr(pyaudio, "PyAudio", FakePA)
+    banners = []
+    monkeypatch.setattr(HUDSurface, "banner", staticmethod(
+        lambda level, source, text, ttl_secs=60.0: banners.append((level, source, text))
+    ))
+    cleared = []
+    monkeypatch.setattr(HUDSurface, "clear", staticmethod(lambda source: cleared.append(source)))
+
+    # _open_stream() creates its own PA context lazily (self._pa is None at
+    # __init__) and drops it via _drop_pa() on every failure — so failure is
+    # driven by the shared `state` dict, not a per-instance flag, matching
+    # the DEF-153 test's created-order approach above.
+    ka = OutputKeepAlive(lambda m: None)
+
+    # Below threshold: no banner yet.
+    for _ in range(ka_mod._OUTPUT_DOWN_WARN_THRESHOLD - 1):
+        ka._open_stream()
+    assert not banners, "DEF-214: must not warn before the threshold (skip single blips)"
+
+    # Threshold reached: warn banner fires exactly once.
+    ka._open_stream()
+    assert banners == [("warn", "output-down", "Audio output stalled — recovering automatically")]
+
+    # Escalation to 24 failures: error-level banner, and the pre-existing
+    # DEF-104 stale signal must still fire unchanged.
+    for _ in range(24 - ka_mod._OUTPUT_DOWN_WARN_THRESHOLD):
+        ka._open_stream()
+    assert ka.stale.is_set(), "DEF-104: escalation flag must still fire"
+    assert banners[-1] == (
+        "error", "output-down", "Audio output down 2+ min — restarting automatically"
+    )
+
+    # Recovery: fresh context succeeds → banner cleared.
+    state["fail"] = False
+    ka._open_stream()
+    assert ka._stream is not None
+    assert "output-down" in cleared, "DEF-214: banner must clear on recovery"
+
+
+def test_def214_stop_clears_lingering_banner(monkeypatch):
+    pytest.importorskip("pyaudio")
+    from heyvox.audio.keepalive import OutputKeepAlive
+    from heyvox.hud.surface import HUDSurface
+
+    cleared = []
+    monkeypatch.setattr(HUDSurface, "clear", staticmethod(lambda source: cleared.append(source)))
+    ka = OutputKeepAlive(lambda m: None)
+    ka.stop()
+    assert "output-down" in cleared, "DEF-214: stop() must not leave a stale banner behind"
+
+
+# ---------------------------------------------------------------------------
 # Stop-gate quick-win 2026-06-11: ultra-confidence bypass + idle-only
 # speaker multiplier
 #

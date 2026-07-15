@@ -16,13 +16,18 @@ import numpy as np
 import pyaudio
 
 from heyvox.audio.mic import (
+    MIN_AUDIO_LEVEL,
     find_best_mic,
     open_mic_stream,
     detect_headset,
     get_dead_input_device_names,
+    get_live_input_device_names,
     add_device_cooldown,
     clear_device_cooldown,
+    is_builtin_mic,
     is_device_cooled_down,
+    is_usb_transport,
+    probe_device_level,
 )
 from heyvox.audio.bt import BtHfpMixin, mute_output_during_bt_switch as _mute_during_bt_switch
 from heyvox.audio.cues import device_change_cue
@@ -102,6 +107,10 @@ class DeviceManager(BtHfpMixin):
         self._mic_pinned: bool = False
         self._last_device_scan: float = time.time()
         self._last_output_device: str = ""
+        # DEF-104: manual HUD-menu pick of a device PortAudio's cache can't
+        # see. scan() sets this; the main loop pops it and runs the guarded
+        # hotplug self-restart (only a process restart refreshes the cache).
+        self._hotplug_restart_request: str | None = None
 
         # Health check state
         self._last_health_check: float = time.time()
@@ -151,6 +160,7 @@ class DeviceManager(BtHfpMixin):
             f"Headset detected: {self.headset_mode} "
             f"(echo suppression {'inactive' if self.headset_mode else 'active'})"
         )
+        self._maybe_surface_demotion(mic_priority)
 
         # Initialise AUDIO-13 timer
         self.ctx.last_good_audio_time = time.time()
@@ -192,6 +202,157 @@ class DeviceManager(BtHfpMixin):
         """
         self.ctx.last_read_time = time.monotonic()
         self.ctx.mic_just_switched = True
+
+    # -------------------------------------------------------------------------
+    # Demotion visibility (DEF-208, ported from the lost DEF-202 build)
+    # -------------------------------------------------------------------------
+
+    def _maybe_surface_demotion(self, mic_priority: list[str] | None) -> None:
+        """Surface a menu-bar warning when selection landed on the built-in mic
+        despite a configured non-built-in priority device.
+
+        Every demotion path (find_best_mic fallback, _do_mic_switch,
+        handle_io_error) previously only logged to file — unlike reinit()'s
+        DEF-124 zombie banner there was no visible "your preferred mic is gone
+        and you're on the worse built-in fallback" signal. Distinct source
+        ("mic-demoted") so it never collides with the zombie banner; cleared
+        symmetrically once a non-built-in device is active again.
+
+        No-op if there is nothing to demote from (mic_priority empty/None or
+        every entry is itself a built-in name).
+        """
+        if not mic_priority or all(is_builtin_mic(p) for p in mic_priority):
+            return
+        try:
+            from heyvox.hud.surface import HUDSurface
+            if is_builtin_mic(self.dev_name):
+                from heyvox.constants import MIC_WARN_TTL_SECS
+                HUDSurface.banner(
+                    level="warn",
+                    source="mic-demoted",
+                    text="Demoted to built-in mic (preferred device unavailable/cooling down)",
+                    ttl_secs=MIC_WARN_TTL_SECS,
+                )
+            else:
+                HUDSurface.clear("mic-demoted")
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------------------
+    # Manual hotplug restart request (DEF-104)
+    # -------------------------------------------------------------------------
+
+    def _request_hotplug_restart(self, device_name: str) -> None:
+        """Flag a manual mic pick as a DEF-104 cache miss for the main loop."""
+        self._hotplug_restart_request = device_name
+
+    def pop_hotplug_restart_request(self) -> str | None:
+        """Return and clear the pending manual cache-miss restart request."""
+        req, self._hotplug_restart_request = self._hotplug_restart_request, None
+        return req
+
+    def _is_coreaudio_live_portaudio_miss(
+        self, requested_name: str, pa_input_names: set[str],
+    ) -> bool:
+        """True when a requested mic is live in CoreAudio but invisible to
+        PortAudio's cached enumeration — the DEF-104 state.
+
+        Distinguishes a USB/Lightspeed PA-cache miss from a Bluetooth device
+        in A2DP mode (also "no input yet", but that one is fixed by the HFP
+        probe, not by a restart — DEF-147 forbids restarting for BT).
+        """
+        try:
+            target = requested_name.lower()
+            if any(target in n.lower() for n in pa_input_names):
+                return False  # PortAudio does see it — not a cache miss
+            live = get_live_input_device_names()
+            if not any(target in n for n in live):
+                return False  # not live in CoreAudio either — nothing to clear
+            # DEF-147: exclude Bluetooth before considering a restart.
+            from heyvox.audio.bt import get_bluetooth_input_device_names
+            if any(target in n for n in get_bluetooth_input_device_names()):
+                return False
+            return True
+        except Exception as e:
+            self._log(f"[DEF-104] cache-miss check failed (treating as no): {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # USB same-device retry (DEF-208)
+    # -------------------------------------------------------------------------
+
+    def _usb_same_device_retry(
+        self, prev_name: str, sample_rate: int, chunk_size: int,
+    ) -> bool:
+        """Re-open the just-failed device when it sits on a stable USB transport.
+
+        The cooldown/fallback machinery below was built for Bluetooth, where a
+        failed device will likely fail again. On USB (e.g. a Lightspeed dongle)
+        the opposite holds: failures are transient blips and the device usually
+        works again on a fresh PA context — demoting it to the built-in mic for
+        a full cooldown window is the wrong move. Caller must already hold a
+        FRESH PyAudio instance in ``self.pa`` (created after terminate).
+
+        Returns True when the same device was re-opened and produces real
+        audio; the full device state is updated in that case. False otherwise
+        (caller falls through to cooldown + full reselection).
+        """
+        try:
+            if not prev_name or not is_usb_transport(prev_name):
+                return False
+            if prev_name.lower() not in get_live_input_device_names():
+                self._log(f"[usb-retry] '{prev_name}' gone from live HAL — full reselection")
+                return False
+            # Locate by name in the fresh PA enumeration — the index may have
+            # drifted across the terminate/recreate (DEF-104 class).
+            idx = None
+            for i in range(self.pa.get_device_count()):
+                try:
+                    d = self.pa.get_device_info_by_index(i)
+                except Exception:
+                    continue
+                if d.get('name') == prev_name and d.get('maxInputChannels', 0) > 0:
+                    idx = i
+                    break
+            if idx is None:
+                self._log(f"[usb-retry] '{prev_name}' not in PA enumeration — full reselection")
+                return False
+
+            level = probe_device_level(self.pa, idx, prev_name, sample_rate, chunk_size)
+            if level < MIN_AUDIO_LEVEL:
+                self._log(
+                    f"[usb-retry] '{prev_name}' still silent (level={level}) — full reselection"
+                )
+                return False
+
+            # Same device is healthy again — adopt it. No cooldown, no
+            # device-change cue (the device did not change).
+            self.stream = open_mic_stream(
+                self.pa, idx, sample_rate=sample_rate, chunk_size=chunk_size,
+            )
+            self.dev_index = idx
+            self.dev_name = prev_name
+            clear_device_cooldown(prev_name)
+            self.headset_mode = detect_headset(self.pa, idx)
+            if self.profile_manager:
+                self.active_profile = self.profile_manager.get_profile(self.dev_name)
+            self._write_active_mic(self.dev_name)
+            self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+            self.ctx.last_good_audio_time = time.time()
+            self.ctx.dead_mic_zero_chunks = 0
+            self.ctx.dead_mic_low_chunks = 0
+            self._arm_post_switch_grace()  # DEF-132
+            self._maybe_surface_demotion(
+                self.config.mic_priority if self.config else None
+            )
+            self._log(
+                f"[usb-retry] same-device reopen recovered: [{idx}] {self.dev_name} "
+                f"(level={level}, DEF-208)"
+            )
+            return True
+        except Exception as e:
+            self._log(f"[usb-retry] failed ({e}) — full reselection")
+            return False
 
     # -------------------------------------------------------------------------
     # Reinit
@@ -239,43 +400,6 @@ class DeviceManager(BtHfpMixin):
         # existing last-resort grace period would miss that loop. See DEF-037.
         _prev_dev_name = self.dev_name
 
-        # Cooldown the zombie device so find_best_mic and hotplug scan skip it
-        add_device_cooldown(self.dev_name)
-
-        # Surface the silent mic to the menu bar. Reinit can't beat a hardware
-        # mute (G435 mute button, Jabra hardware gate, etc.) — only the user
-        # can. Patterns P-new + P-detector-without-action: silent state changes
-        # need a visible signal. Banner auto-expires after MIC_WARN_TTL_SECS.
-        #
-        # DEF-124: skip the banner when this reinit is an *expected* HFP-probe
-        # cache flush (user just clicked a new headset). Also, tailor the hint
-        # to the mic type — "check mute" makes sense for headsets with a mute
-        # button (G435, Jabra) but is misleading for built-in mics where no
-        # such button exists. For built-ins, point the user at the likely
-        # actual causes: macOS Microphone permission, another app holding the
-        # device exclusively, or a USB/HAL glitch (DEF-104).
-        if not expected:
-            try:
-                from heyvox.hud.surface import HUDSurface
-                from heyvox.constants import MIC_WARN_TTL_SECS
-                from heyvox.audio.mic import is_builtin_mic
-                if is_builtin_mic(self.dev_name):
-                    _hint_text = (
-                        f"Mic silent — check Microphone permission or "
-                        f"another app holding the device "
-                        f"({self.dev_name[:30]})"
-                    )
-                else:
-                    _hint_text = f"Mic silent — check mute ({self.dev_name[:30]})"
-                HUDSurface.banner(
-                    level="warn",
-                    source="mic-zombie",
-                    text=_hint_text,
-                    ttl_secs=MIC_WARN_TTL_SECS,
-                )
-            except Exception:
-                pass
-
         try:
             self.stream.stop_stream()
             self.stream.close()
@@ -312,6 +436,51 @@ class DeviceManager(BtHfpMixin):
                     )
         except Exception as e:
             self._log(f"[reinit] PortAudioHandle diag failed: {e}")
+
+        # DEF-208: on a stable USB transport, prefer re-opening the SAME device
+        # over cooldown + demotion to the built-in mic. A USB blip (Lightspeed
+        # power-save, brief re-enumeration) usually heals with a fresh PA
+        # context + reopen; only when the device stays silent do we fall
+        # through to the BT-era cooldown/reselection path below.
+        if self._usb_same_device_retry(_prev_dev_name, sample_rate, chunk_size):
+            return True
+
+        # Cooldown the zombie device so find_best_mic and hotplug scan skip it
+        add_device_cooldown(_prev_dev_name)
+
+        # Surface the silent mic to the menu bar. Reinit can't beat a hardware
+        # mute (G435 mute button, Jabra hardware gate, etc.) — only the user
+        # can. Patterns P-new + P-detector-without-action: silent state changes
+        # need a visible signal. Banner auto-expires after MIC_WARN_TTL_SECS.
+        #
+        # DEF-124: skip the banner when this reinit is an *expected* HFP-probe
+        # cache flush (user just clicked a new headset). Also, tailor the hint
+        # to the mic type — "check mute" makes sense for headsets with a mute
+        # button (G435, Jabra) but is misleading for built-in mics where no
+        # such button exists. For built-ins, point the user at the likely
+        # actual causes: macOS Microphone permission, another app holding the
+        # device exclusively, or a USB/HAL glitch (DEF-104).
+        if not expected:
+            try:
+                from heyvox.hud.surface import HUDSurface
+                from heyvox.constants import MIC_WARN_TTL_SECS
+                from heyvox.audio.mic import is_builtin_mic
+                if is_builtin_mic(_prev_dev_name):
+                    _hint_text = (
+                        f"Mic silent — check Microphone permission or "
+                        f"another app holding the device "
+                        f"({_prev_dev_name[:30]})"
+                    )
+                else:
+                    _hint_text = f"Mic silent — check mute ({_prev_dev_name[:30]})"
+                HUDSurface.banner(
+                    level="warn",
+                    source="mic-zombie",
+                    text=_hint_text,
+                    ttl_secs=MIC_WARN_TTL_SECS,
+                )
+            except Exception:
+                pass
 
         dev_index = find_best_mic(
             self.pa,
@@ -402,6 +571,7 @@ class DeviceManager(BtHfpMixin):
         self.ctx.dead_mic_zero_chunks = 0
         self.ctx.dead_mic_low_chunks = 0
         self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
+        self._maybe_surface_demotion(mic_priority)
         return True
 
     # -------------------------------------------------------------------------
@@ -515,9 +685,6 @@ class DeviceManager(BtHfpMixin):
         self._log(f"Mic appears disconnected ({_dead_name}), searching for new mic...")
         self._mic_pinned = False  # Pinned device gone — allow priority-based selection
 
-        # Cooldown the stalled/dead device so find_best_mic skips it
-        add_device_cooldown(_dead_name)
-
         try:
             self.stream.stop_stream()
             self.stream.close()
@@ -527,6 +694,16 @@ class DeviceManager(BtHfpMixin):
         time.sleep(0.5)
 
         self.pa = pyaudio.PyAudio()
+
+        # DEF-208: a USB device that IOErrored (brief re-enumeration, dongle
+        # power blip) is usually healthy again on a fresh PA context — try
+        # re-opening it before cooldown + demotion.
+        if self._usb_same_device_retry(_dead_name, sample_rate, chunk_size):
+            return True
+
+        # Cooldown the stalled/dead device so find_best_mic skips it
+        add_device_cooldown(_dead_name)
+
         dev_index = find_best_mic(
             self.pa,
             mic_priority=mic_priority,
@@ -559,6 +736,7 @@ class DeviceManager(BtHfpMixin):
         device_change_cue(self.dev_name, "input")
         self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
         self._arm_post_switch_grace()  # DEF-132: reset main-loop no-data stall clock
+        self._maybe_surface_demotion(mic_priority)
         return True
 
     # -------------------------------------------------------------------------
@@ -676,6 +854,7 @@ class DeviceManager(BtHfpMixin):
             self._write_active_mic(self.dev_name)
             device_change_cue(self.dev_name, "input")
             self._hud_send({"type": "state", "text": f"Mic: {self.dev_name}"})
+            self._maybe_surface_demotion(mic_priority)
             return True
 
         # find_best_mic failed — reopen current device, preserve headset_mode
@@ -847,6 +1026,11 @@ class DeviceManager(BtHfpMixin):
                 if requested_name:
                     self._log(f"Mic switch requested from menu: {requested_name}")
                     # If target currently has input channels, switch immediately.
+                    # If it's a USB device that CoreAudio sees but PortAudio's
+                    # cache doesn't (DEF-104), request the guarded self-restart —
+                    # treating that state as "likely BT A2DP" runs pointless HFP
+                    # probes and strands the user on the built-in mic until the
+                    # periodic hotplug check happens to fire.
                     # Otherwise it's a BT device in A2DP mode — trigger the
                     # A2DP→HFP profile switch and schedule non-blocking retries
                     # (same flow the priority auto-switch uses).
@@ -856,6 +1040,15 @@ class DeviceManager(BtHfpMixin):
                     )
                     if has_input:
                         self._do_manual_pin(requested_name, sample_rate, chunk_size)
+                    elif self._is_coreaudio_live_portaudio_miss(
+                        requested_name, current_names
+                    ):
+                        self._log(
+                            f"[DEF-104] Requested mic '{requested_name}' is live in "
+                            f"CoreAudio but missing from PortAudio's cache — "
+                            f"requesting hotplug self-restart"
+                        )
+                        self._request_hotplug_restart(requested_name)
                     else:
                         self._log(
                             f"Requested mic '{requested_name}' has no input yet "

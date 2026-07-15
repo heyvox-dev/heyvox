@@ -228,10 +228,27 @@ class TestMultiAppInjection:
         """Native AppKit AXTextField: AX fast-path used, skips clipboard entirely."""
         snap = _make_snap("Xcode", element_role="AXTextField", app_bundle_id="com.apple.dt.Xcode")
         mock_appkit, mock_pb = _make_appkit("hello")
+        # Stateful AX mock: the DEF-192 hard guard reads AXValue back after
+        # the set and only claims success when the injected text is actually
+        # present — the mock must return what was written, like a real field.
+        _ax_state = {"value": ""}
+        _focused = MagicMock()
+
+        def _ax_copy(el, attr, out):
+            if attr == "AXFocusedUIElement":
+                return (0, _focused)
+            if attr == "AXValue":
+                return (0, _ax_state["value"])
+            return (0, MagicMock())
+
+        def _ax_set(el, attr, val):
+            if attr == "AXValue":
+                _ax_state["value"] = val
+            return 0
+
         mock_ax = MagicMock()
-        # AX fast-path now reads focused element first; provide (err, focused).
-        mock_ax.AXUIElementCopyAttributeValue = MagicMock(return_value=(0, MagicMock()))
-        mock_ax.AXUIElementSetAttributeValue = MagicMock(return_value=0)
+        mock_ax.AXUIElementCopyAttributeValue = MagicMock(side_effect=_ax_copy)
+        mock_ax.AXUIElementSetAttributeValue = MagicMock(side_effect=_ax_set)
         with patch.dict("sys.modules", {"AppKit": mock_appkit, "ApplicationServices": mock_ax}):
             with patch("heyvox.input.injection._chrome_type_text", return_value=False):
                 with patch("heyvox.input.injection.subprocess.run") as mock_run:

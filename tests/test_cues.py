@@ -57,8 +57,12 @@ class TestAudioCue:
         cues_module._cue_cache.clear()
 
     @patch("sounddevice.play")
+    @patch("heyvox.audio.cues.subprocess.run")
     @patch("heyvox.audio.cues.subprocess.Popen")
-    def test_plays_existing_cue_via_sounddevice(self, mock_popen, mock_play, tmp_path):
+    def test_plays_existing_cue_via_sounddevice(self, mock_popen, mock_run, mock_play, tmp_path):
+        # afconvert (DEF-207 resample) reports failure -> falls back to the
+        # file's raw rate, keeping this test focused on the sounddevice path.
+        mock_run.return_value.returncode = 1
         cue_file = tmp_path / "listening.aiff"
         _write_valid_cue_wav(str(cue_file))
 
@@ -94,9 +98,49 @@ class TestAudioCue:
         mock_read.assert_called_once()
         assert mock_play.call_count == 2
 
+    @patch("sounddevice.play")
+    @patch("sounddevice.query_devices")
+    @patch("heyvox.audio.cues._resolve_sounddevice_output_index", return_value=7)
+    def test_def207_resamples_cue_to_device_rate(self, mock_resolve, mock_query, mock_play, tmp_path):
+        """DEF-207: cue files are recorded at 22050Hz-ish; feeding that raw
+        into a device running at a different native rate (e.g. built-in
+        speakers at 48000Hz) crackled. Must resample to the resolved
+        device's rate (via the real afconvert) before playing."""
+        mock_query.return_value = {"default_samplerate": 48000.0}
+        cue_file = tmp_path / "listening.aiff"
+        _write_valid_cue_wav(str(cue_file), samplerate=16000)
+
+        audio_cue("listening", str(tmp_path))
+
+        mock_play.assert_called_once()
+        assert mock_play.call_args[0][1] == 48000
+        assert mock_play.call_args.kwargs["device"] == 7
+
+    @patch("sounddevice.play")
+    @patch("sounddevice.query_devices")
+    @patch("heyvox.audio.cues._resolve_sounddevice_output_index", return_value=7)
+    def test_def207_cache_keyed_by_target_rate(self, mock_resolve, mock_query, mock_play, tmp_path):
+        """Switching output device (different native rate) must not reuse a
+        cache entry that was resampled for a different rate."""
+        cue_file = tmp_path / "listening.aiff"
+        _write_valid_cue_wav(str(cue_file), samplerate=16000)
+
+        mock_query.return_value = {"default_samplerate": 48000.0}
+        audio_cue("listening", str(tmp_path))
+        mock_query.return_value = {"default_samplerate": 44100.0}
+        audio_cue("listening", str(tmp_path))
+
+        assert mock_play.call_count == 2
+        rates_played = [c[0][1] for c in mock_play.call_args_list]
+        assert rates_played == [48000, 44100]
+
     @patch("sounddevice.play", side_effect=RuntimeError("device busy"))
+    @patch("heyvox.audio.cues.subprocess.run")
     @patch("heyvox.audio.cues.subprocess.Popen")
-    def test_afplay_fallback_on_sounddevice_failure(self, mock_popen, mock_play, tmp_path):
+    def test_afplay_fallback_on_sounddevice_failure(self, mock_popen, mock_run, mock_play, tmp_path):
+        # afconvert (DEF-207 resample) reports failure -> falls back to the
+        # file's raw rate; sounddevice.play then fails too -> afplay fallback.
+        mock_run.return_value.returncode = 1
         cue_file = tmp_path / "listening.aiff"
         _write_valid_cue_wav(str(cue_file))
 

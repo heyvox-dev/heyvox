@@ -143,12 +143,19 @@ class TestIsGarbled:
         assert is_garbled(text) is True
 
     def test_garbled_catastrophic_stt_ratio(self):
-        """DEF-093: catastrophic ratio (> 0.6) on ≥ 5 s audio remains a
-        discard signal even when text passes all checks — defends against
-        the DEF-075 shape (13 s audio → 8.6 s inference → 'doc doc doc')."""
-        text = "please fix the authentication bug in the login form today"
-        assert is_garbled(text) is False  # text alone is clean
-        assert is_garbled(text, stt_secs=20.0, audio_secs=30.0) is True
+        """DEF-093/DEF-191: catastrophic ratio (> 0.6) discards only when the
+        text ALSO has a degenerate shape (< 5 words or low word diversity).
+        DEF-191 narrowed the guard: a clean, word-diverse sentence that merely
+        decoded slowly (system load, GPU contention from parallel sessions) is
+        real dictation and must survive — wall-clock cost alone no longer
+        kills it. The DEF-075 shape ('doc doc doc') still dies because its
+        shape is degenerate."""
+        clean = "please fix the authentication bug in the login form today"
+        assert is_garbled(clean) is False  # text alone is clean
+        # DEF-191: clean + diverse survives even at a catastrophic ratio.
+        assert is_garbled(clean, stt_secs=20.0, audio_secs=30.0) is False
+        # DEF-075 shape at the same ratio class: few words → still discarded.
+        assert is_garbled("doc doc doc", stt_secs=8.6, audio_secs=13.0) is True
 
     def test_not_garbled_moderate_slow_stt_clean_text_def093(self):
         """DEF-093: moderate ratio (0.3–0.6) on clean text is NOT discarded.
