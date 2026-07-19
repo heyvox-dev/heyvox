@@ -60,3 +60,36 @@ def test_def136_error_branch_reads_text_field():
     assert 'msg_dict.get("text")' in src or "msg_dict.get('text')" in src, (
         "DEF-136: error handler must read the 'text' field senders use"
     )
+
+
+def test_mic_level_meter_reserves_width_before_image():
+    """The listening-state mic-level bars must not repeat the DEF-134 bug:
+    setLength_ has to run before setImage_ so macOS doesn't hide the status
+    item mid-resize while it grows to fit the bars image."""
+    src = _overlay_src()
+    assert "_MIC_METER_IMG_W" in src, "mic-level meter constants missing"
+    start = src.index("def _apply_state(")
+    end = src.index("\ndef _make_dispatcher_class(", start)
+    body = src[start:end]
+    set_length_idx = body.index("status_item.setLength_(_w)")
+    set_image_idx = body.index("btn.setImage_(_mic_level_bars_image(0.0))")
+    assert set_length_idx < set_image_idx, (
+        "setLength_ must run before the listening-state bars image is set, "
+        "or macOS can hide the status item mid-resize (DEF-134 pattern)"
+    )
+
+
+def test_audio_level_handler_feeds_menubar_meter():
+    """The dispatcher's audio_level branch must refresh the menu bar meter
+    (not just the pill's WaveformView), gated on _LAST_STATE == 'listening'
+    so it can't fire the AppKit call outside the recording window."""
+    src = _overlay_src()
+    start = src.index('elif msg_type == "audio_level":')
+    end = src.index('elif msg_type ==', start + 1)
+    body = src[start:end]
+    assert "_update_menubar_meter(status_item, level)" in body, (
+        "audio_level handler must feed the menu bar meter"
+    )
+    assert '_LAST_STATE == "listening"' in body, (
+        "menu bar meter update must be gated on the listening state"
+    )

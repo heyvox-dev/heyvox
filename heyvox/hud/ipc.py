@@ -132,15 +132,23 @@ class HUDClient:
                 s.close()
                 self._sock = None
 
-    def send(self, msg: dict) -> None:
-        """Send a JSON message. No-op if not connected."""
+    def send(self, msg: dict) -> bool:
+        """Send a JSON message. No-op (returns False) if not connected.
+
+        Returns whether the send actually reached the socket, so callers can
+        tell a "looked connected but the peer was already gone" failure apart
+        from a real success — a stale `_sock` from before the peer restarted
+        looks connected right up until this call's write fails.
+        """
         with self._lock:
             if self._sock is None:
-                return
+                return False
             try:
                 self._sock.sendall((json.dumps(msg) + "\n").encode())
+                return True
             except (BrokenPipeError, OSError):
                 self._sock = None
+                return False
 
     def close(self) -> None:
         """Close the connection."""

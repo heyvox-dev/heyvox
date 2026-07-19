@@ -27,6 +27,16 @@ HOTPLUG_RESTART_MARKER = f"{_TMP}/heyvox-hotplug-restart"
 # fixed by more restarts) — it surfaces a banner instead.
 PA_STORM_RESTART_MARKER = f"{_TMP}/heyvox-pa-storm-restart"
 
+# DEF-213: out-of-process liveness watchdog (heyvox/watchdog.py child).
+# Startup deadline: init must reach the main loop (first heartbeat write)
+# within this window — the observed init wedge held the GIL for ~1003s, so
+# 600s converts that class of hang into a ~10min worst-case outage. Stale
+# kill: runtime heartbeat age at which the child SIGKILLs the daemon; sits
+# above the in-process DEF-210 supervisor (300s) so the gentler execv restart
+# gets first shot whenever the GIL is actually available.
+WATCHDOG_STARTUP_DEADLINE_SECS = 600.0
+WATCHDOG_STALE_KILL_SECS = 420.0
+
 # Default log file location
 LOG_FILE_DEFAULT = f"{_TMP}/heyvox.log"
 

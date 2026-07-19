@@ -1888,6 +1888,32 @@ def test_def214_stop_clears_lingering_banner(monkeypatch):
     assert "output-down" in cleared, "DEF-214: stop() must not leave a stale banner behind"
 
 
+def test_def215_hud_send_retries_once_on_stale_socket():
+    """DEF-215: hud_send() must retry a message once immediately if send()
+    reports failure due to a stale-but-not-yet-detected connection (e.g. the
+    HUD overlay process having just restarted) — otherwise the first message
+    post-restart, often the "state" transition the overlay's audio-level
+    rendering gates on, is silently lost until the NEXT hud_send() call
+    notices `_sock is None`.
+    """
+    src = _read_main_py()
+    start = src.index("def hud_send(msg: dict) -> None:")
+    end = src.index("\n    # Initialize STT backend", start)
+    body = src[start:end]
+    assert "ok = ctx.hud_client.send(msg)" in body, (
+        "DEF-215: hud_send must capture send()'s success/failure return value"
+    )
+    assert "if not ok and ctx.hud_client._sock is None:" in body, (
+        "DEF-215: hud_send must detect a send that failed due to a stale socket"
+    )
+    assert body.count("ctx.hud_client.send(msg)") >= 2, (
+        "DEF-215: hud_send must retry send(msg) after reconnecting on a stale socket"
+    )
+    assert "if ok:" in body, (
+        "DEF-215: the Sent-log line must only fire when the send actually succeeded"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stop-gate quick-win 2026-06-11: ultra-confidence bypass + idle-only
 # speaker multiplier

@@ -142,6 +142,7 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 - [ ] Generic app switching in Herald (not just Conductor) — app profile framework exists, ~15+ hardcoded "conductor" refs remain in injection.py etc.
 - [ ] Evaluate Cohere Transcribe as alternative STT (v2)
 - [ ] TTS server on Mac Mini (v2) — no remote TTS code yet
+- [ ] Evaluate ripping out the Bluetooth mic-selection machinery entirely (A2DP→HFP wait/trigger, BT gain-boost, BT cooldown tiers in device_manager.py/mic.py/bt.py) now that a single pinned USB/wired default + built-in fallback is the model (2026-07-16) — currently left in place (dormant, not on the selection path) rather than deleted; revisit once the simplified model has run for a while
 
 ## Done (previously pending)
 - [x] Volume control — CoreAudio ducking + restore in herald/coreaudio.py + orchestrator.py

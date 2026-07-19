@@ -153,6 +153,49 @@ class TestHUDServerClient:
         assert any(m.get("state") == "reconnected" for m in received), "Post-reconnect message should have arrived"
         assert not any(m.get("state") == "orphaned" for m in received), "Message while disconnected should be lost"
 
+    def test_send_returns_false_and_recovers_after_stale_socket(self, socket_path):
+        """DEF-215: a peer that vanished without the client being told (no
+        client.close()) must make send() report failure via its return
+        value — this is the actual production case (a HUD overlay process
+        restart): `_sock` still looks set right up until a real write
+        attempt against it fails, unlike the scenario above which always
+        closes the client first and never exercises this path. A
+        subsequent reconnect + resend (what hud_send()'s retry-once path
+        does immediately on this signal) must succeed.
+        """
+        received = []
+        server = HUDServer(path=socket_path, on_message=received.append)
+        server.start()
+        time.sleep(0.1)
+
+        client = HUDClient(path=socket_path)
+        client.connect()
+        assert client._sock is not None
+
+        # Simulate the peer being gone without the client's bookkeeping
+        # knowing yet: swap in a socket stand-in whose write always fails,
+        # exactly what a live socket to an already-dead peer does on its
+        # next write attempt (real-socket teardown timing within a single
+        # test process is too racy to rely on here).
+        class _DeadSocket:
+            def sendall(self, data):
+                raise BrokenPipeError()
+        client._sock = _DeadSocket()
+
+        assert client.send({"type": "state", "state": "listening"}) is False, (
+            "a write against a dead peer must be reported as a failure, "
+            "not silently swallowed"
+        )
+        assert client._sock is None, "a failed send must clear _sock so callers know to reconnect"
+
+        client.reconnect()
+        assert client.send({"type": "state", "state": "listening"}) is True
+        time.sleep(0.1)
+        assert any(m.get("state") == "listening" for m in received)
+
+        client.close()
+        server.shutdown()
+
     def test_send_silently_drops_when_server_gone(self, socket_path):
         server = HUDServer(path=socket_path)
         server.start()

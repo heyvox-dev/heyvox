@@ -91,12 +91,19 @@ def get_device_transport(device_name: str) -> int:
     now = time.monotonic()
     if now - _transport_cache_ts > _TRANSPORT_CACHE_TTL:
         try:
-            _transport_cache = {
+            # DEF-217: MERGE instead of replace. A device that momentarily
+            # drops out of the CoreAudio enumeration (a USB blip — the exact
+            # moment cooldown decisions run) must keep its last-known
+            # transport instead of degrading to "unknown" and landing in the
+            # BT-era 30min tiers. Fresh values always win on conflict (a name
+            # that re-appears on a different transport — same headset via BT
+            # vs dongle — updates immediately); only ABSENCE is sticky.
+            _transport_cache.update({
                 name.lower(): transport
                 for name, _alive, transport in _enumerate_coreaudio_inputs()
-            }
+            })
         except Exception:
-            _transport_cache = {}
+            pass  # DEF-217: keep the last-known map on enumeration failure
         _transport_cache_ts = now
     return _transport_cache.get(device_name.lower(), 0)
 

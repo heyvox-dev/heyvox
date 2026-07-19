@@ -42,6 +42,19 @@ _PROCESSING_TIMER = None
 
 _MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.png")
 
+# Mic-level menu bar meter — small volume-reactive bars next to the red dot
+# while listening, so there's a "is it hearing me" signal even when the
+# floating pill is hidden (hud_menu_bar_only mode).
+_MIC_METER_BARS = 3
+_MIC_METER_BAR_W = 3
+_MIC_METER_GAP = 2
+_MIC_METER_H = 18  # was 14 — taller bars, still comfortably inside the ~22-24pt menu bar
+_MIC_METER_MIN_H = 1  # near-flat at silence (was 3 — too visible at rest)
+_MIC_METER_GAIN = 1.4  # pre-curve amplification so normal speech reaches the top of the range
+_MIC_METER_LOG_K = 9.0  # log-taper curve constant (log1p-based) — higher = more low-end expansion
+_MIC_METER_IMG_W = _MIC_METER_BARS * _MIC_METER_BAR_W + (_MIC_METER_BARS - 1) * _MIC_METER_GAP
+_MIC_METER_SMOOTHED = 0.0
+
 
 def _brand_menubar_image():
     """Load the HeyVox brand glyph (bubble + caret + sparkle) as a macOS
@@ -60,6 +73,61 @@ def _brand_menubar_image():
     img.setSize_(NSSize(26, 26))
     img.setTemplate_(True)
     return img
+
+
+def _mic_level_bars_image(level):
+    """Render the volume-reactive bars shown next to the red dot while
+    listening — 3 bars whose heights track the smoothed mic level, like a
+    tiny equalizer. Template image so macOS tints it correctly for light
+    and dark menu bars, same mechanism as the brand glyph.
+    """
+    global _MIC_METER_SMOOTHED
+    import math
+    from AppKit import NSBezierPath, NSColor, NSImage
+    from Foundation import NSSize
+
+    level = max(0.0, min(1.0, level * _MIC_METER_GAIN))
+    # Exponential smoothing: fast attack, slow release — same shape as the
+    # pill's WaveformView so the two indicators feel consistent.
+    alpha = 0.6 if level > _MIC_METER_SMOOTHED else 0.15
+    _MIC_METER_SMOOTHED = alpha * level + (1.0 - alpha) * _MIC_METER_SMOOTHED
+
+    # Log-taper curve (like an audio log-pot) expands the quiet/mid range
+    # (typical speech rarely hits the raw level's top end) so the bars
+    # visibly swing during normal talking instead of hovering near the
+    # floor; true silence (level=0) still curves to 0.
+    curved = math.log1p(_MIC_METER_LOG_K * _MIC_METER_SMOOTHED) / math.log1p(_MIC_METER_LOG_K)
+
+    # Per-bar multipliers give a mini-equalizer look instead of one solid
+    # block moving in lockstep.
+    multipliers = (0.55, 1.0, 0.75)
+    img = NSImage.alloc().initWithSize_(NSSize(_MIC_METER_IMG_W, _MIC_METER_H))
+    img.lockFocus()
+    NSColor.blackColor().set()
+    for i in range(_MIC_METER_BARS):
+        mult = multipliers[i % len(multipliers)]
+        bar_h = _MIC_METER_MIN_H + (_MIC_METER_H - _MIC_METER_MIN_H) * min(1.0, curved * mult)
+        x = i * (_MIC_METER_BAR_W + _MIC_METER_GAP)
+        y = (_MIC_METER_H - bar_h) / 2.0
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            ((x, y), (_MIC_METER_BAR_W, bar_h)), _MIC_METER_BAR_W / 2.0, _MIC_METER_BAR_W / 2.0,
+        ).fill()
+    img.unlockFocus()
+    img.setTemplate_(True)
+    return img
+
+
+def _reset_mic_meter():
+    global _MIC_METER_SMOOTHED
+    _MIC_METER_SMOOTHED = 0.0
+
+
+def _update_menubar_meter(status_item, level):
+    """Refresh the listening-state bars on every audio_level tick (~20fps,
+    same as the pill's waveform) — an earlier 10fps throttle made the bars
+    visibly lag behind speech, and a tiny 13x18px NSImage redraw is cheap
+    enough that there's no need to cut the rate."""
+    status_item.button().setImage_(_mic_level_bars_image(level))
 
 
 def _brand_hud_image(size=11):
@@ -452,7 +520,7 @@ def _apply_state(
     # Update menu bar status icon + label
     _STATUS_LABELS = {
         "idle":       ("\U0001f399", ""),                # 🎙 (icon only)
-        "listening":  ("\U0001f534", " Rec"),               # 🔴 Rec
+        "listening":  ("\U0001f534", ""),                   # 🔴 (+ live mic-level bars)
         "processing": ("\U0001f7e1", " Trans"),            # 🟡 Trans
         "speaking":   ("\U0001f7e2", " Speak"),             # 🟢 Speak
     }
@@ -593,21 +661,31 @@ def _apply_state(
             else:
                 btn.setToolTip_(f"Mic: {_friendly}")
         else:
-            # Non-idle states or crashed: use emoji text, clear image.
+            # Non-idle states or crashed: use emoji text, clear image — except
+            # "listening", which keeps the dot as text and adds live mic-level
+            # bars as the button image (see _mic_level_bars_image).
             # Reserve exact measured width BEFORE setting title so macOS doesn't
             # reflow and hide the item when it expands (NSVariableStatusItemLength
             # can disappear when neighbours like Docker leave no room).
+            _meter_w = (_MIC_METER_IMG_W + 6) if state_str == "listening" else 0
             try:
                 from AppKit import NSFont, NSFontAttributeName
                 from Foundation import NSString as _NSString
                 _mfont = NSFont.menuBarFontOfSize_(0)
                 _ns = _NSString.stringWithString_(_bar_title)
-                _w = int(_ns.sizeWithAttributes_({NSFontAttributeName: _mfont}).width) + 14
+                _w = int(_ns.sizeWithAttributes_({NSFontAttributeName: _mfont}).width) + 14 + _meter_w
             except Exception:
-                _w = 120
+                _w = 120 + _meter_w
             status_item.setLength_(_w)
-            status_item.button().setImage_(None)
-            status_item.button().setTitle_(_bar_title)
+            btn = status_item.button()
+            btn.setTitle_(_bar_title)
+            if state_str == "listening":
+                from AppKit import NSImageRight
+                _reset_mic_meter()
+                btn.setImagePosition_(NSImageRight)
+                btn.setImage_(_mic_level_bars_image(0.0))
+            else:
+                btn.setImage_(None)
         # Refresh menu on state change (updates transcript list, mute state)
         if update_status_menu is not None:
             update_status_menu()
@@ -755,6 +833,8 @@ def _make_dispatcher_class(
             elif msg_type == "audio_level":
                 level = msg_dict.get("level", 0.0)
                 waveform_view.setLevel_(level)
+                if status_item is not None and _LAST_STATE == "listening":
+                    _update_menubar_meter(status_item, level)
 
             elif msg_type == "transcript":
                 _set_processing_progress(processing_progress_views, 1.0)

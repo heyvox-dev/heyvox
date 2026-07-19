@@ -28,6 +28,8 @@ from heyvox.constants import (
     RECORDING_FLAG,
     HOTPLUG_RESTART_MARKER,
     PA_STORM_RESTART_MARKER,
+    WATCHDOG_STARTUP_DEADLINE_SECS,
+    WATCHDOG_STALE_KILL_SECS,
     TTS_PLAYING_FLAG,
     TTS_PLAYING_MAX_AGE_SECS,
     HUD_SOCKET_PATH,
@@ -513,6 +515,53 @@ def _start_wedge_supervisor(heartbeat: dict, ctx, log, hud_send) -> None:
     )
 
 
+def _start_liveness_watchdog(atexit_mod) -> None:
+    """DEF-213: spawn the out-of-process watchdog child.
+
+    A separate interpreter is the only guard that survives a GIL-holding
+    wedge (2026-07-14: audio init blocked ~17min and EVERY Python thread —
+    including the DEF-210 supervisor — stood still). The child SIGKILLs us if
+    init never reaches the main loop within WATCHDOG_STARTUP_DEADLINE_SECS or
+    the heartbeat later goes stale beyond WATCHDOG_STALE_KILL_SECS; launchd's
+    KeepAlive/SuccessfulExit=false then relaunches. The child holds a flock
+    singleton, so execv self-restarts (same PID) don't stack watchdogs — the
+    incumbent keeps watching and the respawned child exits quietly.
+
+    Failure to spawn is non-fatal: we log and run unguarded (pre-DEF-213
+    behavior). Opt out with HEYVOX_NO_WATCHDOG=1 (e.g. debugging under lldb).
+    """
+    if os.environ.get("HEYVOX_NO_WATCHDOG"):
+        log("Liveness watchdog disabled via HEYVOX_NO_WATCHDOG (DEF-213 unguarded)")
+        return
+    try:
+        import subprocess as _sp
+        proc = _sp.Popen([
+            sys.executable, "-m", "heyvox.watchdog",
+            str(os.getpid()), HEYVOX_HEARTBEAT_FILE,
+            str(int(WATCHDOG_STARTUP_DEADLINE_SECS)),
+            str(int(WATCHDOG_STALE_KILL_SECS)),
+        ])
+
+        def _stop_watchdog() -> None:
+            # Clean shutdowns must not leave a child that would outlive us
+            # only to exit on its next PPID check anyway. execv restarts skip
+            # atexit — intended: the incumbent child keeps guarding the PID.
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+        atexit_mod.register(_stop_watchdog)
+        log(
+            f"Liveness watchdog armed (pid={proc.pid}, DEF-213): SIGKILL+relaunch "
+            f"if init never reaches the main loop within "
+            f"{WATCHDOG_STARTUP_DEADLINE_SECS:.0f}s or the heartbeat goes stale "
+            f">{WATCHDOG_STALE_KILL_SECS:.0f}s"
+        )
+    except Exception as e:
+        log(f"Liveness watchdog failed to start (continuing unguarded): {e}")
+
+
 def _stop_tts_from_escape(hud_send_fn) -> None:
     """Stop TTS playback and clear queue (used by Escape key handler)."""
     from heyvox.audio.tts import stop_all
@@ -561,6 +610,12 @@ def _setup(config: HeyvoxConfig):
     import atexit
     atexit.register(_release_singleton)
     atexit.register(lambda: log("EXIT: atexit handler fired -- process is terminating"))
+
+    # DEF-213: out-of-process liveness watchdog — must start BEFORE the audio
+    # init below, which is exactly the phase that wedged for 17min holding
+    # the GIL (no in-process thread could act). Spawned here so the unguarded
+    # window is as small as possible.
+    _start_liveness_watchdog(atexit)
 
     # Startup cleanup: remove stale flags from previous crash/kill
     try:
@@ -675,37 +730,56 @@ def _setup(config: HeyvoxConfig):
         log("HUD overlay disabled via config")
 
     # HUD send function (closure over ctx)
+    def _hud_reconnect_now(reason: str) -> bool:
+        """Rate-limited reconnect attempt. Returns whether the client is
+        connected afterward."""
+        now = time.time()
+        if now - ctx.hud_last_reconnect < _HUD_RECONNECT_INTERVAL:
+            return False
+        ctx.hud_last_reconnect = now
+        log(f"[HUD-DBG] Attempting reconnect for {reason}...")
+        try:
+            ctx.hud_client.reconnect()
+        except Exception as e:
+            log(f"[HUD-DBG] Reconnect failed: {e}")
+            return False
+        if ctx.hud_client._sock is None:
+            log("[HUD-DBG] Reconnect succeeded but sock still None")
+            return False
+        log("[HUD-DBG] Reconnected!")
+        return True
+
     def hud_send(msg: dict) -> None:
         """Send a message to the HUD overlay. No-op if not connected."""
         if ctx.hud_client is None:
             log(f"[HUD-DBG] hud_client is None, skipping {msg.get('type')}")
             return
         if ctx.hud_client._sock is None:
-            now = time.time()
-            if now - ctx.hud_last_reconnect < _HUD_RECONNECT_INTERVAL:
+            if not _hud_reconnect_now(msg.get("type")):
                 return
-            ctx.hud_last_reconnect = now
-            log(f"[HUD-DBG] Attempting reconnect for {msg.get('type')}...")
-            try:
-                ctx.hud_client.reconnect()
-            except Exception as e:
-                log(f"[HUD-DBG] Reconnect failed: {e}")
-                return
-            if ctx.hud_client._sock is None:
-                log("[HUD-DBG] Reconnect succeeded but sock still None")
-                return
-            log("[HUD-DBG] Reconnected!")
         try:
-            ctx.hud_client.send(msg)
-            # DEF-053: audio_level fires ~20 Hz and floods the log with empty
-            # "state=" lines (msg.state is absent on that message type). Skip
-            # per-message logging for audio_level; the other message types are
-            # infrequent enough that the debug trail stays useful.
-            if msg.get("type") != "audio_level":
-                log(
-                    f"[HUD-DBG] Sent {msg.get('type')}: "
-                    f"{msg.get('state', msg.get('text', ''))}"
-                )
+            ok = ctx.hud_client.send(msg)
+            # DEF-215: `_sock` looks connected right up until a send() into a
+            # peer that already restarted (e.g. the HUD overlay process being
+            # relaunched) actually fails — so the first message after a
+            # restart, often the "state" transition the overlay's rendering
+            # gates on, would otherwise be silently dropped and desync the
+            # overlay's view of the world until the NEXT transition. Retry
+            # once immediately instead of waiting for the next hud_send() call
+            # to notice the break.
+            if not ok and ctx.hud_client._sock is None:
+                if _hud_reconnect_now(f"{msg.get('type')} (stale socket)"):
+                    ok = ctx.hud_client.send(msg)
+            if ok:
+                # DEF-053: audio_level fires ~20 Hz and floods the log with empty
+                # "state=" lines (msg.state is absent on that message type). Skip
+                # per-message logging for audio_level; the other message types are
+                # infrequent enough that the debug trail stays useful.
+                if msg.get("type") != "audio_level":
+                    log(
+                        f"[HUD-DBG] Sent {msg.get('type')}: "
+                        f"{msg.get('state', msg.get('text', ''))}"
+                    )
         except Exception as e:
             log(f"[HUD-DBG] Send failed: {e}")
 
