@@ -23,12 +23,16 @@ import heyvox.audio.mic as mic
 
 @pytest.fixture(autouse=True)
 def _reset_mic_state():
-    """Clear cooldowns and the storm tally before and after each test."""
+    """Clear cooldowns, storm tally, and transport cache before/after each test."""
     mic.clear_device_cooldowns()
     mic.record_pa_open_success()
+    mic._transport_cache.clear()
+    mic._transport_cache_ts = 0.0
     yield
     mic.clear_device_cooldowns()
     mic.record_pa_open_success()
+    mic._transport_cache.clear()
+    mic._transport_cache_ts = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +63,71 @@ def test_unknown_transport_uses_bt_tiers(monkeypatch):
     key = "mystery device"
     mic._device_failure_counts[key] = 4
     assert mic._get_adaptive_cooldown(key) == 1800
+
+
+# ---------------------------------------------------------------------------
+# DEF-217: sticky transport cache
+# ---------------------------------------------------------------------------
+
+_USB_FOURCC = mic._kAudioDeviceTransportTypeUSB
+_BT_FOURCC = int.from_bytes(b"blue", "big")
+
+
+def _force_cache_refresh():
+    mic._transport_cache_ts = 0.0
+
+
+def test_transport_sticky_when_device_momentarily_invisible(monkeypatch):
+    """A USB device missing from one enumeration (blip) keeps its last-known
+    transport — it must NOT degrade to unknown/BT-era tiers (DEF-217)."""
+    monkeypatch.setattr(
+        mic, "_enumerate_coreaudio_inputs",
+        lambda: [("G535 Wireless Gaming Headset", True, _USB_FOURCC)],
+    )
+    _force_cache_refresh()
+    assert mic.is_usb_transport("G535 Wireless Gaming Headset")
+
+    monkeypatch.setattr(mic, "_enumerate_coreaudio_inputs", lambda: [])
+    _force_cache_refresh()
+    assert mic.is_usb_transport("G535 Wireless Gaming Headset"), (
+        "momentary absence from the enumeration must not drop the transport"
+    )
+
+
+def test_transport_fresh_value_wins_over_sticky(monkeypatch):
+    """Same device name re-appearing on a different transport updates
+    immediately — only ABSENCE is sticky, never a conflicting live value."""
+    monkeypatch.setattr(
+        mic, "_enumerate_coreaudio_inputs",
+        lambda: [("G435 Wireless Gaming Headset", True, _USB_FOURCC)],
+    )
+    _force_cache_refresh()
+    assert mic.is_usb_transport("G435 Wireless Gaming Headset")
+
+    monkeypatch.setattr(
+        mic, "_enumerate_coreaudio_inputs",
+        lambda: [("G435 Wireless Gaming Headset", True, _BT_FOURCC)],
+    )
+    _force_cache_refresh()
+    assert not mic.is_usb_transport("G435 Wireless Gaming Headset")
+    assert mic.get_device_transport("G435 Wireless Gaming Headset") == _BT_FOURCC
+
+
+def test_transport_kept_on_enumeration_failure(monkeypatch):
+    """A CoreAudio failure keeps the last-known map instead of wiping it."""
+    monkeypatch.setattr(
+        mic, "_enumerate_coreaudio_inputs",
+        lambda: [("G535 Wireless Gaming Headset", True, _USB_FOURCC)],
+    )
+    _force_cache_refresh()
+    assert mic.is_usb_transport("G535 Wireless Gaming Headset")
+
+    def _boom():
+        raise RuntimeError("CoreAudio unavailable")
+
+    monkeypatch.setattr(mic, "_enumerate_coreaudio_inputs", _boom)
+    _force_cache_refresh()
+    assert mic.is_usb_transport("G535 Wireless Gaming Headset")
 
 
 # ---------------------------------------------------------------------------
