@@ -675,37 +675,56 @@ def _setup(config: HeyvoxConfig):
         log("HUD overlay disabled via config")
 
     # HUD send function (closure over ctx)
+    def _hud_reconnect_now(reason: str) -> bool:
+        """Rate-limited reconnect attempt. Returns whether the client is
+        connected afterward."""
+        now = time.time()
+        if now - ctx.hud_last_reconnect < _HUD_RECONNECT_INTERVAL:
+            return False
+        ctx.hud_last_reconnect = now
+        log(f"[HUD-DBG] Attempting reconnect for {reason}...")
+        try:
+            ctx.hud_client.reconnect()
+        except Exception as e:
+            log(f"[HUD-DBG] Reconnect failed: {e}")
+            return False
+        if ctx.hud_client._sock is None:
+            log("[HUD-DBG] Reconnect succeeded but sock still None")
+            return False
+        log("[HUD-DBG] Reconnected!")
+        return True
+
     def hud_send(msg: dict) -> None:
         """Send a message to the HUD overlay. No-op if not connected."""
         if ctx.hud_client is None:
             log(f"[HUD-DBG] hud_client is None, skipping {msg.get('type')}")
             return
         if ctx.hud_client._sock is None:
-            now = time.time()
-            if now - ctx.hud_last_reconnect < _HUD_RECONNECT_INTERVAL:
+            if not _hud_reconnect_now(msg.get("type")):
                 return
-            ctx.hud_last_reconnect = now
-            log(f"[HUD-DBG] Attempting reconnect for {msg.get('type')}...")
-            try:
-                ctx.hud_client.reconnect()
-            except Exception as e:
-                log(f"[HUD-DBG] Reconnect failed: {e}")
-                return
-            if ctx.hud_client._sock is None:
-                log("[HUD-DBG] Reconnect succeeded but sock still None")
-                return
-            log("[HUD-DBG] Reconnected!")
         try:
-            ctx.hud_client.send(msg)
-            # DEF-053: audio_level fires ~20 Hz and floods the log with empty
-            # "state=" lines (msg.state is absent on that message type). Skip
-            # per-message logging for audio_level; the other message types are
-            # infrequent enough that the debug trail stays useful.
-            if msg.get("type") != "audio_level":
-                log(
-                    f"[HUD-DBG] Sent {msg.get('type')}: "
-                    f"{msg.get('state', msg.get('text', ''))}"
-                )
+            ok = ctx.hud_client.send(msg)
+            # DEF-215: `_sock` looks connected right up until a send() into a
+            # peer that already restarted (e.g. the HUD overlay process being
+            # relaunched) actually fails — so the first message after a
+            # restart, often the "state" transition the overlay's rendering
+            # gates on, would otherwise be silently dropped and desync the
+            # overlay's view of the world until the NEXT transition. Retry
+            # once immediately instead of waiting for the next hud_send() call
+            # to notice the break.
+            if not ok and ctx.hud_client._sock is None:
+                if _hud_reconnect_now(f"{msg.get('type')} (stale socket)"):
+                    ok = ctx.hud_client.send(msg)
+            if ok:
+                # DEF-053: audio_level fires ~20 Hz and floods the log with empty
+                # "state=" lines (msg.state is absent on that message type). Skip
+                # per-message logging for audio_level; the other message types are
+                # infrequent enough that the debug trail stays useful.
+                if msg.get("type") != "audio_level":
+                    log(
+                        f"[HUD-DBG] Sent {msg.get('type')}: "
+                        f"{msg.get('state', msg.get('text', ''))}"
+                    )
         except Exception as e:
             log(f"[HUD-DBG] Send failed: {e}")
 
