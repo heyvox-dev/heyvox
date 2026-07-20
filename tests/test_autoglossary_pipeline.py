@@ -433,3 +433,102 @@ def test_glossary_item_accepts_pinned_field():
          "confidence": 0.9, "pinned": True}
     )
     assert pinned.pinned is True
+
+
+# ---------------------------------------------------------------------------
+# DEF-218 — corpus_freq must be word-boundary matched, not substring
+# ---------------------------------------------------------------------------
+
+def test_count_in_corpus_uses_word_boundaries():
+    """DEF-218: a plain substring match over-counted short `wrong` terms that
+    occur inside longer words — live data showed "jet" scored 371+ from
+    "jetzt"/"project"/"subject" hits vs. 3 real standalone occurrences, making
+    it outrank every other glossary term."""
+    from heyvox.audio.vocab_learner import count_in_corpus
+
+    corpus = [
+        "ich mache das jetzt gleich",
+        "schau mal ins project verzeichnis",
+        "das ist das subject der mail",
+        "er öffnet den jet und fragt dort",  # real standalone hit
+    ]
+    assert count_in_corpus("jet", corpus) == 1, \
+        "must match only the standalone word, not the substring inside jetzt/project/subject"
+
+
+def test_count_in_corpus_still_matches_multiword_phrases():
+    """Word-boundary matching must not break existing multi-word `wrong` terms."""
+    from heyvox.audio.vocab_learner import count_in_corpus
+
+    corpus = ["I mentioned black hole earlier", "blackhole is a different word", "no match here"]
+    assert count_in_corpus("black hole", corpus) == 1
+
+
+def test_count_in_corpus_case_insensitive():
+    from heyvox.audio.vocab_learner import count_in_corpus
+
+    corpus = ["Zero was misheard", "no match"]
+    assert count_in_corpus("zero", corpus) == 1
+
+
+# ---------------------------------------------------------------------------
+# DEF-219 — a garbled "hey <word>" wake-word tail must not leak into the
+# glossary as a fake content correction (belt-and-suspenders, non-negotiable 1)
+# ---------------------------------------------------------------------------
+
+def test_is_wake_tail_catches_known_bare_forms():
+    """DEF-219: "job" is the tail of the known "hey job"/"hey job is" variant
+    (live data: "Hey, job."/"Hey, John." — a garbled "Hey Vox" — was extracted
+    as a fake "job"->"John" content correction)."""
+    from heyvox.audio.vocab_learner import is_wake_tail
+
+    assert is_wake_tail("job"), '"job" is a known bare wake-word tail ("hey job")'
+    assert is_wake_tail("Job."), "must strip trailing punctuation before matching"
+
+
+def test_is_wake_tail_does_not_flag_real_terms():
+    """DEF-219 regression guard: the fix must NOT reuse is_wake_word()'s fuzzy
+    regex fallback (text_processing.strip_wake_words Pass 2), which matches
+    "hey" + almost any short word — verified live to false-positive on "chat",
+    "Nemo", and "Muslima" (a real name in Franz's transcripts, not a bug)."""
+    from heyvox.audio.vocab_learner import is_wake_tail
+
+    for term in ("chat", "Nemo", "Muslima", "John", "MIC", "CLI", "Claude", "Xero"):
+        assert not is_wake_tail(term), f"{term!r} must NOT be flagged — real/plausible glossary term"
+
+
+def test_merge_store_drops_wake_tail_leak():
+    """DEF-219: merge_store's belt-and-suspenders filter must reject a
+    wrong/right pair where `wrong` is a bare known wake-word tail, even though
+    GlossaryItem validation already accepts it as a well-formed item."""
+    from heyvox.audio.vocab_learner import merge_store
+
+    items = [{"wrong": "job", "right": "John", "kind": "public", "confidence": 0.95}]
+    store: dict = {}
+    merge_store(items, ["Hey, job."] * 5, store)
+    assert "job" not in store, "wake-word-tail leak must not enter the store"
+
+
+def test_build_initial_prompt_drops_wake_tail_leak():
+    """DEF-219: even a stale store entry (e.g. from before this fix) must be
+    caught by build_initial_prompt's final gate — mirrors the existing
+    is_wake_word 'last gate' belt-and-suspenders comment."""
+    pytest.importorskip("mlx_whisper")
+    from heyvox.audio.vocab_learner import build_initial_prompt
+
+    items = [
+        {"wrong": "job", "right": "John", "corpus_freq": 35, "confidence": 0.95},
+        {"wrong": "zero", "right": "Xero", "corpus_freq": 10, "confidence": 0.9},
+    ]
+    toks = build_initial_prompt(items, max_terms=30).split()
+    assert "John" not in toks, f"wake-word-tail leak reached the live prompt: {toks}"
+    assert "Xero" in toks
+
+
+def test_glossary_item_rejects_wake_tail_at_validation():
+    """DEF-219: reject as early as possible — at Pydantic validation, before
+    the item ever reaches the store."""
+    from heyvox.audio.vocab_learner import GlossaryItem
+
+    with pytest.raises(Exception):
+        GlossaryItem(wrong="job", right="John", kind="public", confidence=0.95)

@@ -348,6 +348,18 @@ def transcribe_audio(
         kwargs["condition_on_previous_text"] = False
         kwargs["compression_ratio_threshold"] = 2.2
         kwargs["logprob_threshold"] = -0.8
+        # DEF-195: cap the temperature fallback. mlx_whisper defaults to a
+        # 6-step fallback (0.0..1.0); when the tightened thresholds above fail
+        # on borderline audio (e.g. English terms inside German speech —
+        # "Google Doc"→"Dugel-Dog"), Whisper re-decodes at EVERY step, so a
+        # warm 0.3s decode balloons to 5-8s (measured RTF 3.2) AND still returns
+        # garbage. Tightened 6→3→2 steps: the 07-08 3-step cap still left ~4.8s
+        # low-load outliers (3 passes), so 07-09 dropped it to 2. The fallback
+        # rarely rescues the garbage anyway (verified against real debug WAVs),
+        # so fewer passes trade almost nothing for a lower ceiling. NOT a
+        # mic-level issue: the fast clean clips measured quieter; the trigger is
+        # decode-difficulty, not level.
+        kwargs["temperature"] = (0.0, 0.2)
         # Phase 16: bias the first decode window toward the learned glossary. Engine-gated
         # (sherpa-onnx has no initial_prompt equivalent, Pitfall 5) AND model-gated to the
         # prompt-robust turbo class (DEF-152 — fragile models collapse under the prompt;

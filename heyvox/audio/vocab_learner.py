@@ -109,6 +109,27 @@ def is_wake_word(text: str) -> bool:
     return stripped == ""
 
 
+def is_wake_tail(word: str) -> bool:
+    """DEF-219: True if *word* alone is the tail of a known "hey <word>" wake
+    form (e.g. "job" from a transcript ending "...Hey, job." — a garbled "Hey
+    Vox"/"Hey Jarvis").
+
+    is_wake_word() only recognises a FULL phrase ("hey job") — but the LLM
+    extractor strips the leading "hey" before emitting a wrong/right pair, so
+    a bare "job" slipped past every existing check even though "hey job" is
+    already a known variant in _WAKE_WORD_PHRASES (confirmed live: 35 corpus
+    hits, all "Hey, job."/"Hey, John." wake-word tails, none a real content
+    correction — the resulting "job"->"John" entry reached the live
+    initial_prompt). Checked against the curated _WAKE_VARIANTS set directly —
+    deliberately NOT is_wake_word()'s fuzzy regex fallback (text_processing.py
+    strip_wake_words Pass 2), which matches "hey" + almost any short word and
+    would reject legitimate short glossary terms too (verified: it flagged
+    "chat", "Nemo", "Muslima" as false positives in testing).
+    """
+    norm = word.strip().lower().strip(".,!?")
+    return f"hey {norm}" in _WAKE_VARIANTS or f"hey, {norm}" in _WAKE_VARIANTS
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schema
 # ---------------------------------------------------------------------------
@@ -132,7 +153,7 @@ class GlossaryItem(BaseModel):
     @classmethod
     def strip_and_reject_wake(cls, v: str) -> str:
         v = v.strip()
-        if is_wake_word(v):
+        if is_wake_word(v) or is_wake_tail(v):
             raise ValueError(f"wake-word form rejected: {v!r}")
         return v
 
@@ -207,7 +228,10 @@ def build_initial_prompt(items: list[dict], max_terms: int) -> str:
         if len(out) >= max_terms:
             break
         piece = r["right"]
-        if is_wake_word(piece):
+        # DEF-219: is_wake_tail must also see the ORIGINAL `wrong` form — the
+        # leaked "job"->"John" pair only reveals itself as a wake-word tail
+        # via "job" ("hey job"); "John" alone looks like a plausible term.
+        if is_wake_word(piece) or is_wake_tail(piece) or is_wake_tail(r.get("wrong", "")):
             continue  # last gate: never let a wake form into the prompt
         key = piece.strip().lower()
         if key in seen:
@@ -434,9 +458,17 @@ def build_extraction_prompt(batch: list[str], seeds: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def count_in_corpus(wrong: str, transcripts: list[str]) -> int:
-    """Return the number of transcripts containing *wrong* (case-insensitive)."""
-    needle = wrong.lower()
-    return sum(1 for t in transcripts if needle in t.lower())
+    """Return the number of transcripts containing *wrong* as a whole word/phrase.
+
+    DEF-218: a plain substring match over-counts any short `wrong` that occurs
+    inside longer words — "jet" inside "jetzt"/"project"/"subject" inflated its
+    corpus_freq to 371+ vs. 3 real standalone occurrences, making it outrank
+    every other glossary term for the initial_prompt token budget. Word-boundary
+    matching (case-insensitive) fixes short substrings while still matching
+    multi-word phrases like "black hole" as a unit.
+    """
+    pattern = re.compile(r"\b" + re.escape(wrong) + r"\b", re.IGNORECASE)
+    return sum(1 for t in transcripts if pattern.search(t))
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +539,7 @@ def merge_store(
         wrong = item.wrong
         right = item.right
         # Belt-and-suspenders post-filter (non-negotiable 1)
-        if is_wake_word(wrong) or is_wake_word(right):
+        if is_wake_word(wrong) or is_wake_word(right) or is_wake_tail(wrong) or is_wake_tail(right):
             log.debug("merge_store: dropped wake-word item wrong=%r right=%r", wrong, right)
             continue
         freq = count_in_corpus(wrong, transcripts)

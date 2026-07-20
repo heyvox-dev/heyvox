@@ -472,3 +472,54 @@ class TestRecordingFlagPaths:
 
         assert "heyvox-recording" in content, \
             "tts-orchestrator.sh must check /tmp/heyvox-recording flag"
+
+
+class TestDef199EmphasisRescue:
+    """DEF-199: emphatic word-runs ('viel viel viel viel') must NOT discard the
+    whole coherent utterance. collapse_word_runs + looks_coherent rescue it;
+    genuine degenerate output is still discarded."""
+
+    @staticmethod
+    def _rescue(text, stt=2.2, audio=18.6):
+        """Mirror recording.py's discard-with-rescue predicate.
+        Returns the kept text, or None if discarded."""
+        from heyvox.text_processing import (
+            is_garbled, collapse_word_runs, looks_coherent,
+        )
+        if not is_garbled(text, stt_secs=stt, audio_secs=audio):
+            return text
+        r = collapse_word_runs(text)
+        if (r != text and looks_coherent(r)
+                and not is_garbled(r, stt_secs=stt, audio_secs=audio)):
+            return r
+        return None
+
+    def test_collapse_word_runs(self):
+        from heyvox.text_processing import collapse_word_runs
+        assert collapse_word_runs("viel viel viel viel schneller") == "viel viel schneller"
+        assert collapse_word_runs("a b c") == "a b c"
+        # case/punctuation-insensitive; keeps the first copies' spelling
+        assert collapse_word_runs("VIEL viel Viel Viel schnell") == "VIEL viel schnell"
+
+    def test_looks_coherent(self):
+        from heyvox.text_processing import looks_coherent
+        assert looks_coherent("bitte committe alles und deploye es dann") is True
+        assert looks_coherent("doc doc") is False          # too short
+        assert looks_coherent("doc doc doc doc doc doc") is False  # low diversity
+
+    def test_emphatic_repetition_rescued(self):
+        text = (
+            "Hey Vox, was ich nicht verstehe, es war schon viel schneller und "
+            "ich erkenne keinen Unterschied aber es war gestern teilweise "
+            "viel viel viel viel viel viel viel schneller Hey Vox"
+        )
+        rescued = self._rescue(text)
+        assert rescued is not None                 # NOT discarded (was the bug)
+        assert "viel viel viel viel" not in rescued  # run collapsed
+        assert "keinen Unterschied" in rescued     # real message preserved
+
+    def test_pure_degenerate_still_discarded(self):
+        assert self._rescue("doc doc doc doc doc doc doc doc") is None
+
+    def test_bang_still_discarded(self):
+        assert self._rescue("!") is None
