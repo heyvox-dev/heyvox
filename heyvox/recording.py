@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from heyvox.text_processing import is_garbled, strip_wake_words
+from heyvox.text_processing import (
+    is_garbled, strip_wake_words, collapse_word_runs, looks_coherent,
+)
 from heyvox.constants import RECORDING_FLAG, STT_DEBUG_DIR, TTS_PLAYING_FLAG
 
 if TYPE_CHECKING:
@@ -982,7 +984,35 @@ class RecordingStateMachine:
             # DEF-083: pass STT elapsed + audio duration so the detector can
             # catch hallucinations that slip past text-level checks when
             # Whisper's temperature-fallback loop fires (abnormally slow STT).
-            if text and is_garbled(text, stt_secs=elapsed, audio_secs=duration):
+            _garbled = bool(text) and is_garbled(
+                text, stt_secs=elapsed, audio_secs=duration
+            )
+            if _garbled:
+                # DEF-199: before discarding, try collapsing emphatic/echo word
+                # runs ("viel viel viel viel schneller" -> "viel viel schneller").
+                # A single repeated word trips is_garbled's run-length/tail-window
+                # checks even when the rest is a fully coherent sentence — Franz's
+                # emphatic repetition (how he actually speaks) was getting the
+                # WHOLE message discarded. Keep the collapsed text if it's coherent
+                # and no longer garbled: losing the real message is far worse than
+                # pasting a slightly-collapsed emphasis (and the run-length check's
+                # own DEF-083 target — a garbage "can can can" tail — degrades
+                # gracefully to prefix + "can can" rather than a total loss).
+                _rescued = collapse_word_runs(text)
+                if (
+                    _rescued != text
+                    and looks_coherent(_rescued)
+                    and not is_garbled(
+                        _rescued, stt_secs=elapsed, audio_secs=duration
+                    )
+                ):
+                    self._log(
+                        f"garbled-rescue (DEF-199): collapsed word-run, keeping "
+                        f"'{text[:50]}' -> '{_rescued[:50]}'"
+                    )
+                    text = _rescued
+                    _garbled = False
+            if _garbled:
                 self._log(
                     f"FILTER (garbled, stt={elapsed:.1f}s): Discarding transcription: {text[:80]}"
                 )

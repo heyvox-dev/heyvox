@@ -270,6 +270,56 @@ def is_garbled(
     return False
 
 
+def collapse_word_runs(text: str, max_run: int = 2) -> str:
+    """Collapse runs of the same word repeated >max_run times in a row.
+
+    DEF-199: a run of one repeated word ("viel viel viel viel schneller" —
+    emphatic repetition, which is how Franz speaks) trips is_garbled's
+    run-length / tail-window checks and the WHOLE coherent utterance is
+    discarded. Collapsing the run to `max_run` copies preserves the meaning
+    (and a hint of the emphasis) while defusing the degenerate shape. Also
+    tidies imperfect stop-wake echoes the DEF-091 strip missed. Comparison is
+    case/punctuation-insensitive; original spelling of the kept copies is
+    preserved.
+    """
+    words = text.split()
+    if len(words) <= max_run:
+        return text
+
+    def _norm(w: str) -> str:
+        return w.lower().strip(".,!?'\"")
+
+    out: list[str] = []
+    run_key = None
+    run_n = 0
+    for w in words:
+        k = _norm(w)
+        if k and k == run_key:
+            run_n += 1
+            if run_n <= max_run:
+                out.append(w)
+            # else: drop the excess copy
+        else:
+            run_key = k
+            run_n = 1
+            out.append(w)
+    return " ".join(out)
+
+
+def looks_coherent(text: str) -> bool:
+    """True if `text` has enough words + word-diversity to be real speech.
+
+    DEF-191/199 criterion: >=5 words AND unique-word-ratio >= 0.5. Used to
+    decide whether a garbled-flagged transcription is worth rescuing (a
+    coherent sentence that only tripped a local-repetition check) vs a genuine
+    degenerate decode.
+    """
+    words = text.split()
+    if len(words) < 5:
+        return False
+    return len(set(w.lower() for w in words)) / len(words) >= 0.5
+
+
 def strip_wake_words(text: str, start_model: str, stop_model: str) -> str:
     """Remove wake word phrases from the beginning and end of transcription.
 
