@@ -7,13 +7,27 @@ the cue sound and triggering a false wake word detection.
 """
 
 import os
-import signal
 import subprocess
 import threading
 import time
 
-# Auto-reap child processes (afplay) to prevent zombie accumulation.
-signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
+def _reap_async(proc: subprocess.Popen) -> None:
+    """Reap a fire-and-forget child (afplay) without blocking the caller.
+
+    DEF-220: this module used to set SIGCHLD=SIG_IGN process-wide to avoid
+    zombie accumulation from these un-waited Popen calls. That handler is
+    process-global -- it also silently broke every OTHER subprocess.run()/
+    Popen.wait() call anywhere in the same process (e.g. tts.py's herald
+    calls), whose blocking os.waitpid() can then hang indefinitely if the
+    kernel auto-reaps the child before Python's own wait sees the exit
+    status. When that happened on the CGEventTap callback thread (ptt.py),
+    it wedged the tap permanently -- Escape/PTT looked "dead" with no error.
+    A per-Popen daemon thread reaps just this child, so no global signal
+    disposition is touched.
+    """
+    threading.Thread(target=proc.wait, daemon=True).start()
+
 
 # Module-level suppression timestamp: wake word detection is skipped until this time.
 _cue_suppress_until: float = 0.0
@@ -114,6 +128,7 @@ def _resample_cue(cue_file: str, target_rate: int):
             ["afconvert", "-f", "WAVE", "-d", f"LEI16@{target_rate}",
              "-c", "1", cue_file, tmp],
             capture_output=True,
+            timeout=2,
         )
         if r.returncode != 0 or not os.path.exists(tmp):
             return None
@@ -235,12 +250,13 @@ def audio_cue(
         pass
 
     if not _play_via_sounddevice(cue_file):
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["afplay", cue_file],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        _reap_async(proc)
 
 
 def is_suppressed() -> bool:
@@ -272,9 +288,10 @@ def device_change_cue(device_name: str, device_type: str = "input") -> None:
     with _suppress_lock:
         _cue_suppress_until = time.time() + 1.0
 
-    subprocess.Popen(
+    proc = subprocess.Popen(
         ["afplay", sound],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    _reap_async(proc)
