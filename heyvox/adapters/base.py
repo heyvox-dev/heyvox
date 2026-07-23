@@ -6,7 +6,8 @@ and how many times. Text injection itself is handled by main._send_local
 using capture_lock + type_text (not the adapter).
 """
 
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Optional, Protocol
 
 
 class AgentAdapter(Protocol):
@@ -40,9 +41,6 @@ class AgentAdapter(Protocol):
 # An app declares its provider by name in its app profile
 # (`workspace_provider`); the registry lives in heyvox.adapters. Apps without
 # workspace management simply have no provider and every consumer no-ops.
-
-from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass(frozen=True)
