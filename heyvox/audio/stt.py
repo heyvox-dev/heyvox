@@ -24,6 +24,30 @@ import numpy as np
 _LOAD_TIMEOUT = 120  # seconds — cold load can be very slow under swap pressure
 _TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
 
+
+def _run_with_timeout(fn, timeout: float):
+    """Run ``fn`` on a worker thread, bounded by ``timeout`` seconds.
+
+    DEF-221: this must NOT be a ``with ThreadPoolExecutor(...)`` block. The
+    context manager's ``__exit__`` calls ``shutdown(wait=True)``, which joins
+    the worker — so after ``future.result(timeout=...)`` raised, the with-exit
+    still blocked on the wedged transcription thread and the 30s guard was
+    silently worthless against a real hang. On success we join (clean release
+    of MLX memory before continuing); on timeout we abandon the worker
+    (``shutdown(wait=False)``) and let it finish or wedge on its own.
+
+    Raises FuturesTimeout on deadline; re-raises whatever ``fn`` raised.
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(fn)
+        result = future.result(timeout=timeout)
+    except BaseException:
+        executor.shutdown(wait=False)
+        raise
+    executor.shutdown(wait=True)
+    return result
+
 # DEF-171: pthread QoS class for the transcription worker thread. One tier
 # below QOS_CLASS_USER_INTERACTIVE (0x21) on purpose — that top tier is
 # reserved for UI-blocking work, and this codebase already has a thread that
@@ -384,9 +408,13 @@ def transcribe_audio(
 
         try:
             for seg_idx, segment in enumerate(segments):
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_run_mlx_transcribe, segment)
-                    result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+                # DEF-221: _run_with_timeout, NOT `with ThreadPoolExecutor` —
+                # the context manager's exit joined the wedged worker and
+                # nullified the timeout.
+                result = _run_with_timeout(
+                    lambda seg=segment: _run_mlx_transcribe(seg),
+                    _TRANSCRIBE_TIMEOUT,
+                )
                 text = result["text"].strip()
                 if text:
                     parts.append(text)
@@ -433,9 +461,9 @@ def transcribe_audio(
             return " ".join(parts)
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_sherpa_transcribe)
-                return future.result(timeout=_TRANSCRIBE_TIMEOUT)
+            # DEF-221: see _run_with_timeout — the previous `with` form joined
+            # the wedged worker on exit, nullifying the timeout.
+            return _run_with_timeout(_sherpa_transcribe, _TRANSCRIBE_TIMEOUT)
         except FuturesTimeout:
             _log(f"ERROR: Sherpa transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
             return ""

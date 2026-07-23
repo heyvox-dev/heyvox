@@ -2296,3 +2296,51 @@ def test_def216_reset_interval_at_least_800ms():
         f"_MODEL_RESET_INTERVAL={m.group(1)} — below the 0.8s floor the "
         f"DEF-216 clip replay established as safe for stop-word detection"
     )
+
+
+# ---------------------------------------------------------------------------
+# DEF-221: the STT transcription timeout must actually bound the wait.
+#
+# `with ThreadPoolExecutor(...)` calls shutdown(wait=True) on exit, which
+# joins the worker thread — so after future.result(timeout=30) raised, the
+# with-exit still blocked on the wedged transcription thread and the guard
+# was silently worthless against a real hang (the exact class DEF-075/164
+# were about). _run_with_timeout abandons the worker on timeout instead.
+# ---------------------------------------------------------------------------
+
+
+def test_def221_stt_timeout_returns_promptly_on_wedged_worker():
+    import threading
+    import time as _t
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    import pytest as _pytest
+    from heyvox.audio.stt import _run_with_timeout
+
+    release = threading.Event()
+    try:
+        t0 = _t.monotonic()
+        with _pytest.raises(FuturesTimeout):
+            _run_with_timeout(lambda: release.wait(30.0), timeout=0.2)
+        elapsed = _t.monotonic() - t0
+        assert elapsed < 2.0, (
+            f"timeout path took {elapsed:.1f}s — the worker join is back "
+            f"(DEF-221: with-ThreadPoolExecutor exit blocks on the wedged thread)"
+        )
+    finally:
+        release.set()  # let the abandoned worker finish so pytest can exit
+
+
+def test_def221_success_path_returns_result():
+    from heyvox.audio.stt import _run_with_timeout
+    assert _run_with_timeout(lambda: "ok", timeout=5.0) == "ok"
+
+
+def test_def221_worker_exception_propagates():
+    import pytest as _pytest
+    from heyvox.audio.stt import _run_with_timeout
+
+    def _boom():
+        raise ValueError("inner failure")
+
+    with _pytest.raises(ValueError, match="inner failure"):
+        _run_with_timeout(_boom, timeout=5.0)
