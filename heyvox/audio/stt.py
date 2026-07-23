@@ -24,6 +24,57 @@ import numpy as np
 _LOAD_TIMEOUT = 120  # seconds — cold load can be very slow under swap pressure
 _TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
 
+
+# DEF-221: set while NO abandoned (timed-out) transcription worker is still
+# running. Concurrent inference on the one shared MLX/Metal model object (or
+# sherpa recognizer) is unverified territory — the old `with ThreadPoolExecutor`
+# blockade prevented that overlap by accident; this event makes it explicit.
+_orphan_done = threading.Event()
+_orphan_done.set()
+
+_ORPHAN_WAIT_SECS = 15.0
+
+
+def _wait_for_orphan(timeout: float = _ORPHAN_WAIT_SECS) -> bool:
+    """Bounded wait until any abandoned transcription worker has finished.
+
+    Returns True when clear to transcribe, False if the orphan is still
+    running after ``timeout`` (caller should skip rather than run
+    concurrently on the shared model)."""
+    return _orphan_done.wait(timeout)
+
+
+def _run_with_timeout(fn, timeout: float):
+    """Run ``fn`` on a worker thread, bounded by ``timeout`` seconds.
+
+    DEF-221: this must NOT be a ``with ThreadPoolExecutor(...)`` block. The
+    context manager's ``__exit__`` calls ``shutdown(wait=True)``, which joins
+    the worker — so after ``future.result(timeout=...)`` raised, the with-exit
+    still blocked on the wedged transcription thread and the 30s guard was
+    silently worthless against a real hang. On success we join (clean release
+    of MLX memory before continuing); on timeout we abandon the worker
+    (``shutdown(wait=False)``) — but flag it via ``_orphan_done`` so the NEXT
+    transcription waits for the orphan instead of running concurrently on the
+    shared model (the race the old blockade accidentally prevented).
+
+    Raises FuturesTimeout on deadline; re-raises whatever ``fn`` raised.
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn)
+    try:
+        result = future.result(timeout=timeout)
+    except FuturesTimeout:
+        _orphan_done.clear()
+        # Fires immediately if the worker finished between raise and here.
+        future.add_done_callback(lambda _f: _orphan_done.set())
+        executor.shutdown(wait=False)
+        raise
+    except BaseException:
+        executor.shutdown(wait=False)
+        raise
+    executor.shutdown(wait=True)
+    return result
+
 # DEF-171: pthread QoS class for the transcription worker thread. One tier
 # below QOS_CLASS_USER_INTERACTIVE (0x21) on purpose — that top tier is
 # reserved for UI-blocking work, and this codebase already has a thread that
@@ -376,6 +427,14 @@ def transcribe_audio(
         global _mlx_transcribing
         _timed_out = False
         parts = []
+        # DEF-221: if a previously timed-out worker is still running on the
+        # shared model, wait (bounded) instead of inferring concurrently.
+        if not _wait_for_orphan():
+            _log(
+                f"ERROR: previous timed-out transcription still running after "
+                f"{_ORPHAN_WAIT_SECS:.0f}s — skipping this transcription"
+            )
+            return ""
         with _mlx_lock:
             _mlx_transcribing = True
         def _run_mlx_transcribe(seg):
@@ -384,9 +443,13 @@ def transcribe_audio(
 
         try:
             for seg_idx, segment in enumerate(segments):
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_run_mlx_transcribe, segment)
-                    result = future.result(timeout=_TRANSCRIBE_TIMEOUT)
+                # DEF-221: _run_with_timeout, NOT `with ThreadPoolExecutor` —
+                # the context manager's exit joined the wedged worker and
+                # nullified the timeout.
+                result = _run_with_timeout(
+                    lambda seg=segment: _run_mlx_transcribe(seg),
+                    _TRANSCRIBE_TIMEOUT,
+                )
                 text = result["text"].strip()
                 if text:
                     parts.append(text)
@@ -432,10 +495,18 @@ def transcribe_audio(
                     parts.append(text)
             return " ".join(parts)
 
+        # DEF-221: same orphan gate as the MLX path — never infer concurrently
+        # with an abandoned worker on the shared recognizer.
+        if not _wait_for_orphan():
+            _log(
+                f"ERROR: previous timed-out transcription still running after "
+                f"{_ORPHAN_WAIT_SECS:.0f}s — skipping this transcription"
+            )
+            return ""
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_sherpa_transcribe)
-                return future.result(timeout=_TRANSCRIBE_TIMEOUT)
+            # DEF-221: see _run_with_timeout — the previous `with` form joined
+            # the wedged worker on exit, nullifying the timeout.
+            return _run_with_timeout(_sherpa_transcribe, _TRANSCRIBE_TIMEOUT)
         except FuturesTimeout:
             _log(f"ERROR: Sherpa transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
             return ""

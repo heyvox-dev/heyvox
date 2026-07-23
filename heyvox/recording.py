@@ -439,9 +439,9 @@ class RecordingStateMachine:
                     self.ctx.recording_target = snap
                 if snap:
                     ws_info = (
-                        f", conductor_ws={snap.conductor_workspace_id!r}, "
-                        f"conductor_sess={snap.conductor_session_id!r}"
-                        if snap.conductor_workspace_id else ""
+                        f", ws={snap.workspace_id!r}, "
+                        f"sess={snap.session_id!r}"
+                        if snap.workspace_id else ""
                     )
                     self._log(
                         f"[lock] app={snap.app_name}, "

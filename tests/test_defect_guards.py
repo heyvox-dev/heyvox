@@ -2240,3 +2240,133 @@ def test_def194_strip_speech_markup_removes_spoken_symbols():
     for ch in "*`\\#":
         assert ch not in out, (ch, out)
     assert "bold" in out and "code" in out and "heading" in out
+
+
+# ---------------------------------------------------------------------------
+# DEF-216: the DEF-096-A VAD-transition model reset must be debounced.
+#
+# A user repeating the stop word after a miss creates several speech→silence
+# transitions in quick succession; an undebounced reset on each transition
+# wipes the wake-word feature buffer faster than it can accumulate (~0.8s
+# needed), pinning the live score at 0.00 — the retry pattern itself defeated
+# the retry. Offline clip replay verified: resets ≤0.5s apart → 0.00 peak,
+# ≥0.8s apart → 0.998. The fix gates the transition reset behind the same
+# _last_model_reset clock the DEF-096-C periodic reset uses.
+# ---------------------------------------------------------------------------
+
+
+def test_def216_vad_transition_reset_is_debounced():
+    import os
+    import re
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    # Find the DEF-096-A transition block and assert the reset inside it is
+    # guarded by the shared _MODEL_RESET_INTERVAL debounce.
+    m = re.search(
+        r"if _vad_silent and not _was_vad_silent:\n(.*?)_was_vad_silent = _vad_silent",
+        src,
+        re.DOTALL,
+    )
+    assert m, "DEF-096-A transition-reset block not found in main.py"
+    block = m.group(1)
+    assert "model.reset()" in block, (
+        "transition block no longer resets the model — if lever A was removed "
+        "on purpose, retire this guard consciously"
+    )
+    guard_idx = block.find("_MODEL_RESET_INTERVAL")
+    reset_idx = block.find("model.reset()")
+    assert guard_idx != -1 and guard_idx < reset_idx, (
+        "DEF-216: the DEF-096-A transition reset must check "
+        "_last_model_reset/_MODEL_RESET_INTERVAL BEFORE calling model.reset() "
+        "— undebounced per-transition resets zero out stop-word detection "
+        "when the user repeats the wake word"
+    )
+
+
+def test_def216_reset_interval_at_least_800ms():
+    """The clip-replay evidence: resets ≥0.8s apart keep detection at 0.998.
+    Guard the shared interval against being lowered below that floor."""
+    import os
+    import re
+    import heyvox
+    src = open(os.path.join(os.path.dirname(heyvox.__file__), "main.py")).read()
+    m = re.search(r"_MODEL_RESET_INTERVAL = ([0-9.]+)", src)
+    assert m, "_MODEL_RESET_INTERVAL definition not found"
+    assert float(m.group(1)) >= 0.8, (
+        f"_MODEL_RESET_INTERVAL={m.group(1)} — below the 0.8s floor the "
+        f"DEF-216 clip replay established as safe for stop-word detection"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DEF-221: the STT transcription timeout must actually bound the wait.
+#
+# `with ThreadPoolExecutor(...)` calls shutdown(wait=True) on exit, which
+# joins the worker thread — so after future.result(timeout=30) raised, the
+# with-exit still blocked on the wedged transcription thread and the guard
+# was silently worthless against a real hang (the exact class DEF-075/164
+# were about). _run_with_timeout abandons the worker on timeout instead.
+# ---------------------------------------------------------------------------
+
+
+def test_def221_stt_timeout_returns_promptly_on_wedged_worker():
+    import threading
+    import time as _t
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    import pytest as _pytest
+    from heyvox.audio.stt import _run_with_timeout
+
+    release = threading.Event()
+    try:
+        t0 = _t.monotonic()
+        with _pytest.raises(FuturesTimeout):
+            _run_with_timeout(lambda: release.wait(30.0), timeout=0.2)
+        elapsed = _t.monotonic() - t0
+        assert elapsed < 2.0, (
+            f"timeout path took {elapsed:.1f}s — the worker join is back "
+            f"(DEF-221: with-ThreadPoolExecutor exit blocks on the wedged thread)"
+        )
+    finally:
+        release.set()  # let the abandoned worker finish so pytest can exit
+
+
+def test_def221_success_path_returns_result():
+    from heyvox.audio.stt import _run_with_timeout
+    assert _run_with_timeout(lambda: "ok", timeout=5.0) == "ok"
+
+
+def test_def221_worker_exception_propagates():
+    import pytest as _pytest
+    from heyvox.audio.stt import _run_with_timeout
+
+    def _boom():
+        raise ValueError("inner failure")
+
+    with _pytest.raises(ValueError, match="inner failure"):
+        _run_with_timeout(_boom, timeout=5.0)
+
+
+def test_def221_orphan_gate_serializes_next_transcription():
+    """After a timeout abandons a worker, the next transcription must WAIT for
+    that orphan (bounded) instead of inferring concurrently on the shared
+    model — the race the old with-blockade prevented by accident."""
+    import threading
+    import time as _t
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    import pytest as _pytest
+    from heyvox.audio import stt as _stt
+
+    release = threading.Event()
+    try:
+        with _pytest.raises(FuturesTimeout):
+            _stt._run_with_timeout(lambda: release.wait(30.0), timeout=0.2)
+        # Orphan still running → gate must report NOT clear.
+        assert _stt._wait_for_orphan(timeout=0.2) is False
+        # Orphan finishes → gate opens promptly.
+        release.set()
+        assert _stt._wait_for_orphan(timeout=2.0) is True
+    finally:
+        release.set()
+        deadline = _t.monotonic() + 2.0
+        while not _stt._orphan_done.is_set() and _t.monotonic() < deadline:
+            _t.sleep(0.02)

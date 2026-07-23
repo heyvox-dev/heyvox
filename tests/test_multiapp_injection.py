@@ -55,7 +55,7 @@ def _make_snap(
     snap.ax_element = ax_element if ax_element is not None else MagicMock()
     # TargetLock fields (new)
     snap.leaf_role = element_role
-    snap.conductor_workspace_id = None
+    snap.workspace_id = None
     snap.app_bundle_id = app_bundle_id
     snap.conductor_workspace = conductor_workspace
     return snap

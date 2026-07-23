@@ -1073,7 +1073,13 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
     _rec_started_at: float = 0.0  # timestamp when current recording started (for warmup)
     _STOP_WARMUP_SECS = 2.0       # suppress stop-word re-trigger for this long after start
     _is_rec: bool = False
-    _last_model_reset: float = 0.0  # Periodic model reset during recording
+    _last_model_reset: float = 0.0  # Timestamp of last model.reset() during recording
+    # Minimum spacing between model.reset() calls while recording — shared by
+    # the DEF-096-C periodic reset (its cadence) and the DEF-096-A transition
+    # reset (its DEF-216 debounce floor). Offline replay of the DEF-216 clip
+    # showed resets ≥0.8s apart leave detection intact (0.998 peak) while
+    # ≤0.5s spacing drives it to 0.00 — 1.0s keeps a safety margin.
+    _MODEL_RESET_INTERVAL = 1.0
     # Consecutive-frame detection: require N consecutive above-threshold frames
     # before triggering. Filters single-frame false positives from passing speech.
     # Bumped to 3 after DEF-045 — model emits 2-frame high-score bursts during
@@ -1773,9 +1779,21 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # transition fires at most once per silence period so the
                 # model has time to refill features before the wake word
                 # arrives.
+                #
+                # DEF-216: debounced against _last_model_reset. A user who
+                # repeats "Hey Vox" after a miss — the natural response —
+                # creates several speech→silence transitions in quick
+                # succession; resetting on EACH wiped the feature buffer
+                # faster than the model could accumulate ~0.8s of post-reset
+                # audio, pinning the live score at 0.00 (verified by clip
+                # replay: resets ≤0.5s apart → 0.00, ≥0.8s apart → 0.998).
+                # The retry pattern itself defeated the retry. One reset per
+                # _MODEL_RESET_INTERVAL is the same guard the DEF-096-C
+                # periodic reset below already uses.
                 if _vad_silent and not _was_vad_silent:
-                    model.reset()
-                    _last_model_reset = time.time()
+                    if time.time() - _last_model_reset > _MODEL_RESET_INTERVAL:
+                        model.reset()
+                        _last_model_reset = time.time()
                 _was_vad_silent = _vad_silent
                 # DEF-096-B / DEF-149: track the most recent RAW silent-frame
                 # timestamp so the pre-silence discount recognises the
@@ -1812,8 +1830,8 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # reset handles the natural pause-then-stop pattern; the
             # periodic reset is now strictly the fallback for continuous
             # speech, where a faster cadence keeps the feature window
-            # cleaner without leaning on a user pause.
-            _MODEL_RESET_INTERVAL = 1.0  # seconds
+            # cleaner without leaning on a user pause. (_MODEL_RESET_INTERVAL
+            # is defined with the loop state above — shared with DEF-216.)
             if _is_rec and time.time() - _last_model_reset > _MODEL_RESET_INTERVAL:
                 model.reset()
                 _last_model_reset = time.time()

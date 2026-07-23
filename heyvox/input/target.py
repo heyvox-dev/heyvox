@@ -16,9 +16,9 @@ Fallback logic when no text field was focused at recording start:
 
 Phase 15 migration: the old mutable snapshot dataclass is replaced by
 TargetLock (frozen dataclass, SPEC R1). capture_lock() supersedes the old
-snapshot function. The old AX-walk + sqlite-map workspace helpers are
-deleted; their replacement is the Conductor adapter from Plan 15-01 plus
-_detect_conductor_branch (salvaged AX walk) here.
+snapshot function. Workspace detection/resolution is app-agnostic here: the
+app profile names a WorkspaceProvider (heyvox.adapters registry) and this
+module only calls detect_context()/resolve() on it.
 """
 
 import concurrent.futures
@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
-from heyvox.adapters.conductor import get_active_workspace_and_session
 
 # W10 (Fact 4): focus_app is NOT imported. NSRunningApplication bundle-ID
 # activation in _yank_back_app_and_workspace handles activation; focus_app
@@ -156,7 +155,8 @@ class TargetLock:
       - window_number: AXWindowNumber (CGWindowID-like)
       - ax_role_path: tuple of (role, index-in-parent) hops from window to leaf
       - leaf_axid / leaf_title / leaf_description: AX tie-breakers for re-find
-      - conductor_workspace_id / conductor_session_id: from Plan 15-01 adapter
+      - workspace_id / session_id: from the app profile's WorkspaceProvider
+        (None for apps without workspace management)
     """
 
     app_bundle_id: str
@@ -167,81 +167,29 @@ class TargetLock:
     leaf_axid: Optional[str] = None
     leaf_title: Optional[str] = None
     leaf_description: Optional[str] = None
-    conductor_workspace_id: Optional[str] = None
-    conductor_session_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    session_id: Optional[str] = None
     focused_was_text_field: bool = False
     captured_at: float = 0.0               # monotonic timestamp
     # Advisory-only fields for log readability:
     app_name: str = ""                     # NSRunningApplication.localizedName
 
 
-def _detect_conductor_branch(pid: int) -> str:
-    """Walk Conductor's AX tree to find the branch name shown in the right panel.
+def _workspace_provider_for(profile):
+    """Return the WorkspaceProvider declared by an app profile, or None.
 
-    Conductor's UI shows the branch name in the right pane after the AXSplitter;
-    walking AXFocusedWindow -> AXChildren -> past the splitter -> into the title
-    bar of the right pane gives us the branch string. This is what's currently
-    visible to the user (NOT what state the DB is in — the user may have
-    workspaces in 'ready' state that aren't on screen).
-
-    Returns the branch string or "" on any failure (caller treats "" as
-    "branch unknown — skip adapter call, leave conductor_workspace_id None").
-
-    Salvaged from the old workspace-detect helper's AX-walk portion. The
-    DB-mapping half of the old function is gone — the adapter from Plan 15-01
-    takes over once we know the branch.
+    The provider name comes from the profile (`workspace_provider`, with the
+    config-level legacy bridge mapping old has_workspace_detection configs);
+    the implementation registry lives in heyvox.adapters. No app names here.
     """
+    if profile is None:
+        return None
     try:
-        from ApplicationServices import (
-            AXUIElementCreateApplication,
-            AXUIElementCopyAttributeValue,
-        )
-        ax = AXUIElementCreateApplication(pid)
-        # Try AXFocusedWindow first, then AXMainWindow, then first of AXWindows.
-        win = None
-        for attr in ("AXFocusedWindow", "AXMainWindow"):
-            err, w = AXUIElementCopyAttributeValue(ax, attr, None)
-            if err == 0 and w is not None:
-                win = w
-                break
-        if win is None:
-            err, windows = AXUIElementCopyAttributeValue(ax, "AXWindows", None)
-            if err == 0 and windows and len(windows) > 0:
-                win = windows[0]
-        if win is None:
-            return ""
-
-        # Flatten the tree looking for the first AXStaticText after the first AXSplitter
-        items: list[tuple[str, str]] = []  # (role, value)
-
-        def _collect(elem, depth: int = 0) -> None:
-            if depth > 6 or len(items) > 300:
-                return
-            err_r, role = AXUIElementCopyAttributeValue(elem, "AXRole", None)
-            r = str(role) if err_r == 0 and role else ""
-            err_v, val = AXUIElementCopyAttributeValue(elem, "AXValue", None)
-            v = str(val).strip() if err_v == 0 and val else ""
-            items.append((r, v))
-            err_c, children = AXUIElementCopyAttributeValue(elem, "AXChildren", None)
-            if err_c == 0 and children:
-                for c in children:
-                    _collect(c, depth + 1)
-
-        _collect(win)
-
-        past_splitter = False
-        for r, v in items:
-            if r == "AXSplitter":
-                if past_splitter:
-                    break
-                past_splitter = True
-                continue
-            if past_splitter and r == "AXStaticText" and v:
-                return v
-        return ""
+        from heyvox.adapters import get_workspace_provider
+        return get_workspace_provider(getattr(profile, "workspace_provider", ""))
     except Exception as e:
-        _log(f"_detect_conductor_branch: exception: {e}")
-        return ""
+        _log(f"workspace provider lookup failed: {e}")
+        return None
 
 
 def _app_under_mouse() -> tuple[str, int] | None:
@@ -394,14 +342,15 @@ def capture_lock(config=None) -> Optional[TargetLock]:
     NSWorkspace.frontmostApplication(), since the latter can return an app
     on a different screen than where the user is actually working.
 
-    When the profile has_workspace_detection=True, we first detect the
-    Conductor branch via _detect_conductor_branch and then call the adapter
-    with branch=detected_branch. Calling the adapter with branch=None would
-    return a random ready workspace (SQL LIMIT-1 landmine).
+    When the profile declares a workspace_provider, we first detect the
+    visible workspace context (provider.detect_context, e.g. Conductor's
+    branch) and then resolve it to stable IDs (provider.resolve). Resolving
+    with an empty context would return an arbitrary workspace (the SQL
+    LIMIT-1 landmine), so an undetected context skips resolution entirely.
 
     Args:
         config: HeyvoxConfig instance for app profile lookup. If None,
-            conductor workspace/session enrichment is skipped.
+            workspace/session enrichment is skipped.
     """
     _t_start = _time.time()
     try:
@@ -494,50 +443,43 @@ def capture_lock(config=None) -> Optional[TargetLock]:
     else:
         leaf_axid, leaf_title, leaf_description = (None, None, None)
 
-    # Conductor adapter integration WITH BRANCH FILTER (W-fix).
-    conductor_workspace_id: Optional[str] = None
-    conductor_session_id: Optional[str] = None
-    detected_branch = ""
+    # Workspace enrichment via the profile's WorkspaceProvider (W-fix:
+    # context-filtered — never resolve with an empty context).
+    workspace_id: Optional[str] = None
+    session_id: Optional[str] = None
+    ws_context = ""
     if config is not None:
         try:
             profile = config.get_app_profile(app_name)
         except Exception:
             profile = None
-        if (
-            profile is not None
-            and getattr(profile, "has_workspace_detection", False)
-            and getattr(profile, "workspace_db", "")
-        ):
-            detected_branch = _detect_conductor_branch(app_pid)
-            if detected_branch:
+        provider = _workspace_provider_for(profile)
+        if provider is not None:
+            ws_context = provider.detect_context(app_pid)
+            if ws_context:
                 # B2: per-call ThreadPoolExecutor with `with` block so the
                 # worker thread is join()-ed before capture_lock returns.
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    future = ex.submit(
-                        get_active_workspace_and_session,
-                        directory_name=None,
-                        branch=detected_branch,
-                        db_path=os.path.expanduser(profile.workspace_db),
-                    )
+                    future = ex.submit(provider.resolve, ws_context, profile)
                     try:
                         identity = future.result(timeout=0.1)
                     except concurrent.futures.TimeoutError:
                         _log(
-                            "[TIMING] capture_lock: conductor adapter timed "
+                            "[TIMING] capture_lock: workspace resolve timed "
                             "out (>100ms), continuing without IDs"
                         )
                         future.cancel()
                         identity = None
                     except Exception as e:
-                        _log(f"capture: adapter call raised {e!r}")
+                        _log(f"capture: workspace resolve raised {e!r}")
                         identity = None
                 if identity is not None:
-                    conductor_workspace_id = identity.workspace_id
-                    conductor_session_id = identity.session_id
+                    workspace_id = identity.workspace_id
+                    session_id = identity.session_id
             else:
                 _log(
-                    "[capture_lock] branch detection failed; "
-                    "skipping adapter"
+                    "[capture_lock] workspace context detection failed; "
+                    "skipping resolve"
                 )
 
     lock = TargetLock(
@@ -549,8 +491,8 @@ def capture_lock(config=None) -> Optional[TargetLock]:
         leaf_axid=leaf_axid,
         leaf_title=leaf_title,
         leaf_description=leaf_description,
-        conductor_workspace_id=conductor_workspace_id,
-        conductor_session_id=conductor_session_id,
+        workspace_id=workspace_id,
+        session_id=session_id,
         focused_was_text_field=focused_was_text_field,
         captured_at=_time.monotonic(),
         app_name=app_name,
@@ -559,8 +501,8 @@ def capture_lock(config=None) -> Optional[TargetLock]:
         f"[capture_lock] bundle_id={app_bundle_id!r} pid={app_pid} "
         f"window={window_number} text_field={focused_was_text_field} "
         f"leaf_role={leaf_role!r} role_path_hops={len(ax_role_path)} "
-        f"branch={detected_branch!r} conductor_ws={conductor_workspace_id!r} "
-        f"conductor_sess={conductor_session_id!r} "
+        f"ws_ctx={ws_context!r} ws={workspace_id!r} "
+        f"sess={session_id!r} "
         f"elapsed_ms={int((_time.time() - _t_start)*1000)}"
     )
     return lock
@@ -644,19 +586,20 @@ def _find_window_by_number(ax_app, window_number: int):
 
 
 def _yank_back_app_and_workspace(lock, profile, config) -> None:
-    """Unconditional app + Conductor workspace + session yank-back (SPEC R6).
+    """Unconditional app + workspace + session yank-back (SPEC R6).
 
     Activates the bundle via NSRunningApplication. When the lock carries a
-    conductor_workspace_id and the profile declares a workspace_switch_cmd,
-    invokes the extended `conductor-switch-workspace --id ... [--session ...]
-    --force` script (B4).
+    workspace_id and the profile declares a workspace_switch_cmd, invokes
+    that command as `<cmd> --id ... [--session ...] --force` (B4) — for
+    Conductor this is the conductor-switch-workspace script shipped in its
+    default profile.
 
-    Session flag appended UNCONDITIONALLY when `conductor_session_id` is set —
-    the script's sqlite UPDATE is idempotent so there is no need for a
-    current-state comparison (which would require another adapter query,
-    inviting the LIMIT-1 landmine from iteration-2).
+    Session flag appended UNCONDITIONALLY when `session_id` is set — the
+    switch command's state update is expected to be idempotent, so there is
+    no need for a current-state comparison (which would require another
+    resolve, inviting the LIMIT-1 landmine from iteration-2).
 
-    B3-resolved: conductor-switch-workspace does not check RECORDING_FLAG
+    B3-resolved: the Conductor switch script does not check RECORDING_FLAG
     (verified Task 0); resolve_lock also runs post-stop so the flag is
     cleared by then. The DEF-070 orchestrator guard is for Herald-driven
     switches DURING recording and is NOT touched here.
@@ -691,66 +634,60 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
     if not bundle_activate_ok and lock.app_pid:
         _activate_app(lock.app_pid, lock.app_name or "")
 
-    if lock.conductor_workspace_id and profile is not None:
+    if lock.workspace_id and profile is not None:
         switch_cmd = getattr(profile, "workspace_switch_cmd", "")
         if switch_cmd:
-            # DEF-095: Skip the conductor-switch-workspace call entirely when
-            # Conductor is already showing the target workspace. The bash
-            # script's `--force` flag bypasses its idle-gate, so it always
-            # dispatches a Hammerspoon left-click on the workspace sidebar
-            # entry — even when that entry is already selected. The click
-            # races against the chat input's focus state and absorbs the
-            # auto-Enter that app_fast_paste fires immediately after, leaving
-            # the dictation in the input field unsent. Detecting "already on
-            # target" via the AX walk + DB lookup costs ~50–150 ms and
+            # DEF-095: Skip the switch command entirely when the app is
+            # already showing the target workspace. Conductor's script's
+            # `--force` flag bypasses its idle-gate, so it always dispatches
+            # a Hammerspoon left-click on the workspace sidebar entry — even
+            # when that entry is already selected. The click races against
+            # the chat input's focus state and absorbs the auto-Enter that
+            # app_fast_paste fires immediately after, leaving the dictation
+            # in the input field unsent. Detecting "already on target" via
+            # the provider (context walk + resolve) costs ~50–150 ms and
             # replaces a ~500–1000 ms script invocation, so the skip path
             # is also faster.
             already_on_target = False
-            try:
-                current_branch = _detect_conductor_branch(lock.app_pid)
-                if current_branch:
-                    workspace_db = getattr(profile, "workspace_db", "")
-                    db_path = (
-                        os.path.expanduser(workspace_db) if workspace_db
-                        else None
-                    )
-                    current_identity = get_active_workspace_and_session(
-                        branch=current_branch,
-                        db_path=db_path,
-                    )
-                    if (
-                        current_identity is not None
-                        and current_identity.workspace_id
-                        == lock.conductor_workspace_id
-                    ):
-                        already_on_target = True
-                        _log(
-                            f"yank: Conductor already on target workspace "
-                            f"(branch={current_branch!r}, "
-                            f"ws={lock.conductor_workspace_id!r}) — "
-                            f"skipping switch to avoid focus race"
-                        )
-            except Exception as e:
-                _log(f"yank: current-workspace probe failed: {e}")
+            provider = _workspace_provider_for(profile)
+            if provider is not None:
+                try:
+                    current_ctx = provider.detect_context(lock.app_pid)
+                    if current_ctx:
+                        current_identity = provider.resolve(current_ctx, profile)
+                        if (
+                            current_identity is not None
+                            and current_identity.workspace_id
+                            == lock.workspace_id
+                        ):
+                            already_on_target = True
+                            _log(
+                                f"yank: already on target workspace "
+                                f"(ctx={current_ctx!r}, "
+                                f"ws={lock.workspace_id!r}) — "
+                                f"skipping switch to avoid focus race"
+                            )
+                except Exception as e:
+                    _log(f"yank: current-workspace probe failed: {e}")
 
             if not already_on_target:
                 argv = [
                     os.path.expanduser(switch_cmd),
-                    "--id", lock.conductor_workspace_id,
+                    "--id", lock.workspace_id,
                 ]
-                if lock.conductor_session_id:
-                    # Session flag appended unconditionally — script UPDATE is idempotent.
-                    argv.extend(["--session", lock.conductor_session_id])
+                if lock.session_id:
+                    # Session flag appended unconditionally — switch command update is idempotent.
+                    argv.extend(["--session", lock.session_id])
                 argv.append("--force")
                 try:
                     subprocess.run(argv, capture_output=True, timeout=3)
                     settle = getattr(profile, "settle_delay", 0.3)
                     _time.sleep(settle)
                 except Exception as e:
-                    _log(f"yank: conductor-switch-workspace failed: {e}")
+                    _log(f"yank: workspace_switch_cmd failed: {e}")
         else:
             _log(
-                "yank: conductor_workspace_id set but profile lacks "
+                "yank: workspace_id set but profile lacks "
                 "workspace_switch_cmd — skipping workspace switch"
             )
 

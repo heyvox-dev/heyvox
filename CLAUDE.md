@@ -1,13 +1,17 @@
 # HeyVox — Voice Layer for AI Coding Agents
 
 ## Project Profile
-- **purpose**: macOS voice layer (wake word + local STT + local TTS + HUD + media control) for any AI coding agent via MCP
-- **owner**: Franz Felberer
-- **context**: Personal product (lifestyle business, OSS core + Pro tier)
-- **tech**: Python, Bash, PyObjC (AppKit/Quartz), openwakeword, MLX Whisper, sherpa-onnx, Kokoro TTS, MCP SDK, pyaudio, launchd
-- **current_focus**: Monorepo consolidation, public release prep, GitHub Actions CI
-- **keywords**: heyvox, vox, voice, wake word, STT, TTS, speech, microphone, MCP, HUD, recording indicator, push-to-talk, herald, hush, media control
-- **workflow_mode**: gsd-quick
+- purpose: HeyVox is a macOS voice layer that adds wake-word activation, local speech-to-text, and local text-to-speech to any MCP-compatible AI coding agent (Claude Code, Cursor, Windsurf, Continue.dev). It ships as one PyPI package (`heyvox`) bundling three components: HeyVox Core (wake word, STT, text injection, HUD, MCP server), Herald (TTS orchestration), and Hush (Chrome extension for browser media ducking).
+- owner: Franz Felberer (Personal)
+- context: Personal product, not just internal tooling — MIT-licensed OSS core (`heyvox` on PyPI, `heyvox-dev` GitHub org, heyvox.dev site) plus a paid Pro tier per the maintainer's own framing; pricing/business docs are deliberately kept untracked (DEF-185) while CLAUDE.md and .planning/ stay public. Run as a full GSD project (.planning/ROADMAP.md, MILESTONES.md, STATE.md, DEFECT-LOG.md).
+- tech: Python 3.12+, Bash; PyObjC (AppKit/Quartz) for HUD/menu bar; openwakeword (wake word), MLX Whisper + sherpa-onnx (local STT), Kokoro/mlx-audio (local TTS); MCP Python SDK; pyaudio/sounddevice (audio I/O); launchd (background services); Chrome Manifest V3 extension (Hush, vanilla JS); pytest, ruff; GitHub Actions CI; setuptools packaging published to PyPI.
+- current_focus: Post-v1.1.0-launch stabilization (liveness watchdog DEF-213, audio-transport caching DEF-217, HUD overlay desync fix DEF-215; branch heyvox/release-1.1.1, version bumped to 1.1.2) alongside the v1.2 "Paste Injection Reliability" milestone, Phase 16 (STT auto-glossary, wake-word latency, audio cues/sounddevice).
+- keywords: heyvox, vox, voice, wake word, hey vox, STT, TTS, speech-to-text, text-to-speech, MCP, HUD, herald, hush, push-to-talk, media control, openwakeword, MLX Whisper, sherpa-onnx, Kokoro, launchd, Chrome extension, microphone, recording indicator
+- workflow_mode: gsd-quick
+- model: sonnet
+
+## Wrong Workspace Detection
+On every message, silently check if the request matches this project's keywords. If it clearly belongs to a different project, say: "This sounds like it's for **[other project]**. Want me to answer here anyway?"
 
 ## Architecture
 
@@ -135,16 +139,16 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 - **The fast injection path** (combined focus + paste + enter in one osascript) must work for ANY app that has a profile, not just Conductor.
 - **IPC paths** should be user-scoped (`$TMPDIR` or `~/Library/Caches/heyvox/`) not bare `/tmp/` — avoids multi-user clashes and sandboxing issues.
 
-**Existing violations to fix:** There are ~20 places in the codebase that hardcode `"conductor"` checks. These must be migrated to the app profile system before public release. Search for: `"conductor" in`, `conductor_workspace`, `is_conductor`.
+**Status (2026-07-23): violations migrated.** Zero `"conductor"` logic branches remain outside the sanctioned places: `adapters/conductor.py` (the dedicated adapter — sole owner of Conductor coupling), the provider registry in `adapters/__init__.py` (one name→implementation entry per app), and the shipped Conductor defaults in `config.py` app_profiles. Workspace detection/resolution goes through the generic `WorkspaceProvider` protocol (`adapters/base.py`: `detect_context` + `resolve`, declared per profile via `workspace_provider`); the DEF-192 AX fast path is per-app via the `ax_value_paste` profile flag. Deprecated-but-working compat shims (documented as such in code): `injection.ax_conductor` global config, `HEYVOX_AX_CONDUCTOR` env, `CONDUCTOR_WORKSPACE_NAME`/`CONDUCTOR_AGENT` Herald env fallbacks. Remaining `conductor` mentions in shared code are explanatory comments only. Keep it that way — new app-specific behavior goes into profiles/providers, never branches.
 
 ## Pending
 - [ ] Pause/resume recording (Escape pauses, second press resumes) — cancel works, pause/resume state machine not built
-- [ ] Generic app switching in Herald (not just Conductor) — app profile framework exists, ~15+ hardcoded "conductor" refs remain in injection.py etc.
 - [ ] Evaluate Cohere Transcribe as alternative STT (v2)
 - [ ] TTS server on Mac Mini (v2) — no remote TTS code yet
 - [ ] Evaluate ripping out the Bluetooth mic-selection machinery entirely (A2DP→HFP wait/trigger, BT gain-boost, BT cooldown tiers in device_manager.py/mic.py/bt.py) now that a single pinned USB/wired default + built-in fallback is the model (2026-07-16) — currently left in place (dormant, not on the selection path) rather than deleted; revisit once the simplified model has run for a while
 
 ## Done (previously pending)
+- [x] Generic app switching / de-hardcoded Conductor (2026-07-23) — WorkspaceProvider protocol + registry, generic TargetLock workspace_id/session_id, per-app ax_value_paste flag; Herald was already profile-driven
 - [x] Volume control — CoreAudio ducking + restore in herald/coreaudio.py + orchestrator.py
 - [x] Menu bar state text — NSStatusItem title updates in hud/overlay.py (_STATUS_LABELS)
 - [x] Train "Hey Vox" custom wake word — MLP model deployed, conv-attention pipeline + auto-collection in place

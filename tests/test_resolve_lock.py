@@ -27,8 +27,8 @@ def _make_lock(
     app_bundle_id="com.test.app",
     app_pid=1234,
     window_number=42,
-    conductor_workspace_id=None,
-    conductor_session_id=None,
+    workspace_id=None,
+    session_id=None,
     app_name="TestApp",
     leaf_role="AXTextArea",
 ):
@@ -40,8 +40,8 @@ def _make_lock(
         ax_role_path=ax_role_path,
         leaf_role=leaf_role,
         focused_was_text_field=focused_was_text_field,
-        conductor_workspace_id=conductor_workspace_id,
-        conductor_session_id=conductor_session_id,
+        workspace_id=workspace_id,
+        session_id=session_id,
         app_name=app_name,
     )
 
@@ -331,7 +331,7 @@ def test_yank_back_uses_id_flag(monkeypatch):
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
 
     lock = _make_lock(
-        conductor_workspace_id="ws-uuid-1", conductor_session_id=None
+        workspace_id="ws-uuid-1", session_id=None
     )
     profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
@@ -350,7 +350,7 @@ def test_yank_back_uses_id_flag(monkeypatch):
 
 def test_session_id_triggers_session_flag(monkeypatch):
     """B4 + iter-3 W-fix: resolver appends --session unconditionally when
-    lock.conductor_session_id is set. Asserts argv (runtime) not source text."""
+    lock.session_id is set. Asserts argv (runtime) not source text."""
     from heyvox.input.target import _yank_back_app_and_workspace
 
     captured_argv = []
@@ -364,8 +364,8 @@ def test_session_id_triggers_session_flag(monkeypatch):
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
 
     lock = _make_lock(
-        conductor_workspace_id="ws-uuid-1",
-        conductor_session_id="sess-uuid-7",
+        workspace_id="ws-uuid-1",
+        session_id="sess-uuid-7",
     )
     profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
@@ -385,7 +385,7 @@ def test_session_id_triggers_session_flag(monkeypatch):
 
 
 def test_no_session_id_omits_session_flag(monkeypatch):
-    """When lock.conductor_session_id is None, --session is NOT appended."""
+    """When lock.session_id is None, --session is NOT appended."""
     from heyvox.input.target import _yank_back_app_and_workspace
 
     captured_argv = []
@@ -397,7 +397,7 @@ def test_no_session_id_omits_session_flag(monkeypatch):
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
 
     lock = _make_lock(
-        conductor_workspace_id="ws-uuid-1", conductor_session_id=None
+        workspace_id="ws-uuid-1", session_id=None
     )
     profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
@@ -422,7 +422,7 @@ def test_yank_back_noop_when_no_workspace_id(monkeypatch):
     mock_appkit = MagicMock()
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
 
-    lock = _make_lock(conductor_workspace_id=None)
+    lock = _make_lock(workspace_id=None)
     profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
         _yank_back_app_and_workspace(lock, profile, config=None)

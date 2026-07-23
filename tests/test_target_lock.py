@@ -31,6 +31,7 @@ class FakeAppProfile:
     settle_delay: float = 0.3
     enter_delay: float = 0.15
     has_workspace_detection: bool = True
+    workspace_provider: str = "conductor"
     workspace_db: str = "~/fake-conductor.db"
     workspace_list_query: str = ""
     workspace_switch_cmd: str = ""
@@ -44,6 +45,30 @@ class FakeConfig:
         if app_name and self._profile.name.lower() in app_name.lower():
             return self._profile
         return None
+
+
+class _FakeProvider:
+    """Test double for the WorkspaceProvider protocol (heyvox.adapters.base)."""
+
+    name = "fake"
+
+    def __init__(self, ctx="", resolver=None):
+        self._ctx = ctx
+        self._resolver = resolver or (lambda context, profile: None)
+        self.resolve_calls = []
+
+    def detect_context(self, pid):
+        return self._ctx
+
+    def resolve(self, context, profile):
+        self.resolve_calls.append(context)
+        return self._resolver(context, profile)
+
+
+def _patch_provider(monkeypatch, provider):
+    monkeypatch.setattr(
+        "heyvox.input.target._workspace_provider_for", lambda profile: provider
+    )
 
 
 def _build_appkit_mock(app_name="Conductor", pid=1234, bundle_id="com.conductor.app"):
@@ -132,7 +157,7 @@ def test_target_lock_defaults_constructable():
     )
     assert lock.leaf_role == ""
     assert lock.leaf_axid is None
-    assert lock.conductor_workspace_id is None
+    assert lock.workspace_id is None
     assert lock.focused_was_text_field is False
     assert lock.captured_at == 0.0
 
@@ -182,10 +207,8 @@ def test_capture_lock_populates_stable_fields(monkeypatch):
 
     # _app_under_mouse should return None so we fall through to frontmost
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    # _detect_conductor_branch returns empty so adapter is NOT called
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: ""
-    )
+    # provider context is empty so resolve is NOT called
+    _patch_provider(monkeypatch, _FakeProvider(ctx=""))
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
@@ -209,9 +232,7 @@ def test_focused_was_text_field_false_for_button(monkeypatch):
     mock_ax, _, _ = _build_ax_mock(focused_role="AXButton")
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: ""
-    )
+    _patch_provider(monkeypatch, _FakeProvider(ctx=""))
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
@@ -230,9 +251,7 @@ def test_leaf_role_captured_even_for_non_text_field(monkeypatch):
     mock_ax, _, _ = _build_ax_mock(focused_role="AXCheckBox")
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: ""
-    )
+    _patch_provider(monkeypatch, _FakeProvider(ctx=""))
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
@@ -247,105 +266,83 @@ def test_leaf_role_captured_even_for_non_text_field(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_capture_lock_passes_detected_branch_to_adapter(monkeypatch):
-    """W-fix: capture_lock MUST pass branch=detected_branch to the adapter."""
+def test_capture_lock_passes_detected_context_to_resolve(monkeypatch):
+    """W-fix: capture_lock MUST pass the detected context to provider.resolve
+    (resolving with an empty context would hit the SQL LIMIT-1 landmine)."""
     from heyvox.input.target import capture_lock
 
-    captured_kwargs = {}
-
-    def _fake_adapter(**kwargs):
-        captured_kwargs.update(kwargs)
-        return None
+    provider = _FakeProvider(ctx="feature-xyz")
 
     mock_appkit = _build_appkit_mock()
     mock_ax, _, _ = _build_ax_mock()
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: "feature-xyz"
-    )
-    monkeypatch.setattr(
-        "heyvox.input.target.get_active_workspace_and_session", _fake_adapter
-    )
+    _patch_provider(monkeypatch, provider)
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
     }):
         capture_lock(config=FakeConfig())
 
-    assert captured_kwargs.get("branch") == "feature-xyz", (
-        f"adapter must be called with branch='feature-xyz', got {captured_kwargs!r}"
+    assert provider.resolve_calls == ["feature-xyz"], (
+        f"resolve must be called with the detected context, got "
+        f"{provider.resolve_calls!r}"
     )
 
 
-def test_capture_lock_skips_adapter_when_branch_unknown(monkeypatch):
-    """W-fix: when _detect_conductor_branch returns '', adapter is NOT called."""
+def test_capture_lock_skips_resolve_when_context_unknown(monkeypatch):
+    """W-fix: when detect_context returns '', resolve is NOT called."""
     from heyvox.input.target import capture_lock
 
-    adapter_calls = []
-
-    def _fake_adapter(**kwargs):
-        adapter_calls.append(kwargs)
-        return None
+    provider = _FakeProvider(ctx="")
 
     mock_appkit = _build_appkit_mock()
     mock_ax, _, _ = _build_ax_mock()
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: ""
-    )
-    monkeypatch.setattr(
-        "heyvox.input.target.get_active_workspace_and_session", _fake_adapter
-    )
+    _patch_provider(monkeypatch, provider)
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
     }):
         lock = capture_lock(config=FakeConfig())
 
-    assert adapter_calls == [], "adapter should not be called when branch unknown"
-    assert lock.conductor_workspace_id is None
-    assert lock.conductor_session_id is None
+    assert provider.resolve_calls == [], (
+        "resolve should not be called when context unknown"
+    )
+    assert lock.workspace_id is None
+    assert lock.session_id is None
 
 
-def test_capture_lock_populates_conductor_ids_from_adapter(monkeypatch):
-    from heyvox.adapters.conductor import ConductorIdentity
+def test_capture_lock_populates_workspace_ids_from_provider(monkeypatch):
+    from heyvox.adapters.base import WorkspaceIdentity
     from heyvox.input.target import capture_lock
 
-    fake_identity = ConductorIdentity(
-        workspace_id="ws-abc",
-        session_id="sess-42",
-        branch="feature-x",
-        directory_name="seattle",
+    fake_identity = WorkspaceIdentity(workspace_id="ws-abc", session_id="sess-42")
+    provider = _FakeProvider(
+        ctx="feature-x", resolver=lambda context, profile: fake_identity
     )
 
     mock_appkit = _build_appkit_mock()
     mock_ax, _, _ = _build_ax_mock()
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: "feature-x"
-    )
-    monkeypatch.setattr(
-        "heyvox.input.target.get_active_workspace_and_session",
-        lambda **kw: fake_identity,
-    )
+    _patch_provider(monkeypatch, provider)
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
     }):
         lock = capture_lock(config=FakeConfig())
 
-    assert lock.conductor_workspace_id == "ws-abc"
-    assert lock.conductor_session_id == "sess-42"
+    assert lock.workspace_id == "ws-abc"
+    assert lock.session_id == "sess-42"
 
 
 def test_capture_lock_survives_slow_adapter_with_timeout(monkeypatch):
     """Adapter that blocks >100ms is cancelled; lock returned without IDs."""
     from heyvox.input.target import capture_lock
 
-    def _slow_adapter(**kwargs):
+    def _slow_resolver(context, profile):
         threading.Event().wait(0.5)
         return None
 
@@ -353,12 +350,7 @@ def test_capture_lock_survives_slow_adapter_with_timeout(monkeypatch):
     mock_ax, _, _ = _build_ax_mock()
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: "x"
-    )
-    monkeypatch.setattr(
-        "heyvox.input.target.get_active_workspace_and_session", _slow_adapter
-    )
+    _patch_provider(monkeypatch, _FakeProvider(ctx="x", resolver=_slow_resolver))
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
@@ -372,8 +364,8 @@ def test_capture_lock_survives_slow_adapter_with_timeout(monkeypatch):
         elapsed = time.perf_counter() - t0
 
     assert lock is not None
-    assert lock.conductor_workspace_id is None
-    assert lock.conductor_session_id is None
+    assert lock.workspace_id is None
+    assert lock.session_id is None
     # Sanity: regardless of executor join behaviour, we should never be
     # blocked for >1s (the slow adapter returns after 0.5s max).
     assert elapsed < 1.0, f"capture_lock wall time {elapsed:.2f}s too high"
@@ -391,12 +383,7 @@ def test_executor_no_thread_leak_across_30_capture_lock_calls(monkeypatch):
     mock_ax, _, _ = _build_ax_mock()
 
     monkeypatch.setattr("heyvox.input.target._app_under_mouse", lambda: None)
-    monkeypatch.setattr(
-        "heyvox.input.target._detect_conductor_branch", lambda pid: "x"
-    )
-    monkeypatch.setattr(
-        "heyvox.input.target.get_active_workspace_and_session", lambda **kw: None
-    )
+    _patch_provider(monkeypatch, _FakeProvider(ctx="x"))
 
     with patch.dict("sys.modules", {
         "AppKit": mock_appkit, "ApplicationServices": mock_ax,
@@ -459,7 +446,7 @@ def test_ax_inject_text_accepts_target_lock_with_leaf_role(monkeypatch):
         window_number=42,
         ax_role_path=(),
         leaf_role="AXTextArea",
-        conductor_workspace_id=None,
+        workspace_id=None,
     )
 
     mock_ax = _make_stateful_ax()
@@ -480,7 +467,7 @@ def test_ax_inject_text_skips_workspace_managed_app():
         window_number=42,
         ax_role_path=(),
         leaf_role="AXTextArea",
-        conductor_workspace_id="ws-1",
+        workspace_id="ws-1",
     )
     assert _ax_inject_text(lock, "hello") is False
 
@@ -528,7 +515,7 @@ def test_ax_inject_text_phase12_fastpath_remains_under_5ms():
         window_number=0,
         ax_role_path=(),
         leaf_role="AXTextArea",
-        conductor_workspace_id=None,
+        workspace_id=None,
     )
 
     mock_ax = _make_stateful_ax()
@@ -543,3 +530,33 @@ def test_ax_inject_text_phase12_fastpath_remains_under_5ms():
 
     mean = sum(durations) / len(durations)
     assert mean < 0.005, f"_ax_inject_text mean {mean*1000:.2f}ms — fast-path regressed"
+
+
+# ---------------------------------------------------------------------------
+# WorkspaceProvider registry + legacy config bridge
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_provider_registry_resolves_conductor():
+    from heyvox.adapters import get_workspace_provider
+    from heyvox.adapters.conductor import ConductorWorkspaceProvider
+
+    provider = get_workspace_provider("conductor")
+    assert isinstance(provider, ConductorWorkspaceProvider)
+    assert get_workspace_provider("") is None
+    assert get_workspace_provider("no-such-app") is None
+
+
+def test_legacy_has_workspace_detection_maps_to_conductor_provider():
+    """Pre-provider user configs set has_workspace_detection alone; the config
+    validator must bridge them onto the named provider so they keep working."""
+    from heyvox.config import AppProfileConfig
+
+    legacy = AppProfileConfig(name="Conductor", has_workspace_detection=True)
+    assert legacy.workspace_provider == "conductor"
+    plain = AppProfileConfig(name="Cursor")
+    assert plain.workspace_provider == ""
+    explicit = AppProfileConfig(
+        name="Other", has_workspace_detection=True, workspace_provider="other"
+    )
+    assert explicit.workspace_provider == "other"
