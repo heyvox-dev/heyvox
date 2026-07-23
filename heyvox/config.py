@@ -318,6 +318,12 @@ class AppProfileConfig(BaseModel):
     # Whether this app supports workspace/tab detection via AX tree + DB.
     has_workspace_detection: bool = False
 
+    # Name of the WorkspaceProvider (heyvox.adapters registry) that detects
+    # and resolves this app's workspaces. Empty = no workspace management.
+    # Legacy bridge: profiles that only set has_workspace_detection=True get
+    # "conductor" filled in by the validator below (pre-provider configs).
+    workspace_provider: str = ""
+
     # Path to the app's SQLite DB for workspace name resolution.
     # Only used when has_workspace_detection is True.
     workspace_db: str = ""
@@ -339,6 +345,13 @@ class AppProfileConfig(BaseModel):
     # Requirement: PASTE-15-R7
     supports_ax_verify: bool = True
 
+    # DEF-192: enable the AX value-paste fast path (focus shortcut + direct
+    # AXValue set + CGEvent Enter, ~8x faster than osascript Cmd+V) for this
+    # app. Requires a workspace-managed lock (workspace_id) and read-back
+    # verification guards every set. Validated on Conductor; off by default
+    # until proven per app. Supersedes the global injection.ax_conductor.
+    ax_value_paste: bool = False
+
     # Whether the Conductor adapter (or future analog) can enrich the lock with
     # a workspace+session ID at capture time. Currently only Conductor sets this.
     # Requirement: PASTE-15-R3
@@ -357,6 +370,16 @@ class AppProfileConfig(BaseModel):
     # activation (Slack) but lack a deterministic focus keystroke.
     activate_on_mismatch: bool = False
 
+    @model_validator(mode="after")
+    def _legacy_workspace_provider(self):
+        # Pre-provider configs declared workspace detection with
+        # has_workspace_detection alone, and the only implementation was the
+        # Conductor one — map them onto the named provider so existing user
+        # configs keep working unchanged.
+        if self.has_workspace_detection and not self.workspace_provider:
+            self.workspace_provider = "conductor"
+        return self
+
 
 # Built-in profiles for common apps. Users can override or add more via config.
 _DEFAULT_APP_PROFILES: list[dict] = [
@@ -368,6 +391,7 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "settle_delay": 0.3,
         "enter_delay": 0.15,
         "has_workspace_detection": True,
+        "workspace_provider": "conductor",
         "workspace_db": "~/Library/Application Support/com.conductor.app/conductor.db",
         "workspace_switch_cmd": "~/.local/bin/conductor-switch-workspace",
         "workspace_branch_query": (
@@ -476,11 +500,13 @@ class InjectionConfig(BaseModel):
         "iTerm2": 0.03,
         "Terminal": 0.03,
     }
-    # DEF-192: enable the mouse-independent AX fast-path for workspace-managed
-    # Electron (Conductor) — sets the value via Accessibility + in-process
-    # CGEvent keystrokes instead of the osascript Cmd+V path (~1036ms → ~130ms).
-    # Off by default (still validating long text / non-US layouts); the
-    # HEYVOX_AX_CONDUCTOR env var OR-overrides this for quick testing.
+    # DEF-192: enable the mouse-independent AX value-paste fast path for
+    # workspace-managed Electron apps — sets the value via Accessibility +
+    # in-process CGEvent keystrokes instead of the osascript Cmd+V path
+    # (~1036ms → ~130ms, validated on Conductor).
+    # DEPRECATED (global switch): prefer the per-app profile flag
+    # `ax_value_paste`. Kept working so existing configs don't regress; the
+    # HEYVOX_AX_CONDUCTOR env var OR-overrides both for quick testing.
     ax_conductor: bool = False
 
 

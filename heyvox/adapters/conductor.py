@@ -122,3 +122,103 @@ def get_active_workspace_and_session(
         f"directory_name={identity.directory_name!r}"
     )
     return identity
+
+
+# ---------------------------------------------------------------------------
+# WorkspaceProvider implementation (registered as "conductor" in
+# heyvox.adapters.get_workspace_provider)
+# ---------------------------------------------------------------------------
+
+def detect_visible_branch(pid: int) -> str:
+    """Walk Conductor's AX tree to find the branch name shown in the right panel.
+
+    Conductor's UI shows the branch name in the right pane after the AXSplitter;
+    walking AXFocusedWindow -> AXChildren -> past the splitter -> into the title
+    bar of the right pane gives us the branch string. This is what's currently
+    visible to the user (NOT what state the DB is in — the user may have
+    workspaces in 'ready' state that aren't on screen).
+
+    Returns the branch string or "" on any failure (caller treats "" as
+    "context unknown — skip resolve, leave workspace_id None").
+
+    Moved here from heyvox.input.target: this is Conductor-AX knowledge and
+    belongs with the sole owner of Conductor coupling.
+    """
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+        )
+        ax = AXUIElementCreateApplication(pid)
+        # Try AXFocusedWindow first, then AXMainWindow, then first of AXWindows.
+        win = None
+        for attr in ("AXFocusedWindow", "AXMainWindow"):
+            err, w = AXUIElementCopyAttributeValue(ax, attr, None)
+            if err == 0 and w is not None:
+                win = w
+                break
+        if win is None:
+            err, windows = AXUIElementCopyAttributeValue(ax, "AXWindows", None)
+            if err == 0 and windows and len(windows) > 0:
+                win = windows[0]
+        if win is None:
+            return ""
+
+        # Flatten the tree looking for the first AXStaticText after the first AXSplitter
+        items: list[tuple[str, str]] = []  # (role, value)
+
+        def _collect(elem, depth: int = 0) -> None:
+            if depth > 6 or len(items) > 300:
+                return
+            err_r, role = AXUIElementCopyAttributeValue(elem, "AXRole", None)
+            r = str(role) if err_r == 0 and role else ""
+            err_v, val = AXUIElementCopyAttributeValue(elem, "AXValue", None)
+            v = str(val).strip() if err_v == 0 and val else ""
+            items.append((r, v))
+            err_c, children = AXUIElementCopyAttributeValue(elem, "AXChildren", None)
+            if err_c == 0 and children:
+                for c in children:
+                    _collect(c, depth + 1)
+
+        _collect(win)
+
+        past_splitter = False
+        for r, v in items:
+            if r == "AXSplitter":
+                if past_splitter:
+                    break
+                past_splitter = True
+                continue
+            if past_splitter and r == "AXStaticText" and v:
+                return v
+        return ""
+    except Exception as e:
+        _log(f"detect_visible_branch: exception: {e}")
+        return ""
+
+
+class ConductorWorkspaceProvider:
+    """WorkspaceProvider for Conductor (see heyvox.adapters.base).
+
+    detect_context = the AX branch walk above (fast, in-thread);
+    resolve = the sqlite identity lookup (may block — callers timeout it).
+    """
+
+    name = "conductor"
+
+    def detect_context(self, pid: int) -> str:
+        return detect_visible_branch(pid)
+
+    def resolve(self, context, profile):
+        from heyvox.adapters.base import WorkspaceIdentity
+        workspace_db = getattr(profile, "workspace_db", "") if profile else ""
+        db_path = os.path.expanduser(workspace_db) if workspace_db else None
+        identity = get_active_workspace_and_session(
+            directory_name=None, branch=context, db_path=db_path,
+        )
+        if identity is None:
+            return None
+        return WorkspaceIdentity(
+            workspace_id=identity.workspace_id,
+            session_id=identity.session_id,
+        )

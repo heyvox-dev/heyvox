@@ -223,7 +223,7 @@ def _make_snap(element_role: str = "AXTextField", ax_element=None, app_bundle_id
     """Create a minimal TargetLock-like object for tests.
 
     Phase 15-02 migration: returns an object with both old (element_role,
-    ax_element) and new (leaf_role, app_pid, conductor_workspace_id) field
+    ax_element) and new (leaf_role, app_pid, workspace_id) field
     shapes so both the historical and current consumers see valid data.
     """
     snap = MagicMock()
@@ -234,7 +234,7 @@ def _make_snap(element_role: str = "AXTextField", ax_element=None, app_bundle_id
     snap.leaf_role = element_role
     snap.app_pid = 1234
     snap.app_name = "TestApp"
-    snap.conductor_workspace_id = None
+    snap.workspace_id = None
     snap.app_bundle_id = app_bundle_id
     return snap
 

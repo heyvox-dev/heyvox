@@ -259,7 +259,7 @@ _AX_NATIVE_ROLES = frozenset({"AXTextField", "AXTextArea"})
 
 # 15-02: migrated from legacy snapshot fields (ax_element, element_role,
 # detected_workspace) to the new record-start lock fields (leaf_role,
-# conductor_workspace_id, app_pid). AX element handle is now acquired live
+# workspace_id, app_pid). AX element handle is now acquired live
 # from the frontmost app's AXFocusedUIElement at call time (the lock does
 # not carry an AX ref — D-04: refs are ephemeral, role-path is the durable
 # identity).
@@ -272,7 +272,7 @@ def _ax_inject_text(snap, text: str) -> bool:
     no effect.
 
     Args:
-        snap: TargetLock (or None). Reads leaf_role + conductor_workspace_id
+        snap: TargetLock (or None). Reads leaf_role + workspace_id
             from the lock; element handle is acquired live from the focused
             element of the current frontmost app.
         text: Text to inject.
@@ -296,8 +296,8 @@ def _ax_inject_text(snap, text: str) -> bool:
     # behind HEYVOX_AX_CONDUCTOR so the proven osascript path stays the default
     # until validated across apps/versions/long text; the read-back verify below
     # is the hard guard (only claim success if the value actually stuck).
-    conductor_ws = getattr(snap, "conductor_workspace_id", None)
-    if conductor_ws and not os.environ.get("HEYVOX_AX_CONDUCTOR"):
+    ws_id = getattr(snap, "workspace_id", None)
+    if ws_id and not os.environ.get("HEYVOX_AX_CONDUCTOR"):
         app_name = getattr(snap, "app_name", "?")
         _log(f"AX fast-path: skipping for workspace-managed app ({app_name})")
         return False
@@ -314,7 +314,7 @@ def _ax_inject_text(snap, text: str) -> bool:
         # DEF-192: Chromium builds its a11y tree lazily — force it on so the
         # focused element + AXValue are live. Harmless no-op on native apps and
         # on already-active trees (HeyVox' own AX access usually keeps it awake).
-        if conductor_ws:
+        if ws_id:
             AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
         # DEF-192: after activation Chromium builds the tree async — the focused
         # element can be briefly unavailable. Poll ~150ms (the standalone probe
@@ -350,7 +350,7 @@ def _ax_inject_text(snap, text: str) -> bool:
         verr, got = AXUIElementCopyAttributeValue(focused, "AXValue", None)
         if verr == 0 and got is not None and text in str(got):
             _log(f"AX fast-path: injected+verified {len(text)} chars into "
-                 f"{leaf_role}{' (conductor)' if conductor_ws else ''}")
+                 f"{leaf_role}{' (workspace-managed)' if ws_id else ''}")
             return True
         AXUIElementSetAttributeValue(focused, "AXValue", current)
         _log(f"AX fast-path: verify FAILED (got {len(str(got or ''))} chars) — "
@@ -382,7 +382,7 @@ def _ax_walk_to_native_role(el, depth: int = 8):
     return None
 
 
-def _ax_set_conductor_value(pid: int, text: str) -> bool:
+def _ax_set_focused_value(pid: int, text: str) -> bool:
     """Set AXValue on the app's LIVE keyboard-focused text field (mouse-independent).
 
     Unlike _ax_inject_text (which gates on the mouse-captured snap.leaf_role),
@@ -417,20 +417,20 @@ def _ax_set_conductor_value(pid: int, text: str) -> bool:
                 break
         time.sleep(0.015)
     if target is None:
-        _log("AX conductor: no focused text field after focus_shortcut — fallback")
+        _log("AX value-paste: no focused text field after focus_shortcut — fallback")
         return False
     cerr, current = AXUIElementCopyAttributeValue(target, "AXValue", None)
     current = str(current) if (cerr == 0 and current) else ""
     newval = current + text if current else text
     serr = AXUIElementSetAttributeValue(target, "AXValue", newval)
     if serr != 0:
-        _log(f"AX conductor: set failed (err={serr}) — fallback")
+        _log(f"AX value-paste: set failed (err={serr}) — fallback")
         return False
     verr, got = AXUIElementCopyAttributeValue(target, "AXValue", None)
     if verr == 0 and got is not None and text in str(got):
         return True
     AXUIElementSetAttributeValue(target, "AXValue", current)
-    _log(f"AX conductor: verify FAILED (got {len(str(got or ''))} chars) — "
+    _log(f"AX value-paste: verify FAILED (got {len(str(got or ''))} chars) — "
          f"restored + fallback")
     return False
 
@@ -518,7 +518,7 @@ def _post_focus_shortcut(char: str) -> bool:
         return False
 
 
-def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
+def _ax_value_paste(profile, text: str, enter_count: int, snap) -> bool:
     """DEF-192: fast, mouse-independent paste for workspace-managed Electron.
 
     Focuses the chat field via the profile shortcut (Cmd+L), sets the value via
@@ -531,8 +531,10 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     otherwise) so it can skip the costly Electron set-frontmost activation cycle
     that both slows the path and resets web-view focus.
 
-    Behind HEYVOX_AX_CONDUCTOR. Reads app_pid from the record-start lock; the
-    field is located from the LIVE keyboard focus, not the mouse.
+    Enabled per-app via profile.ax_value_paste (or the deprecated global
+    injection.ax_conductor / HEYVOX_AX_CONDUCTOR env). Reads app_pid from the
+    record-start lock; the field is located from the LIVE keyboard focus, not
+    the mouse.
     """
     _t0 = time.time()
     pid = getattr(snap, "app_pid", 0)
@@ -544,7 +546,7 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     # long transcripts take the osascript Cmd+V fallback (rare — 2000 chars is
     # ~400 words). Remove once long-text is validated.
     if len(text) > 2000:
-        _log(f"AX conductor: text too long ({len(text)} chars) — deferring to osascript")
+        _log(f"AX value-paste: text too long ({len(text)} chars) — deferring to osascript")
         return False
 
     # 1. Focus the chat field. Per project_set_frontmost_focus_disruption, an
@@ -557,7 +559,7 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
     #    — just a bare Cmd+L to the frontmost app. (DEF-192 focus step: this cut
     #    the 557ms focus block, the last big cost after the CGEvent-Enter win.)
     if save_frontmost_pid() != pid:
-        _log("AX conductor: target not frontmost — deferring to osascript path")
+        _log("AX value-paste: target not frontmost — deferring to osascript path")
         return False
     if profile.focus_shortcut:
         # Prefer in-process CGEvent Cmd+<shortcut> (no subprocess); fall back to
@@ -573,14 +575,14 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
                 capture_output=True, timeout=SUBPROCESS_TIMEOUT,
             )
             if r.returncode != 0:
-                _log(f"AX conductor: focus osascript failed rc={r.returncode} — fallback")
+                _log(f"AX value-paste: focus osascript failed rc={r.returncode} — fallback")
                 return False
         time.sleep(0.03)  # brief; the AX poll below absorbs focus readiness
     t_focus = time.time()
 
     # 2. AX-set on the LIVE focused field (mouse-independent — fixes DEF-192
     #    Test-2 where the mouse-captured leaf was AXGroup).
-    if not _ax_set_conductor_value(pid, text):
+    if not _ax_set_focused_value(pid, text):
         return False
     t_axset = time.time()
 
@@ -610,10 +612,10 @@ def _ax_conductor_paste(profile, text: str, enter_count: int, snap) -> bool:
             if er.returncode != 0:
                 # Text is already in the field (AX-set verified). Do NOT return
                 # False (that would trigger the Cmd+V fallback → double-insert).
-                _log(f"AX conductor: Enter fallback failed rc={er.returncode} "
+                _log(f"AX value-paste: Enter fallback failed rc={er.returncode} "
                      f"(text is in field, not submitted)")
     t_enter = time.time()
-    _log(f"[TIMING] AX conductor paste: OK in {(t_enter-_t0)*1000:.0f}ms "
+    _log(f"[TIMING] AX value-paste: OK in {(t_enter-_t0)*1000:.0f}ms "
          f"(focus={(t_focus-_t0)*1000:.0f} axset={(t_axset-t_focus)*1000:.0f} "
          f"enter={(t_enter-t_axset)*1000:.0f} pid={pid} chars={len(text)} "
          f"enter_n={enter_count})")
@@ -1025,12 +1027,14 @@ def app_fast_paste(profile, text: str, enter_count: int | None = None, snap=None
             Pass 0 to suppress auto-send (e.g. PTT mode). Pass None to use
             profile.enter_count (the wake-word default).
         snap: Optional TargetLock from record-start. When set AND the AX path is
-            enabled AND the lock is a workspace-managed Electron app
-            (conductor_workspace_id), the AX fast-path is tried first
-            (mouse-independent, no Electron settle_delay), falling back to the
-            osascript Cmd+V path below on any failure. DEF-192.
-        ax_conductor: Enable the AX fast-path (from config.injection.ax_conductor).
-            The HEYVOX_AX_CONDUCTOR env var OR-overrides it for quick testing.
+            enabled AND the lock is a workspace-managed app (workspace_id),
+            the AX fast-path is tried first (mouse-independent, no Electron
+            settle_delay), falling back to the osascript Cmd+V path below on
+            any failure. DEF-192.
+        ax_conductor: Deprecated global enable for the AX fast-path (from
+            config.injection.ax_conductor). Prefer the per-app profile flag
+            ax_value_paste; the HEYVOX_AX_CONDUCTOR env var OR-overrides both
+            for quick testing.
 
     Returns True on success, False on failure.
 
@@ -1064,16 +1068,22 @@ def app_fast_paste(profile, text: str, enter_count: int | None = None, snap=None
         audio_cue("error")
         return False
 
-    # DEF-192: AX fast-path for workspace-managed Electron (Conductor), behind
-    # HEYVOX_AX_CONDUCTOR. Mouse-independent focus + synchronous AX-set (no
-    # Electron paste-IPC settle_delay). Falls through to the osascript Cmd+V
-    # path below on any failure — the clipboard is already set as the fallback.
+    # DEF-192: AX fast-path for workspace-managed Electron apps (validated on
+    # Conductor). Enabled per-app via profile.ax_value_paste, globally via the
+    # deprecated injection.ax_conductor config, or the HEYVOX_AX_CONDUCTOR env
+    # override. Mouse-independent focus + synchronous AX-set (no Electron
+    # paste-IPC settle_delay). Falls through to the osascript Cmd+V path below
+    # on any failure — the clipboard is already set as the fallback.
     if (
         snap is not None
-        and (ax_conductor or os.environ.get("HEYVOX_AX_CONDUCTOR"))
-        and getattr(snap, "conductor_workspace_id", None)
+        and (
+            getattr(profile, "ax_value_paste", False)
+            or ax_conductor
+            or os.environ.get("HEYVOX_AX_CONDUCTOR")
+        )
+        and getattr(snap, "workspace_id", None)
     ):
-        if _ax_conductor_paste(profile, text, effective_enter_count, snap):
+        if _ax_value_paste(profile, text, effective_enter_count, snap):
             _log(
                 f"[TIMING] app_fast_paste: OK via AX profile={profile.name} "
                 f"in {(time.time() - _t0)*1000:.0f}ms"
