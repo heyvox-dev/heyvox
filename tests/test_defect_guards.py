@@ -2344,3 +2344,29 @@ def test_def221_worker_exception_propagates():
 
     with _pytest.raises(ValueError, match="inner failure"):
         _run_with_timeout(_boom, timeout=5.0)
+
+
+def test_def221_orphan_gate_serializes_next_transcription():
+    """After a timeout abandons a worker, the next transcription must WAIT for
+    that orphan (bounded) instead of inferring concurrently on the shared
+    model — the race the old with-blockade prevented by accident."""
+    import threading
+    import time as _t
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    import pytest as _pytest
+    from heyvox.audio import stt as _stt
+
+    release = threading.Event()
+    try:
+        with _pytest.raises(FuturesTimeout):
+            _stt._run_with_timeout(lambda: release.wait(30.0), timeout=0.2)
+        # Orphan still running → gate must report NOT clear.
+        assert _stt._wait_for_orphan(timeout=0.2) is False
+        # Orphan finishes → gate opens promptly.
+        release.set()
+        assert _stt._wait_for_orphan(timeout=2.0) is True
+    finally:
+        release.set()
+        deadline = _t.monotonic() + 2.0
+        while not _stt._orphan_done.is_set() and _t.monotonic() < deadline:
+            _t.sleep(0.02)
