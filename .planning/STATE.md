@@ -21,16 +21,18 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** One voice layer that works across ALL your AI coding agents -- wake word, local STT, local TTS, beautiful HUD -- without sending audio to the cloud.
-**Current focus:** Phase 16 — stt-auto-glossary
+**Current focus:** Post-launch v1.1.x stabilization (see .planning/DEFECT-LOG.md DEF-207 through DEF-222); v1.2 Phase 14 (Homebrew tap, wake-word default swap) remains open.
+
+> ⚠️ **This file's structured fields (status/stopped_at/progress counters below) are stale — last mechanically updated 2026-06-11.** Phase 16 (STT Auto-Glossary) completed 2026-06-11 per ROADMAP.md; v1.3 (Robustness Sweep) and v1.4 (Phase 16) both shipped after this file stopped being updated. Since then, work has landed as DEF-numbered fixes tracked in DEFECT-LOG.md rather than through the phase-plan flow, shipping in point releases 1.1.1 (2026-07-13), 1.1.2 (2026-07-19), and 1.1.3 (2026-07-24, current — live on PyPI). See CHANGELOG.md for the user-facing summary of those. This note + the Current Position section below were refreshed 2026-07-24 (prose only, hand-edited); run `/gsd:health` for a full structural reconciliation of the counters in the frontmatter.
 
 ## Current Position
 
-Phase: 16
-Plan: Not started
-Status: Executing Phase 16
-Last activity: 2026-07-02 - Completed quick task 260702-cdg: Wake-word training-data quality gate (DEF-167)
+Phase: none currently executing — work since 2026-06-11 has landed as DEF-numbered fixes tracked directly in DEFECT-LOG.md rather than through the phase-plan flow. Phase 14 (Distribution & UX Polish) is the last incomplete phase-plan; see ROADMAP.md for its per-plan status (PyPI + HUD mic display done; Homebrew tap + wake-word default swap pending).
+Plan: n/a
+Status: Post-launch stabilization (v1.1.x point releases)
+Last activity: 2026-07-24 - v1.1.3 tagged and published to PyPI (DEF-221 STT-timeout orphan gate, DEF-222 ruff CI pin); branch heyvox/release-1.1.1 merged to main via PR #23
 
-Progress: [████████████████████] 100% (v1.1 shipped; v1.2 in progress)
+Progress: v1.0 / v1.1 / v1.3 / v1.4 (Phase 16) shipped; v1.2 Phase 14 partial (see note above). The "100%" figure previously here was a stale GSD counter, not reconciled since 2026-06-11 — removed rather than left misleading.
 
 ## Performance Metrics
 
