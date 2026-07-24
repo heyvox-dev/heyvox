@@ -543,6 +543,17 @@
 - **Found by**: Re-verifying the open `bug_stt_timeout_not_enforced` memory against current code before closing it (per the verify-before-recommending rule) — the timeout looked implemented; tracing the exception path through `__exit__` exposed the join.
 - **Would have caught earlier**: No test ever ran the timeout path against a worker that doesn't finish — the only shape that matters for a timeout. General pattern: for any "bounded wait" mechanism, the guard test must use a task that outlives the bound, and assert on WALL CLOCK, not just on the exception being raised. Sibling of **P-in-loop-watchdog** (a guard that depends on the thing it guards): here the timeout's cleanup depended on the hung thread it was guarding against.
 
+## DEF-222 — unpinned ruff broke CI on release day: 0.16.0 released upstream, red checks on a version-bump-only commit (FIXED 2026-07-24)
+
+- **Date**: 2026-07-24
+- **Category**: config
+- **Severity**: S3 (no code defect; blocked the v1.1.3 release PR until diagnosed — and would have silently turned EVERY subsequent PR red)
+- **Symptom**: PR #23 (pyproject version bump, one changed line) failed Lint & Test in ~30s on both twin runs with rule families never seen before (I001 import-sorting, UP024 IOError→OSError) while the identical tree was green locally and on main the day before.
+- **Root cause**: `ruff` in the dev extras was unpinned; CI installed the freshly released 0.16.0 (local: 0.15.2), which lints differently. The failure had nothing to do with the commit under test — classic unpinned-linter time bomb, same family as DEF-160 (unpinned actionlint action).
+- **Fix**: `ruff==0.15.2` in dev extras (the locally validated version). Upgrades happen deliberately: bump the pin, run locally, fix new findings in the same change.
+- **Found by**: A one-line version bump cannot fail lint — diffing the CI's installed ruff version against the local one.
+- **Would have caught earlier**: DEF-160 already taught "pin CI toolchain versions" for actions; the lesson wasn't applied to Python dev-tools. Action item: every tool that gates CI (linter, formatter, type checker) gets an exact pin.
+
 ## Patterns & Process Gaps
 
 - **P-transport-blind-policy** (DEF-208, siblings DEF-101/DEF-146/DEF-147): device-robustness policies (cooldowns, fallbacks, retries, gain) encode assumptions about a transport's failure model; applying BT-era policy to USB made a stable device unstable. **Action item**: any policy keyed on "device failed" must ask "which transport, and what does failure mean THERE?" — classify via the CoreAudio transport type (now available as `mic.get_device_transport`) before choosing the response.
