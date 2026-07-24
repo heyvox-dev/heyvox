@@ -4,7 +4,7 @@
 
 - ✅ **v1.0 MVP** — Phases 1-5 (shipped 2026-03-27)
 - ✅ **v1.1 Architecture Hardening** — Phases 6-9 (shipped 2026-04-11)
-- 🔧 **v1.2 Paste Injection Reliability** — Phases 12-15 (Phase 14 in progress, 3/6 plans)
+- 🔧 **v1.2 Paste Injection Reliability** — Phases 12-15 (Phase 14 in progress: PyPI publish + HUD mic display done; Homebrew tap + wake-word default swap pending)
 - ✅ **v1.3 Robustness Sweep** — 5 defect-driven quick tasks (shipped 2026-05-25)
 - 🎯 **v1.4 STT Accuracy** — Phase 16 (Auto-Glossary → Whisper `initial_prompt`); 4 plans planned (Spike 001)
 - 📋 **v2.0 Cross-Platform & Polish** — TTS server, MediaRemote, custom wake word, Chrome extension, cross-platform client
@@ -48,11 +48,11 @@
   **Requirements:** [SPEC-R1, SPEC-R2, SPEC-R3, SPEC-R4, SPEC-R5, SPEC-R6]
   **Plans:** 6 plans
   Plans:
-  - [ ] 14-01-PLAN.md — PyPI publish workflow (OIDC) + pyproject Beta classifier + importlib.metadata version sync [SPEC-R1, R2]
-  - [ ] 14-02-PLAN.md — HUD menu-bar mic display (truncated title + tooltip) + voice-isolation submenu suffix [SPEC-R4, R5]
-  - [ ] 14-03-PLAN.md — Wake-word training run + ship-gate eval script + GH Releases asset upload [SPEC-R6]
-  - [ ] 14-04-PLAN.md — Setup wizard model download + sha256 validation + --redownload-wakeword + co-default lock [SPEC-R6]
-  - [ ] 14-05-PLAN.md — Homebrew tap repo + Formula/heyvox.rb + release runbook docs [SPEC-R3]
+  - [x] 14-01-PLAN.md — PyPI publish workflow (OIDC) + pyproject Beta classifier + importlib.metadata version sync [SPEC-R1, R2] — done 2026-05-11, verified live (PyPI has 1.0.0 through 1.1.3)
+  - [x] 14-02-PLAN.md — HUD menu-bar mic display (truncated title + tooltip) + voice-isolation submenu suffix [SPEC-R4, R5] — done 2026-05-11 (`heyvox/hud/menu_bar_title.py`, 28 tests)
+  - [~] 14-03-PLAN.md — Wake-word training run + ship-gate eval script + GH Releases asset upload [SPEC-R6] — partial: eval script (`training/evaluate_model.py`) done 2026-05-11; Colab training run + asset upload + wiring in remain maintainer-only steps, not closed out
+  - [ ] 14-04-PLAN.md — Setup wizard model download + sha256 validation + --redownload-wakeword + co-default lock [SPEC-R6] — superseded: wake-word `.onnx` files now ship bundled as package_data instead of downloaded (see `docs/release-process.md`); default is still `hey_jarvis_v0.1`, `hey_vox` trained but not yet wired in as default (`heyvox/config.py`)
+  - [ ] 14-05-PLAN.md — Homebrew tap repo + Formula/heyvox.rb + release runbook docs [SPEC-R3] — release-runbook portion done (`docs/release-process.md`, 2026-07-24); tap repo itself (`heyvox-dev/homebrew-heyvox`) not started
   - [ ] 14-06-PLAN.md — Training pipeline docs (docs/wakeword-training.md) + README install polish [SPEC-R2, R6]
 - [x] Phase 15: Paste Target Lock (2026-04-24) — record-start TargetLock + three-tier resolve ladder + fail-closed policy
   **Goal:** Transcribed speech lands in the exact text field that held the cursor at recording start, even after app/workspace/session change; unreachable target → fail-closed (clipboard + history + toast)
