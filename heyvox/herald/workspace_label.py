@@ -10,8 +10,12 @@ Resolution order for a given workspace ``directory_name``:
        launchd hooks that already know the friendly name)
     2. ``config.tts.workspace_labels[directory_name]`` (per-workspace short
        name, persisted in config.yaml — the "programmatic" knob)
-    3. ``pr_title`` from the workspace-aware app's SQLite DB (e.g. the
-       string Conductor renders in its sidebar)
+    3. The workspace-aware app's SQLite DB, mirroring what it renders in
+       its own sidebar: ``workspace_name`` when the row has
+       ``user_set_workspace_name=1`` (Conductor's drift-proof rename
+       field), else ``pr_title`` (which Conductor overwrites with a
+       Conventional-Commit string on every PR merge — only used when
+       nothing better is set)
     4. The raw ``directory_name`` as last-resort fallback
 
 Returns ``""`` when ``workspace_name`` is empty or announcing is disabled,
@@ -64,23 +68,42 @@ def _get_workspace_db_path(cfg: "HeyvoxConfig | None") -> str:
     return _cached_db_path
 
 
-def _pr_title_from_db(workspace_name: str, db_path: str) -> str:
-    """Fetch ``pr_title`` for ``workspace_name`` from the workspace DB.
+# Field separator for the multi-column query below. Must be a *printable*
+# character, not the raw ASCII unit-separator (0x1F): the sqlite3 CLI
+# caret-escapes real control bytes in its output (e.g. 0x1F -> "^_", a
+# terminal-safety measure), which silently corrupts a raw-control-byte
+# separator before Python ever sees it. U+241F is the printable Unicode
+# glyph for "unit separator" — survives the CLI untouched and is not
+# something a human would ever type into a workspace/PR title.
+_DB_FIELD_SEP = "␟"
 
-    Returns "" if the DB is missing, sqlite errors, or the row has no
-    pr_title. Caller falls back to the raw workspace_name in that case.
+
+def _sidebar_label_from_db(workspace_name: str, db_path: str) -> str:
+    """Fetch the sidebar-equivalent label for ``workspace_name`` from the DB.
+
+    Mirrors Conductor's own sidebar resolution (see claude-conductor-setup's
+    CLAUDE.md "Workspace Naming" section): ``workspace_name`` wins when the
+    row has ``user_set_workspace_name=1`` — the drift-proof field written by
+    the rename tooling there — otherwise falls back to ``pr_title``, which
+    Conductor overwrites with a Conventional-Commit string on every PR merge.
+
+    Returns "" if the DB is missing, sqlite errors, or the row has neither
+    field set. Caller falls back to the raw workspace_name in that case.
     """
     if not db_path or not workspace_name:
         return ""
     # Escape single quotes (workspace names with ' would break the literal).
     safe_name = workspace_name.replace("'", "''")
+    sep = _DB_FIELD_SEP
     try:
         r = subprocess.run(
             [
                 "sqlite3",
                 db_path,
-                f"SELECT COALESCE(pr_title, '') FROM workspaces "
-                f"WHERE directory_name='{safe_name}'",
+                f"SELECT COALESCE(workspace_name,'') || '{sep}' || "
+                f"COALESCE(user_set_workspace_name,0) || '{sep}' || "
+                f"COALESCE(pr_title,'') FROM workspaces "
+                f"WHERE directory_name='{safe_name}' LIMIT 1",
             ],
             capture_output=True,
             text=True,
@@ -89,7 +112,17 @@ def _pr_title_from_db(workspace_name: str, db_path: str) -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         log.debug("workspace_label: sqlite3 lookup failed: %s", e)
         return ""
-    return (r.stdout or "").strip()
+    row = (r.stdout or "").rstrip("\n")
+    if not row:
+        return ""
+    parts = row.split(sep)
+    if len(parts) != 3:
+        log.debug("workspace_label: unexpected sqlite3 output shape: %r", row)
+        return ""
+    ws_name, user_set, pr_title = parts
+    if user_set == "1" and ws_name:
+        return ws_name
+    return pr_title
 
 
 def detect_workspace_from_cwd(
@@ -207,11 +240,13 @@ def get_workspace_label(
     if custom:
         return _normalize_for_speech(custom)
 
-    # 3. pr_title from the workspace-aware app's DB (what's shown on the left)
+    # 3. Sidebar-equivalent label from the workspace-aware app's DB — mirrors
+    #    Conductor's own resolution (workspace_name when user-set, else
+    #    pr_title).
     db_path = _get_workspace_db_path(cfg)
-    pr_title = _pr_title_from_db(workspace_name, db_path)
-    if pr_title:
-        return _normalize_for_speech(pr_title)
+    sidebar_label = _sidebar_label_from_db(workspace_name, db_path)
+    if sidebar_label:
+        return _normalize_for_speech(sidebar_label)
 
     # 4. Last resort: the raw directory_name
     return _normalize_for_speech(workspace_name)
