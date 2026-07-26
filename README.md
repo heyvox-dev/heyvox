@@ -77,9 +77,15 @@ heyvox setup
 4. Tests your microphone
 5. Creates config at `~/.config/heyvox/config.yaml`
 6. Installs launchd service (auto-start at login)
-7. Installs Herald TTS hooks for Claude Code (`~/.claude/settings.json`)
-8. Registers the MCP voice server with your AI agent
+7. Installs the HeyVox **Claude Code plugin** — carries the Herald TTS hooks and
+   the MCP voice server in one artifact, at zero added context cost. On machines
+   without the `claude` CLI, falls back to writing `~/.claude/settings.json`
+   directly. Restart Claude Code afterwards to activate it.
+8. Registers the MCP voice server with any other AI agents it detects
+   (Cursor, Windsurf, Continue.dev — experimental, config paths unverified)
 9. Shows setup summary
+
+To remove the plugin later: `claude plugin uninstall heyvox@heyvox`.
 
 ## Usage
 

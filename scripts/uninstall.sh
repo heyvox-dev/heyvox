@@ -155,6 +155,20 @@ for sock in \
     fi
 done
 
+# ── Remove the HeyVox Claude Code plugin ──────────────────────────
+# DEF-227: newer installs register a plugin instead of editing settings.json.
+# Both paths are handled — a machine may have either, or (mid-migration) both.
+if command -v claude &>/dev/null; then
+    if claude plugin list 2>/dev/null | grep -q "heyvox@heyvox"; then
+        claude plugin uninstall heyvox@heyvox &>/dev/null && \
+            success "Uninstalled Claude Code plugin heyvox@heyvox"
+    fi
+    if claude plugin marketplace list 2>/dev/null | grep -q "heyvox"; then
+        claude plugin marketplace remove heyvox &>/dev/null && \
+            success "Removed Claude Code marketplace heyvox"
+    fi
+fi
+
 # ── Remove Herald hooks from Claude Code settings ─────────────────
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 if [[ -f "$CLAUDE_SETTINGS" ]]; then
