@@ -8,6 +8,7 @@ Requirement: Phase 8 custom wake word support
 """
 
 import os
+import re
 from typing import Any
 
 
@@ -72,6 +73,37 @@ _OWW_BUILTIN_NAMES = frozenset({
     "alexa_v0.1", "hey_jarvis_v0.1", "hey_mycroft_v0.1",
     "hey_rhasspy_v0.1", "timer_v0.1", "weather_v0.1",
 })
+
+# Model name → the phrase a user actually has to say.
+#
+# DEF-226: the shipped default is openwakeword's stock "hey_jarvis_v0.1", but
+# the product is called HeyVox — so the obvious thing to say ("Hey Vox") never
+# triggers, with no hint anywhere that the phrase differs from the name. Setup
+# and doctor previously printed only the model filename, which does not tell a
+# newcomer what to say. Keep this in sync when a custom model ships.
+_TRIGGER_PHRASES = {
+    "alexa_v0.1": "Alexa",
+    "hey_jarvis_v0.1": "Hey Jarvis",
+    "hey_mycroft_v0.1": "Hey Mycroft",
+    "hey_rhasspy_v0.1": "Hey Rhasspy",
+    "hey_vox": "Hey Vox",
+}
+
+
+def trigger_phrase(model_name: str) -> str:
+    """Return the spoken phrase for a wake word model name.
+
+    Falls back to a readable form of the model name for custom models, so the
+    caller can always show the user *something* to say.
+    """
+    name = (model_name or "").strip()
+    if not name:
+        return ""
+    if name in _TRIGGER_PHRASES:
+        return _TRIGGER_PHRASES[name]
+    # Custom model: strip a trailing version suffix and humanise the stem.
+    stem = re.sub(r"_v[\d.]+$", "", name)
+    return " ".join(w.capitalize() for w in stem.replace("-", "_").split("_") if w)
 
 
 def _ensure_oww_models(builtin_names: list[str]) -> None:

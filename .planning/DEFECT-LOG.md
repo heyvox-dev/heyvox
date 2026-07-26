@@ -554,7 +554,53 @@
 - **Found by**: A one-line version bump cannot fail lint — diffing the CI's installed ruff version against the local one.
 - **Would have caught earlier**: DEF-160 already taught "pin CI toolchain versions" for actions; the lesson wasn't applied to Python dev-tools. Action item: every tool that gates CI (linter, formatter, type checker) gets an exact pin.
 
+## DEF-223 — `heyvox setup` wrote Herald hooks in a shape Claude Code does not execute: voice output dead on every fresh install since the monorepo merge (FIXED 2026-07-26)
+
+- **Date**: 2026-07-26
+- **Category**: integration
+- **Severity**: S1 (half the product promise — "your agent talks back" — never worked for any user who installed via the documented path; silent, no error anywhere)
+- **Symptom**: User runs `pip install heyvox` + `heyvox setup`, sees "✓ TTS on Claude response: installed (Stop)", talks to Claude Code, and never hears anything. No error in the terminal, none in Claude Code, none in the HUD.
+- **Root cause**: Two independent schema errors in `heyvox/setup/hooks.py`. (1) Entries were written flat as `{"command": "bash …"}`; the Claude Code settings schema requires a matcher group wrapping a handler list — `{"hooks": [{"type": "command", "command": …}]}` — with `type` mandatory. (2) The session-end hook was registered under event `"Stop_session"`, which is not a Claude Code event at all (correct: `"SessionEnd"`). Both confirmed against the official hooks specification and against a live working `~/.claude/settings.json` containing 11 nested entries and 0 flat ones.
+- **Fix**: Write the nested matcher-group shape with an explicit `type`; rename `Stop_session` → `SessionEnd`; migrate configs written by earlier versions (rewrite legacy flat Herald entries in place, strip Herald entries from the bogus event key). `_handlers()`/`_is_herald()` now understand both shapes, so detection, idempotent re-run and `uninstall_herald_hooks()` all work against configs produced by any version.
+- **Found by**: Pre-release readiness audit — comparing what the installer writes against the maintainer's own working settings.json, then against the published schema.
+- **Would have caught earlier**: The maintainer's own hooks were hand-written in the correct shape and predate the installer, so dogfooding never exercised the code path that new users depend on — the one component of the product the author structurally cannot test by using it. `git log` confirms `hooks.py` was never touched for schema reasons since the monorepo merge. **Action item**: any installer that writes into a *third party's* config format needs a round-trip test that (a) writes into a temp HOME and (b) asserts the exact resulting structure against a fixture captured from a known-working real config — never "the write returned without raising."
+
+## DEF-224 — nothing ever told the agent to emit `<tts>` blocks: fully-plumbed TTS stack that stays permanently silent (FIXED 2026-07-26)
+
+- **Date**: 2026-07-26
+- **Category**: integration
+- **Severity**: S1 (independent of DEF-223 — even with correct hooks, the trigger the hooks look for was never produced)
+- **Symptom**: Hooks registered, MCP registered, Kokoro daemon healthy, orchestrator running, `tts.enabled: true` — and still no speech, ever.
+- **Root cause**: Herald's Stop hook only speaks when the agent's response contains a `<tts>…</tts>` block. That is a bespoke text convention with no discovery path: not in the README, not on the landing page, not in `heyvox setup`, not in the MCP tool docstrings. `worker.py` treats "no `<tts>` block" as success (logs at INFO to a temp file, returns True), so the failure is invisible. The maintainer's own `~/.claude/CLAUDE.md` carries a hand-written "Voice Output (TTS)" section — personal dev config that no user ever receives.
+- **Fix**: Pass `instructions=` to `FastMCP(...)` in `heyvox/mcp/server.py`. MCP delivers this to the client at initialize time, which is the one channel that reaches the agent *before* it writes its first response. Verified: 1574 characters arrive in the `initialize` result.
+- **Found by**: Same audit — tracing the Journey-C prerequisite chain and finding step 8 ("agent instructed to emit `<tts>`") automated nowhere.
+- **Would have caught earlier**: The prerequisite chain for the first spoken word was never written down, so each individual piece looked complete while the chain had a gap. **Action item**: for any feature whose trigger is produced by an external agent rather than by our own code, the onboarding path must state explicitly *who* produces the trigger and *where* they are told to.
+
+## DEF-225 — `pyobjc-framework-ApplicationServices` never declared: AX capture and paste fast path silently dead, Accessibility check a false green (FIXED 2026-07-26)
+
+- **Date**: 2026-07-26
+- **Category**: config
+- **Severity**: S2 (degraded, not broken — paste still worked via the osascript fallback, which is exactly why it survived four releases)
+- **Symptom**: `heyvox doctor` prints "✓ Accessibility" on a fresh install regardless of the real TCC state. Smart target detection, focus verification and workspace capture silently never engage; the DEF-192 AX paste fast path never runs for any user.
+- **Root cause**: `pyobjc-framework-ApplicationServices` is a separate PyObjC distribution — `pyobjc-framework-Cocoa` and `-Quartz` do not pull it in, and only those two were declared. Every `import ApplicationServices` (11 sites across `input/target.py`, `input/injection.py`, `setup/permissions.py`, `adapters/conductor.py`) is function-local and wrapped in `except ImportError`, so a missing module degrades silently instead of failing. `check_accessibility()` compounded it by returning `True` on ImportError ("assume granted").
+- **Fix**: Declare the dependency. Separately, `check_accessibility()` now fails closed on macOS (`sys.platform != "darwin"` for the not-applicable case), and `doctor.py` reports the real cause — "ApplicationServices missing — broken install" — rather than sending the user to grant a permission they already granted.
+- **Found by**: Audit sub-agent building the wheel and importing every PyObjC module in a clean venv; the false green was then caught in the act by running `heyvox doctor` in that venv.
+- **Would have caught earlier**: Every consumer of this module catches ImportError, so no test and no runtime path could ever surface the gap — the tests mock `ApplicationServices` into `sys.modules`, which actively hides it. **Action item**: the clean-install CI job (`install-test.yml`) should import every third-party module the package touches, computed from a grep of the source, not just the handful listed by hand today. A dependency that is only ever imported inside `try/except ImportError` needs that check most, not least.
+
+## DEF-226 — wake word is "Hey Jarvis", never stated; non-atomic settings.json write (FIXED 2026-07-26)
+
+- **Date**: 2026-07-26
+- **Category**: ux
+- **Severity**: S2 (first-run dead end: the single most likely first action a new user takes does nothing)
+- **Symptom**: User installs a product called HeyVox, says "Hey Vox", gets zero detections, forever, and concludes wake-word detection is broken.
+- **Root cause**: The shipped default is openwakeword's stock `hey_jarvis_v0.1` (deliberate — it works on any voice, per DEF-159), but nothing translated the model *filename* into the phrase a human has to say. The wizard printed "Wake word model ready (hey_jarvis_v0.1)", doctor printed "model loads (hey_jarvis_v0.1)", the README quickstart said only "say the wake word", and the landing page likewise. The one honest mention was a parenthetical in a config sample.
+- **Fix**: `wakeword.trigger_phrase()` maps model name → spoken phrase (with a humanising fallback for custom models). Wizard, `heyvox doctor` and the README quickstart now state the phrase explicitly, and the wizard adds why it is not "Hey Vox". Bundled in the same change: `_write_settings()` writes `~/.claude/settings.json` via tempfile + `os.replace` — the previous `open(path, "w")` truncated the user's live Claude Code config before writing, so an interrupt mid-setup could take every unrelated hook, permission and plugin setting down with it.
+- **Found by**: Audit — reading the shipped default against the product name, then confirming no user-facing surface names the phrase.
+- **Would have caught earlier**: The gap between an internal identifier and the words a user must speak is invisible to anyone who already knows the answer. **Action item**: any user-facing message that prints an internal identifier (model name, device UID, profile key) should be reviewed for whether the user can act on it — if the identifier is the *instruction*, translate it.
+
 ## Patterns & Process Gaps
+
+- **P-dogfooding-blind-installer** (DEF-223, siblings DEF-224/DEF-225): the maintainer's machine reached its working state by a path new users never take — hand-written config, incremental migrations, modules present for unrelated reasons. Every component the author configures *once, by hand* is a component dogfooding structurally cannot test, and all three S1/S2 defects above lived in exactly that blind spot (hook installer, agent instructions, a transitively-satisfied dependency). **Action item**: treat "works on the author's machine" as *no evidence at all* for install-time and first-run code paths. Those need a clean-room test — temp HOME, fresh venv, asserted end state — as a standing CI job, not an audit finding.
 
 - **P-transport-blind-policy** (DEF-208, siblings DEF-101/DEF-146/DEF-147): device-robustness policies (cooldowns, fallbacks, retries, gain) encode assumptions about a transport's failure model; applying BT-era policy to USB made a stable device unstable. **Action item**: any policy keyed on "device failed" must ask "which transport, and what does failure mean THERE?" — classify via the CoreAudio transport type (now available as `mic.get_device_transport`) before choosing the response.
 - **P-in-loop-watchdog** (DEF-210, siblings DEF-104/DEF-163): a watchdog that runs inside the control flow it supervises dies with its patient. **Action item**: for every watchdog, name the thread/loop it runs ON and verify it survives the failure it detects; liveness supervision must run in a separate thread (or process, for GIL-holding wedges).

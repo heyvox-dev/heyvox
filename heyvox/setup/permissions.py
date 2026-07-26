@@ -9,6 +9,7 @@ Requirements: CLI-03
 """
 
 import subprocess
+import sys
 
 
 # macOS System Settings deep-link URLs for each permission type.
@@ -28,13 +29,20 @@ def check_accessibility() -> bool:
 
     Returns:
         True if the current process is trusted for accessibility.
+
+    DEF-225: an ImportError used to return True ("assume granted"). Combined
+    with the missing pyobjc-framework-ApplicationServices dependency that made
+    `heyvox doctor` print a green Accessibility line on every fresh install,
+    regardless of the real TCC state. A check that cannot run must not report
+    success — off macOS it is not applicable (True), on macOS it fails closed.
     """
     try:
         import ApplicationServices  # lazy PyObjC import
         return bool(ApplicationServices.AXIsProcessTrusted())
     except ImportError:
-        # PyObjC not available — assume granted (non-macOS or test env)
-        return True
+        # Not applicable off macOS (and in the non-macOS test env); on macOS a
+        # missing module means "cannot determine", which must not read as granted.
+        return sys.platform != "darwin"
     except Exception:
         return False
 

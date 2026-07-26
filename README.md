@@ -7,7 +7,7 @@ Your AI coding agent doesn't just listen — it talks back. HeyVox adds a voice 
 ## How It Works
 
 **Voice IN** — Speak to your agent:
-1. Say the wake word (or hold your push-to-talk key)
+1. Say the wake word — **"Hey Jarvis"** by default (or hold your push-to-talk key)
 2. HeyVox records and transcribes your speech locally (MLX Whisper / sherpa-onnx)
 3. Your words are pasted into the agent's input field and sent
 
@@ -190,7 +190,9 @@ Edit `~/.config/heyvox/config.yaml`:
 
 ```yaml
 wake_words:
-  start: hey_jarvis_v0.1   # Wake word model (custom "hey_vox" coming soon)
+  # Say "Hey Jarvis" — despite the product name, the default trigger is
+  # openwakeword's stock model. A custom "hey_vox" model is not shipped yet.
+  start: hey_jarvis_v0.1
 
 threshold: 0.5
 silence_timeout_secs: 5.0

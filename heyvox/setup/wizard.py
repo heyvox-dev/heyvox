@@ -228,10 +228,20 @@ def run_setup(config) -> None:
     # ---------------------------------------------------------------------------
     console.print("[bold]Step 2b: Wake Word Model[/bold]")
     try:
-        from heyvox.audio.wakeword import _ensure_oww_models
+        from heyvox.audio.wakeword import _ensure_oww_models, trigger_phrase
         _wake = getattr(config.wake_words, "start", "hey_jarvis_v0.1")
         _ensure_oww_models([_wake])
         console.print(f"  [green]✓[/green] Wake word model ready ({_wake})")
+        # DEF-226: the model name is not the phrase. Say it out loud, or the
+        # user tries "Hey Vox" forever and concludes detection is broken.
+        _phrase = trigger_phrase(_wake)
+        if _phrase:
+            console.print(f'  [bold]Your wake word is "{_phrase}"[/bold] — say that to start recording.')
+            if _phrase.lower() != "hey vox":
+                console.print(
+                    '  [dim]Not "Hey Vox" — HeyVox ships openwakeword\'s stock model '
+                    "until the custom one clears its quality gate.[/dim]"
+                )
     except Exception as e:
         console.print(f"  [yellow]![/yellow] Could not provision wake word model: {e}")
         console.print("  [dim]heyvox will retry on first start.[/dim]")
