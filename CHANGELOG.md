@@ -38,6 +38,8 @@ install before this release.
   generation to stop feeding it more sentence-parts — previously a long
   spoken response needed one Escape press per remaining part instead of
   one (DEF-229).
+- HUD IPC reconnects no longer occasionally lose the race against the
+  server's accept loop (DEF-230).
 
 ### Changed
 
