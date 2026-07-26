@@ -4,6 +4,7 @@ import json
 import os
 import time
 import pytest
+from unittest.mock import MagicMock, patch
 
 from heyvox.hud.ipc import HUDServer, HUDClient
 
@@ -41,6 +42,40 @@ class TestHUDClient:
         client = HUDClient(path="/tmp/nonexistent-test.sock")
         client.reconnect()  # Should not raise
         assert client._sock is None
+
+
+class TestConnectRetry:
+    """DEF-230: connect() retries a few times before giving up.
+
+    Deterministic (mocked) coverage of the retry loop itself, alongside
+    the real-socket integration test below it's meant to stop flaking.
+    """
+
+    def test_connect_succeeds_after_transient_failures(self):
+        fake_socket = MagicMock()
+        fake_socket.connect.side_effect = [ConnectionRefusedError(), ConnectionRefusedError(), None]
+
+        with patch("heyvox.hud.ipc.socket.socket", return_value=fake_socket), \
+             patch("heyvox.hud.ipc.time.sleep") as mock_sleep:
+            client = HUDClient(path="/tmp/whatever.sock")
+            client.connect()
+
+        assert client._sock is fake_socket
+        assert fake_socket.connect.call_count == 3
+        assert mock_sleep.call_count == 2, "should pause between retries, not after the final attempt"
+
+    def test_connect_gives_up_after_exhausting_attempts(self):
+        fake_socket = MagicMock()
+        fake_socket.connect.side_effect = ConnectionRefusedError()
+
+        with patch("heyvox.hud.ipc.socket.socket", return_value=fake_socket), \
+             patch("heyvox.hud.ipc.time.sleep") as mock_sleep:
+            client = HUDClient(path="/tmp/whatever.sock")
+            client.connect()
+
+        assert client._sock is None
+        assert fake_socket.connect.call_count == HUDClient._CONNECT_ATTEMPTS
+        assert mock_sleep.call_count == HUDClient._CONNECT_ATTEMPTS - 1
 
 
 class TestHUDServerClient:

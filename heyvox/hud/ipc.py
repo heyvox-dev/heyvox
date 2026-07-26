@@ -26,6 +26,7 @@ import json
 import os
 import socket
 import threading
+import time
 from collections.abc import Callable
 
 from heyvox.constants import HUD_SOCKET_PATH as DEFAULT_SOCKET_PATH
@@ -43,6 +44,11 @@ class HUDServer:
 
     Requirement: HUD-08
     """
+
+    # DEF-230: a backlog of 1 left no slack for a reconnect landing while the
+    # accept loop was still busy spawning the previous connection's handler
+    # thread — the kernel refuses new connects once the backlog is full.
+    _LISTEN_BACKLOG = 5
 
     def __init__(self, path: str = DEFAULT_SOCKET_PATH, on_message: Callable[[dict], None] | None = None):
         self._path = path
@@ -64,7 +70,7 @@ class HUDServer:
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as srv:
             srv.bind(self._path)
-            srv.listen(1)
+            srv.listen(self._LISTEN_BACKLOG)
             while self._running:
                 try:
                     conn, _ = srv.accept()
@@ -121,16 +127,29 @@ class HUDClient:
         self._sock = None
         self._lock = threading.Lock()
 
+    # DEF-230: a fresh connect can transiently race the server's accept
+    # loop right after a previous connection on the same socket just
+    # closed (small listen backlog, or the loop still busy spawning the
+    # prior handler thread) — a couple of retries absorb that without
+    # changing behaviour for the common case of no server listening at
+    # all, which still fails, just a few milliseconds slower.
+    _CONNECT_ATTEMPTS = 3
+    _CONNECT_RETRY_DELAY = 0.02
+
     def connect(self) -> None:
         """Attempt to connect to the HUD server. Silent on failure."""
         with self._lock:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                s.connect(self._path)
-                self._sock = s
-            except Exception:
-                s.close()
-                self._sock = None
+            for attempt in range(self._CONNECT_ATTEMPTS):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    s.connect(self._path)
+                    self._sock = s
+                    return
+                except Exception:
+                    s.close()
+                    self._sock = None
+                    if attempt < self._CONNECT_ATTEMPTS - 1:
+                        time.sleep(self._CONNECT_RETRY_DELAY)
 
     def send(self, msg: dict) -> bool:
         """Send a JSON message. No-op (returns False) if not connected.
