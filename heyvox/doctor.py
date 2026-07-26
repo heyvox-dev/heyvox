@@ -48,11 +48,25 @@ def _check_permissions(lines: list[str]) -> None:
         lines.append(_line(_WARN, "permission checks unavailable", str(e)))
         lines.append("")
         return
+    # DEF-225: distinguish "permission denied" from "the check cannot run".
+    # A missing pyobjc-framework-ApplicationServices makes AXIsProcessTrusted()
+    # unavailable, and telling the user to grant a permission they already
+    # granted sends them down the wrong path entirely.
+    ax_broken = ""
+    try:
+        import ApplicationServices  # noqa: F401
+    except ImportError:
+        ax_broken = ("pyobjc-framework-ApplicationServices missing — "
+                     "broken install, reinstall heyvox")
+
     for name, fn in (
         ("Microphone", perm.check_microphone),
         ("Accessibility", perm.check_accessibility),
         ("Screen Recording", perm.check_screen_recording),
     ):
+        if name == "Accessibility" and ax_broken:
+            lines.append(_line(_FAIL, name, ax_broken))
+            continue
         try:
             ok = fn()
         except Exception as e:
@@ -109,6 +123,14 @@ def _check_wakeword(lines: list[str], cfg) -> None:
         lines.append(_line(_OK, f"model loads ({start})"))
     except Exception as e:
         lines.append(_line(_FAIL, f"model load failed ({start})", str(e)[:80]))
+    # DEF-226: name the phrase, not just the model file. "no detections" is
+    # almost always the user saying "Hey Vox" at a hey_jarvis model.
+    try:
+        phrase = wakeword.trigger_phrase(start)
+        if phrase:
+            lines.append(_line(_OK, f'say "{phrase}"', "this is your wake word"))
+    except Exception:
+        pass
     lines.append("")
 
 

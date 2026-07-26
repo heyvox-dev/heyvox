@@ -65,3 +65,29 @@ jobs:
           assert 'hey_jarvis_v0.1' in preds, preds
           print('wake-word model loads + predicts:', list(preds.keys()))
           "
+
+      - name: Install Claude Code CLI (for plugin schema validation)
+        run: |
+          # Pinned deliberately — DEF-222: an unpinned tool that gates CI turns
+          # unrelated commits red when upstream ships a change.
+          npm install -g @anthropic-ai/claude-code@2.1.220
+          claude --version
+
+      - name: Validate the generated Claude Code plugin against the vendor schema
+        run: |
+          # DEF-227: this is the canary the hand-written settings.json path
+          # never had. DEF-223 shipped an invalid hook shape for four releases
+          # because nothing checked our output against Claude Code's schema.
+          # `claude plugin validate` is that check, and it belongs to the
+          # vendor — so it also catches schema drift on their side, which our
+          # own guard tests structurally cannot.
+          .venv-install-test/bin/python -c "
+          from heyvox.setup import plugin
+          plug = plugin.generate()
+          print('generated:', plug)
+          print('marketplace:', plugin.marketplace_dir())
+          "
+          PLUGIN_DIR="$(.venv-install-test/bin/python -c 'from heyvox.setup import plugin; print(plugin.plugin_dir())')"
+          MARKET_DIR="$(.venv-install-test/bin/python -c 'from heyvox.setup import plugin; print(plugin.marketplace_dir())')"
+          claude plugin validate "$PLUGIN_DIR"
+          claude plugin validate "$MARKET_DIR"

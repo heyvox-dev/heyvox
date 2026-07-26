@@ -69,10 +69,57 @@ sys.stdout = sys.stderr
 # ---------------------------------------------------------------------------
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+# DEF-224: without this, HeyVox is plumbed but mute. Herald's Stop hook only
+# speaks when the agent's response contains a <tts> block, and nothing else
+# teaches the agent that convention — not the README, not `heyvox setup`, not
+# the tool docstrings. FastMCP surfaces `instructions` to the client at
+# initialize time, which is the one channel that reaches the agent before it
+# writes its first response.
+_INSTRUCTIONS = """\
+HeyVox gives this session a voice on the user's Mac. Speech is generated
+locally; nothing is sent to a cloud service.
+
+How to speak
+------------
+End every response with a <tts>...</tts> block. A shell hook extracts that
+block and speaks it aloud. Text outside the block is only read on screen.
+
+    <tts>Tests pass, three files changed.</tts>
+
+The user is often listening rather than reading, so put the key takeaway in
+the FIRST sentence — it may be the only one played.
+
+What belongs in a <tts> block
+-----------------------------
+Plain spoken prose. No markdown, code, URLs, or file paths — they are
+unpleasant to listen to. Summarise instead: say "the config file" rather than
+reading out a path.
+
+Use <tts>SKIP</tts> only when a response carries genuinely no information for
+a listener. When in doubt, speak.
+
+Length and tone
+---------------
+Call voice_status() to read the user's configured verbosity and style. Its
+'style_instruction' field states how long and in what register to speak;
+follow it. Re-check it if the user asks you to be briefer or more detailed.
+
+The tools
+---------
+- voice_speak(text)  — speak immediately, outside the normal response flow
+                       (progress updates during long-running work).
+- voice_status()     — current state, verbosity, and style instruction.
+- voice_queue(...)   — list/skip/stop/clear/mute the playback queue.
+- voice_config(...)  — read or change verbosity, mute, and style.
+
+Prefer the <tts> block for ordinary replies; reserve voice_speak() for
+speaking at a moment when you are not returning a response.
+"""
+
 # stateless_http: tools keep no per-session server state (verbosity/style/mute
 # live in shared files), so requests need no session pinning. Clients survive
 # server restarts without a session re-handshake. Ignored by stdio transport.
-mcp = FastMCP("heyvox", stateless_http=True)
+mcp = FastMCP("heyvox", stateless_http=True, instructions=_INSTRUCTIONS)
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -96,13 +143,18 @@ def _init_tts() -> None:
 
     Deliberately NOT in the FastMCP lifespan: the lowlevel server enters the
     lifespan once per MCP session (per request with stateless_http), and
-    start_worker() resets the shared verbosity/style files to config defaults
-    — that must happen once per process, not on every new agent session.
+    start_worker() writes the shared verbosity/style files — that must happen
+    once per process, not on every new agent session.
+
+    DEF-228: seed_only, because under the stdio transport there is one server
+    process per agent session. An unconditional reset to config defaults would
+    wipe the user's runtime verbosity/style every time they open a new session.
+    Only the listener daemon owns those files outright.
     """
     from heyvox.audio.tts import start_worker
     from heyvox.config import load_config
     try:
-        start_worker(load_config())
+        start_worker(load_config(), seed_only=True)
     except Exception as exc:
         # Degraded start beats a launchd crash loop: tools still respond,
         # voice_speak fails gracefully at call time.

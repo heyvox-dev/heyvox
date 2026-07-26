@@ -228,10 +228,20 @@ def run_setup(config) -> None:
     # ---------------------------------------------------------------------------
     console.print("[bold]Step 2b: Wake Word Model[/bold]")
     try:
-        from heyvox.audio.wakeword import _ensure_oww_models
+        from heyvox.audio.wakeword import _ensure_oww_models, trigger_phrase
         _wake = getattr(config.wake_words, "start", "hey_jarvis_v0.1")
         _ensure_oww_models([_wake])
         console.print(f"  [green]✓[/green] Wake word model ready ({_wake})")
+        # DEF-226: the model name is not the phrase. Say it out loud, or the
+        # user tries "Hey Vox" forever and concludes detection is broken.
+        _phrase = trigger_phrase(_wake)
+        if _phrase:
+            console.print(f'  [bold]Your wake word is "{_phrase}"[/bold] — say that to start recording.')
+            if _phrase.lower() != "hey vox":
+                console.print(
+                    '  [dim]Not "Hey Vox" — HeyVox ships openwakeword\'s stock model '
+                    "until the custom one clears its quality gate.[/dim]"
+                )
     except Exception as e:
         console.print(f"  [yellow]![/yellow] Could not provision wake word model: {e}")
         console.print("  [dim]heyvox will retry on first start.[/dim]")
@@ -396,19 +406,60 @@ def run_setup(config) -> None:
     console.print()
 
     herald_hooks_installed = False
+    heyvox_plugin_installed = False
     install_hooks = console.input(
         "  Install Herald hooks for Claude Code? [Y/n] "
     ).strip().lower()
 
     if install_hooks != "n":
+        # DEF-227: prefer the Claude Code plugin. It carries the hooks AND the
+        # MCP server as one artifact whose schema Claude Code owns, so we stop
+        # hand-writing a third party's config format — which went wrong twice
+        # (DEF-223). The settings.json path stays as the fallback for machines
+        # without the `claude` CLI.
         try:
-            from heyvox.setup.hooks import install_herald_hooks
-            results = install_herald_hooks()
-            for ok, msg in results:
-                console.print(f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {msg}")
-            herald_hooks_installed = any(ok for ok, _ in results)
-        except Exception as e:
-            console.print(f"  [red]✗[/red] Failed to install hooks: {e}")
+            from heyvox.setup import plugin as plugin_mod
+            use_plugin = plugin_mod.claude_cli() is not None
+        except Exception:
+            use_plugin = False
+
+        if use_plugin:
+            try:
+                results = plugin_mod.install()
+                for ok, msg in results:
+                    console.print(f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {msg}")
+                heyvox_plugin_installed = all(ok for ok, _ in results)
+            except Exception as e:
+                console.print(f"  [red]✗[/red] Failed to install plugin: {e}")
+
+            if heyvox_plugin_installed:
+                herald_hooks_installed = True
+                # Migration: the plugin now owns these events. Leaving the old
+                # settings.json entries in place would register Herald twice.
+                try:
+                    from heyvox.setup.hooks import uninstall_herald_hooks
+                    for ok, msg in uninstall_herald_hooks():
+                        if ok and "Removed" in msg:
+                            console.print(f"  [green]✓[/green] Migrated: {msg.lower()}")
+                except Exception as e:
+                    console.print(
+                        f"  [yellow]![/yellow] Could not clean up old settings.json hooks: {e}"
+                    )
+                console.print("  [dim]Restart Claude Code to activate the plugin.[/dim]")
+            else:
+                console.print(
+                    "  [yellow]![/yellow] Plugin install incomplete — falling back to settings.json hooks."
+                )
+
+        if not heyvox_plugin_installed:
+            try:
+                from heyvox.setup.hooks import install_herald_hooks
+                results = install_herald_hooks()
+                for ok, msg in results:
+                    console.print(f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {msg}")
+                herald_hooks_installed = any(ok for ok, _ in results)
+            except Exception as e:
+                console.print(f"  [red]✗[/red] Failed to install hooks: {e}")
     else:
         console.print("  [dim]Skipped — run `heyvox setup` again to install later.[/dim]")
 
@@ -495,7 +546,21 @@ def run_setup(config) -> None:
     agents_available = _detect_mcp_agents()
     agents_registered = []
 
-    if not agents_available:
+    # DEF-227: the plugin already carries the MCP server for Claude Code.
+    # Registering it again here would give the user two servers named "heyvox"
+    # — and this is the hand-written path that was writing to the wrong file
+    # in the first place.
+    if heyvox_plugin_installed:
+        skipped = [a["name"] for a in agents_available if a["name"] == "Claude Code"]
+        agents_available = [a for a in agents_available if a["name"] != "Claude Code"]
+        if skipped:
+            console.print("  [green]✓[/green] Claude Code: provided by the HeyVox plugin")
+            agents_registered.append("Claude Code")
+
+    if not agents_available and agents_registered:
+        # Claude Code was the only agent and the plugin already covers it.
+        pass
+    elif not agents_available:
         console.print("  [yellow]![/yellow] No supported AI coding agents detected.")
         console.print("  [dim]Supported: Claude Code, Cursor, Windsurf, Continue.dev[/dim]")
         console.print("  [dim]Install one and run `heyvox setup` again, or add manually.[/dim]")

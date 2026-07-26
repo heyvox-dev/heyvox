@@ -34,6 +34,14 @@ dependencies = [
     "sherpa-onnx>=1.0",
     "pyobjc-framework-Cocoa>=10.0",
     "pyobjc-framework-Quartz>=10.0",
+    # DEF-225: ApplicationServices is a SEPARATE PyObjC distribution — Cocoa and
+    # Quartz do not pull it in. Without it every `import ApplicationServices` in
+    # input/target.py, input/injection.py and setup/permissions.py raised
+    # ImportError on a real install, silently disabling AX target capture and the
+    # DEF-192 AX paste fast path, and making the Accessibility check report a
+    # false green. Paste still worked via the osascript fallback, which is why
+    # this went unnoticed for four releases.
+    "pyobjc-framework-ApplicationServices>=10.0",
     "mcp>=1.0",
     "psutil>=5.9",
     "rich>=13.0",

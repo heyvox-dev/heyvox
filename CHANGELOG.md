@@ -6,12 +6,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+First-run repairs found by a pre-release readiness audit. If you installed an
+earlier version, re-run `heyvox setup` — voice output did not work on a fresh
+install before this release.
+
 ### Fixed
 
+- **Voice output was dead on every fresh install.** `heyvox setup` wrote Herald
+  hooks in a shape Claude Code does not execute (flat entries without the
+  required `type`, and a `Stop_session` event that does not exist — the real
+  name is `SessionEnd`). Existing broken entries are migrated automatically
+  (DEF-223).
+- **Nothing told the agent to emit `<tts>` blocks**, so even correctly wired
+  hooks stayed silent. The MCP server now ships usage instructions that reach
+  the agent at connection time (DEF-224).
+- `pyobjc-framework-ApplicationServices` was never declared as a dependency.
+  Accessibility-based target capture and the fast paste path silently never
+  ran, and `heyvox doctor` reported a green Accessibility check regardless of
+  the real permission state (DEF-225).
+- The wake word is **"Hey Jarvis"**, not "Hey Vox" — the default is
+  openwakeword's stock model. Setup, `heyvox doctor` and the README now say so
+  instead of printing only the model filename (DEF-226).
+- `~/.claude/settings.json` is written atomically, so an interrupted setup can
+  no longer truncate unrelated Claude Code settings (DEF-226).
+- Opening a new agent session no longer resets your TTS verbosity and style
+  back to the config defaults. The MCP server runs one process per session
+  under the stdio transport, and each one was overwriting the shared settings;
+  `heyvox speak` did the same. Both now only seed values that are genuinely
+  unset (DEF-228).
 - Escape now clears the held-message queue too and tells in-flight TTS
   generation to stop feeding it more sentence-parts — previously a long
   spoken response needed one Escape press per remaining part instead of
   one (DEF-229).
+
+### Changed
+
+- **Claude Code integration now ships as a plugin.** `heyvox setup` generates
+  and registers a HeyVox plugin carrying both the Herald hooks and the MCP
+  voice server, instead of hand-editing `~/.claude/settings.json`. The schema
+  belongs to Claude Code, uninstall is `claude plugin uninstall heyvox@heyvox`,
+  and the added context cost is zero. Machines without the `claude` CLI keep
+  the previous behaviour. Existing settings.json hooks are removed on migration
+  (DEF-227).
+- MCP registration for Cursor, Windsurf and Continue.dev is now labelled
+  experimental — those config paths remain unverified.
 
 ## [1.1.3] - 2026-07-24
 
