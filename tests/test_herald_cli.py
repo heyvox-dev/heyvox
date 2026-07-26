@@ -11,6 +11,7 @@ Covers:
 import os
 import signal
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -147,6 +148,74 @@ class TestCmdStopClearsTtsState(unittest.TestCase):
                 result = cli_mod._cmd_stop()
 
             assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests for DEF-229: _cmd_stop also clears the hold queue + records stop time
+# ---------------------------------------------------------------------------
+
+class TestCmdStopClearsHoldQueue(unittest.TestCase):
+    """_cmd_stop clears HERALD_HOLD_DIR too (DEF-229).
+
+    Before the fix, a multi-part message auto-draining from the hold queue
+    (held because the user was active in a different workspace) kept playing
+    one more part per Escape press, since only the main queue was cleared.
+    """
+
+    def test_cmd_stop_clears_hold_dir(self):
+        """_cmd_stop removes all files from the hold directory."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file, queue_dir, tts_flag = _make_tmp_env(tmp)
+            hold_dir = os.path.join(tmp, "herald-hold")
+            os.makedirs(hold_dir, exist_ok=True)
+            for name in ["1700000000000-01.wav", "1700000000000-02.wav", "1700000000000-02.workspace"]:
+                Path(os.path.join(hold_dir, name)).touch()
+
+            p1, p2, p3 = _patch_constants(pid_file, queue_dir, tts_flag)
+            with p1, p2, p3, patch("heyvox.constants.HERALD_HOLD_DIR", hold_dir), \
+                 patch("heyvox.herald.cli.os.kill"):
+                result = cli_mod._cmd_stop()
+
+            assert result == 0
+            remaining = os.listdir(hold_dir)
+            assert remaining == [], f"Hold queue not cleared: {remaining}"
+
+    def test_cmd_interrupt_does_not_clear_hold_dir(self):
+        """_cmd_interrupt (D-06, selective) must NOT touch the hold queue."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file, queue_dir, tts_flag = _make_tmp_env(tmp)
+            hold_dir = os.path.join(tmp, "herald-hold")
+            os.makedirs(hold_dir, exist_ok=True)
+            Path(os.path.join(hold_dir, "1700000000000-01.wav")).touch()
+
+            p1, p2, p3 = _patch_constants(pid_file, queue_dir, tts_flag)
+            with p1, p2, p3, patch("heyvox.constants.HERALD_HOLD_DIR", hold_dir), \
+                 patch("heyvox.herald.cli.os.kill"):
+                result = cli_mod._cmd_interrupt()
+
+            assert result == 0
+            assert os.listdir(hold_dir) == ["1700000000000-01.wav"]
+
+
+class TestCmdStopMarksStopRequested(unittest.TestCase):
+    """_cmd_stop records a stop timestamp for worker.py to observe (DEF-229)."""
+
+    def test_cmd_stop_writes_stop_timestamp(self):
+        """_cmd_stop writes a parseable float timestamp to HERALD_STOP_TS_FILE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file, queue_dir, tts_flag = _make_tmp_env(tmp)
+            stop_ts_file = os.path.join(tmp, "herald-stop.ts")
+
+            p1, p2, p3 = _patch_constants(pid_file, queue_dir, tts_flag)
+            with p1, p2, p3, patch("heyvox.constants.HERALD_STOP_TS_FILE", stop_ts_file), \
+                 patch("heyvox.herald.cli.os.kill"):
+                before = time.time()
+                result = cli_mod._cmd_stop()
+                after = time.time()
+
+            assert result == 0
+            written = float(Path(stop_ts_file).read_text())
+            assert before <= written <= after
 
 
 # ---------------------------------------------------------------------------

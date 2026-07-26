@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Escape now clears the held-message queue too and tells in-flight TTS
+  generation to stop feeding it more sentence-parts — previously a long
+  spoken response needed one Escape press per remaining part instead of
+  one (DEF-229).
+
 ## [1.1.3] - 2026-07-24
 
 STT reliability fixes, a wake-word stop-word retry fix, and the last Conductor-specific

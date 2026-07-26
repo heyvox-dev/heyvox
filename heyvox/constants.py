@@ -202,6 +202,11 @@ HERALD_PLAYING_PID = f"{_TMP}/herald-playing.pid"
 # Herald state flag files
 HERALD_PAUSE_FLAG = f"{_TMP}/herald-pause"
 HERALD_MUTE_FLAG = f"{_TMP}/herald-mute"
+# DEF-229: timestamp of the last Escape/D-07 stop. Workers compare their own
+# generation start time against this to stop enqueueing parts of a message
+# the user already silenced, instead of racing the stop command's one-shot
+# queue clear.
+HERALD_STOP_TS_FILE = f"{_TMP}/herald-stop.ts"
 HERALD_MODE_FILE = f"{_TMP}/herald-mode"
 HERALD_LAST_PLAY = f"{_TMP}/herald-last-play"
 HERALD_PLAY_NEXT = f"{_TMP}/herald-play-next"
@@ -339,7 +344,7 @@ def cleanup_ipc_files(herald_too: bool = True):
                  HERALD_PLAY_NEXT, KOKORO_DAEMON_SOCK,
                  KOKORO_DAEMON_PID, HERALD_AMBIENT_FLAG,
                  HERALD_WORKSPACE_FILE, HERALD_ORIGINAL_VOL_FILE,
-                 HERALD_WATCHER_PID):
+                 HERALD_WATCHER_PID, HERALD_STOP_TS_FILE):
         try:
             os.unlink(path)
         except FileNotFoundError:

@@ -6,6 +6,8 @@ Replaces the bash herald CLI with direct Python calls.
 import os
 import sys
 import logging
+import time
+from pathlib import Path
 
 # DEF-120: pin logger name so `python -m heyvox.herald.cli` doesn't end up
 # with a "__main__" logger disconnected from the heyvox.herald handler chain.
@@ -90,26 +92,55 @@ def _cmd_resume() -> int:
     return 0
 
 
-def _cmd_skip() -> int:
-    """Clear queue directory."""
+def _clear_dir(path: str) -> None:
+    """Delete every file directly inside a directory (best-effort)."""
     import glob
-    from heyvox.constants import HERALD_QUEUE_DIR
-    for f in glob.glob(os.path.join(HERALD_QUEUE_DIR, "*")):
+    for f in glob.glob(os.path.join(path, "*")):
         try:
             os.unlink(f)
         except OSError:
             pass
+
+
+def _cmd_skip() -> int:
+    """Clear queue directory."""
+    from heyvox.constants import HERALD_QUEUE_DIR
+    _clear_dir(HERALD_QUEUE_DIR)
     return 0
 
 
+def _mark_stop_requested() -> None:
+    """DEF-229: record when the last full stop happened.
+
+    worker.py's early-enqueue watcher compares its own generation start time
+    against this file so it stops adding parts of a message the user already
+    silenced, instead of racing this command's one-shot directory clears
+    below with parts that are still mid-generation in another process.
+    """
+    from heyvox.constants import HERALD_STOP_TS_FILE
+    try:
+        Path(HERALD_STOP_TS_FILE).write_text(str(time.time()))
+    except OSError:
+        pass
+
+
 def _cmd_stop() -> int:
-    """Kill current afplay and clear entire queue (D-07: Escape behavior).
+    """Kill current afplay and clear entire queue + hold (D-07: Escape behavior).
 
     Clears TTS state immediately so echo suppression doesn't stay muted.
+
+    DEF-229: previously only cleared HERALD_QUEUE_DIR. The hold directory
+    (parts held because the user was active in a different workspace, see
+    HERALD_HOLD_DIR) was never touched, so a multi-part held message kept
+    auto-draining one part per Escape press instead of stopping outright.
     """
+    from heyvox.constants import HERALD_HOLD_DIR
     _kill_afplay()
     _clear_tts_state()
-    return _cmd_skip()  # Clear all queue files
+    _cmd_skip()
+    _clear_dir(HERALD_HOLD_DIR)
+    _mark_stop_requested()
+    return 0
 
 
 def _cmd_interrupt() -> int:
