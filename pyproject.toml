@@ -85,7 +85,7 @@ dev = [
     # activate new default rules and turn CI red on a version-bump-only
     # commit, mid-release. Bump deliberately, running the new version
     # locally first.
-    "ruff==0.15.2",
+    "ruff==0.16.0",
 ]
 
 [project.scripts]
