@@ -125,18 +125,54 @@ def _herald(cmd: str, *args: str, input_text: str | None = None) -> subprocess.C
 # Public API (delegates to Herald)
 # ---------------------------------------------------------------------------
 
-def start_worker(config=None) -> None:
-    """Initialize TTS settings from config. No worker thread needed — Herald runs independently."""
+def start_worker(config=None, seed_only: bool = False) -> None:
+    """Initialize TTS settings from config. No worker thread needed — Herald runs independently.
+
+    Args:
+        config: loaded HeyvoxConfig, or None to leave settings untouched.
+        seed_only: only apply config defaults where no runtime state exists yet.
+
+    DEF-228: verbosity and style live in shared files so Herald's bash scripts
+    can read them, which makes them process-global. The listener daemon owns
+    them and resets on service start — that is intentional. A per-session
+    process must NOT: the stdio MCP transport starts one server per agent
+    session, so an unconditional reset means every new session silently
+    clobbers whatever the user set at runtime via `heyvox quiet`, the HUD menu
+    or voice_config. seed_only writes only what is genuinely unset.
+    """
     global _verbosity, _muted, _style
 
     if config is not None:
         # Use set_verbosity to persist to file — ensures Herald's bash scripts
         # see the same value (otherwise Herald defaults to "full")
-        set_verbosity(config.tts.verbosity)
-        set_tts_style(config.tts.style)
+        if not (seed_only and _has_runtime_verbosity()):
+            set_verbosity(config.tts.verbosity)
+        if not (seed_only and _has_runtime_style()):
+            set_tts_style(config.tts.style)
 
         # Pass engine selection to Herald via env var (read by worker.py)
         os.environ["HEYVOX_TTS_ENGINE"] = config.tts.engine
+
+
+def _has_runtime_verbosity() -> bool:
+    """True if a non-default verbosity is already persisted.
+
+    Absence of the file means "full" (set_verbosity removes it for that value),
+    so an absent file is indistinguishable from never-set — and seeding it is a
+    no-op either way. Only an existing file carries state worth preserving.
+    """
+    from heyvox.constants import VERBOSITY_FILE
+    return os.path.exists(VERBOSITY_FILE)
+
+
+def _has_runtime_style() -> bool:
+    """True if a style is already persisted by a previous process or the user.
+
+    Reads the module-level _STYLE_FILE alias rather than re-importing the
+    constant, so this checks exactly the path set_tts_style writes — the two
+    must never be able to drift apart.
+    """
+    return os.path.exists(_STYLE_FILE)
 
 
 def shutdown() -> None:

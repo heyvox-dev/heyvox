@@ -143,13 +143,18 @@ def _init_tts() -> None:
 
     Deliberately NOT in the FastMCP lifespan: the lowlevel server enters the
     lifespan once per MCP session (per request with stateless_http), and
-    start_worker() resets the shared verbosity/style files to config defaults
-    — that must happen once per process, not on every new agent session.
+    start_worker() writes the shared verbosity/style files — that must happen
+    once per process, not on every new agent session.
+
+    DEF-228: seed_only, because under the stdio transport there is one server
+    process per agent session. An unconditional reset to config defaults would
+    wipe the user's runtime verbosity/style every time they open a new session.
+    Only the listener daemon owns those files outright.
     """
     from heyvox.audio.tts import start_worker
     from heyvox.config import load_config
     try:
-        start_worker(load_config())
+        start_worker(load_config(), seed_only=True)
     except Exception as exc:
         # Degraded start beats a launchd crash loop: tools still respond,
         # voice_speak fails gracefully at call time.

@@ -155,7 +155,9 @@ def _cmd_speak(args):
     from heyvox.constants import HERALD_QUEUE_DIR, HERALD_PLAYING_PID
 
     config = load_config()
-    start_worker(config)
+    # DEF-228: `heyvox speak` is a one-shot process; it must not reset the
+    # verbosity/style the user set at runtime just by speaking one line.
+    start_worker(config, seed_only=True)
 
     text = " ".join(args.text)
     speak(

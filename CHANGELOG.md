@@ -29,6 +29,11 @@ install before this release.
   instead of printing only the model filename (DEF-226).
 - `~/.claude/settings.json` is written atomically, so an interrupted setup can
   no longer truncate unrelated Claude Code settings (DEF-226).
+- Opening a new agent session no longer resets your TTS verbosity and style
+  back to the config defaults. The MCP server runs one process per session
+  under the stdio transport, and each one was overwriting the shared settings;
+  `heyvox speak` did the same. Both now only seed values that are genuinely
+  unset (DEF-228).
 
 ### Changed
 
