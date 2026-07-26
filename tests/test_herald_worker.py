@@ -475,3 +475,105 @@ class TestWorkspaceLabelPrepend:
         ):
             # Pipeline must not raise — fall back to speech unchanged.
             assert w._maybe_prepend_workspace_label("still works") == "still works"
+
+
+# ---------------------------------------------------------------------------
+# DEF-229: stop-signal cancels in-flight per-sentence generation
+# ---------------------------------------------------------------------------
+
+
+class TestStopRequestedAfter:
+    """_stop_requested_after compares a stop timestamp against generation start."""
+
+    def test_no_stop_file_means_not_cancelled(self, worker, tmp_path):
+        stop_ts_file = str(tmp_path / "herald-stop.ts")  # never created
+        with patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            assert worker._stop_requested_after(1000.0) is False
+
+    def test_stop_after_generation_start_cancels(self, worker, tmp_path):
+        stop_ts_file = str(tmp_path / "herald-stop.ts")
+        Path(stop_ts_file).write_text("2000.0")
+        with patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            assert worker._stop_requested_after(1000.0) is True
+
+    def test_stale_stop_before_generation_start_does_not_cancel(self, worker, tmp_path):
+        """A stop from an earlier, unrelated message must not cancel a later one."""
+        stop_ts_file = str(tmp_path / "herald-stop.ts")
+        Path(stop_ts_file).write_text("1000.0")
+        with patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            assert worker._stop_requested_after(2000.0) is False
+
+    def test_corrupt_stop_file_does_not_cancel(self, worker, tmp_path):
+        stop_ts_file = str(tmp_path / "herald-stop.ts")
+        Path(stop_ts_file).write_text("not-a-float")
+        with patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            assert worker._stop_requested_after(1000.0) is False
+
+
+class TestEnqueueRemainingPartsRespectsStop:
+    """_enqueue_remaining_parts discards parts instead of enqueueing them
+    once a stop was requested after this generation began (DEF-229)."""
+
+    def test_cancelled_generation_discards_parts(self, worker, tmp_path):
+        queue_dir = str(tmp_path / "queue")
+        os.makedirs(queue_dir, exist_ok=True)
+        stop_ts_file = str(tmp_path / "herald-stop.ts")
+
+        timestamp = "1000000"  # 1000.0s epoch
+        temp_wav = str(tmp_path / "herald-generating-1.wav")
+        Path(temp_wav).touch()
+        base = temp_wav.replace(".wav", "")
+        part2 = f"{base}.part2.wav"
+        Path(part2).touch()
+
+        Path(stop_ts_file).write_text("5000.0")  # stop happened well after generation started
+
+        with patch("heyvox.herald.worker.HERALD_QUEUE_DIR", queue_dir), \
+             patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            worker._enqueue_remaining_parts(temp_wav, timestamp, parts=2, engine_name="Kokoro")
+
+        assert os.listdir(queue_dir) == [], "cancelled generation must not enqueue parts"
+        assert not os.path.exists(part2), "discarded temp part should be removed, not left behind"
+        assert not os.path.exists(temp_wav)
+
+    def test_not_cancelled_generation_enqueues_normally(self, worker, tmp_path):
+        queue_dir = str(tmp_path / "queue")
+        os.makedirs(queue_dir, exist_ok=True)
+        stop_ts_file = str(tmp_path / "herald-stop.ts")  # never created -> never cancelled
+
+        timestamp = "1000000"
+        temp_wav = str(tmp_path / "herald-generating-1.wav")
+        Path(temp_wav).touch()
+        base = temp_wav.replace(".wav", "")
+        part2 = f"{base}.part2.wav"
+        Path(part2).touch()
+
+        with patch("heyvox.herald.worker.HERALD_QUEUE_DIR", queue_dir), \
+             patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            worker._enqueue_remaining_parts(temp_wav, timestamp, parts=2, engine_name="Kokoro")
+
+        enqueued = sorted(os.listdir(queue_dir))
+        assert enqueued == [f"{timestamp}-01.wav", f"{timestamp}-02.wav"]
+
+
+class TestEarlyEnqueueWatcherRespectsStop:
+    """_early_enqueue_watcher exits immediately without enqueueing anything
+    once a stop was requested after this generation began (DEF-229)."""
+
+    def test_cancelled_before_start_returns_without_enqueueing(self, worker, tmp_path):
+        import threading
+
+        queue_dir = str(tmp_path / "queue")
+        stop_ts_file = str(tmp_path / "herald-stop.ts")
+        Path(stop_ts_file).write_text("999999999.0")  # far in the future
+
+        timestamp = "1000000"  # 1000.0s epoch — long before the stop above
+        temp_wav = str(tmp_path / "herald-generating-1.wav")
+        # Non-empty so it WOULD be enqueued as part 1 if not cancelled.
+        Path(temp_wav).write_bytes(b"RIFF....")
+
+        with patch("heyvox.herald.worker.HERALD_QUEUE_DIR", queue_dir), \
+             patch("heyvox.herald.worker.HERALD_STOP_TS_FILE", stop_ts_file):
+            worker._early_enqueue_watcher(temp_wav, timestamp, threading.Event())
+
+        assert os.listdir(queue_dir) == [], "cancelled watcher must not enqueue part 1"

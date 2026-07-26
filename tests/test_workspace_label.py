@@ -1,7 +1,8 @@
 """Tests for heyvox/herald/workspace_label.py — DEF-111.
 
 Covers the resolution order in get_workspace_label:
-    env override > config override > pr_title from DB > raw name
+    env override > config override > sidebar label from DB
+    (workspace_name-if-user-set else pr_title) > raw name
 plus the announce_workspace master switch and middle-dot normalisation.
 """
 
@@ -62,19 +63,19 @@ class TestResolutionOrder:
         # If the DB-path resolver is ever called, raise — config must short-circuit.
         monkeypatch.setattr(
             workspace_label,
-            "_pr_title_from_db",
+            "_sidebar_label_from_db",
             lambda *a, **k: pytest.fail("DB lookup should be skipped"),
         )
         assert get_workspace_label("seattle", cfg=cfg) == "ShortName"
 
-    def test_db_pr_title_used_when_no_override(self, monkeypatch):
+    def test_db_sidebar_label_used_when_no_override(self, monkeypatch):
         cfg = _cfg()
         monkeypatch.setattr(
             workspace_label, "_get_workspace_db_path", lambda c: "/fake/db"
         )
         monkeypatch.setattr(
             workspace_label,
-            "_pr_title_from_db",
+            "_sidebar_label_from_db",
             lambda name, db: "Voice Resume Wip",
         )
         assert get_workspace_label("seattle", cfg=cfg) == "Voice Resume Wip"
@@ -94,7 +95,7 @@ class TestNormalisation:
         )
         monkeypatch.setattr(
             workspace_label,
-            "_pr_title_from_db",
+            "_sidebar_label_from_db",
             lambda name, db: "Personal · Source · Spell",
         )
         # Conductor's U+00B7 separator becomes ", " so Kokoro doesn't say "middle dot".
@@ -114,50 +115,115 @@ class TestNormalisation:
 
 
 class TestDBResolution:
-    def test_pr_title_query_uses_directory_name(self, monkeypatch):
+    """DEF-111 follow-up: workspace_name (user-set) beats pr_title, which
+    drifts to a Conventional-Commit string on every PR merge — see
+    claude-conductor-setup's CLAUDE.md "Workspace Naming" section."""
+
+    SEP = workspace_label._DB_FIELD_SEP
+
+    def _stub_row(self, ws_name: str, user_set: str, pr_title: str) -> str:
+        return f"{ws_name}{self.SEP}{user_set}{self.SEP}{pr_title}\n"
+
+    def test_query_uses_directory_name(self, monkeypatch):
         captured = {}
 
         def fake_run(cmd, **kw):
             captured["cmd"] = cmd
             return subprocess.CompletedProcess(
-                args=cmd, returncode=0, stdout="My Title\n", stderr=""
+                args=cmd,
+                returncode=0,
+                stdout=self._stub_row("My Title", "1", ""),
+                stderr="",
             )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        out = workspace_label._pr_title_from_db("my-ws", "/some/db")
+        out = workspace_label._sidebar_label_from_db("my-ws", "/some/db")
         assert out == "My Title"
         assert "/some/db" in captured["cmd"]
         # Query must filter by directory_name so callers don't need to URL-encode.
         assert "directory_name='my-ws'" in captured["cmd"][-1]
 
-    def test_pr_title_escapes_single_quotes(self, monkeypatch):
+    def test_workspace_name_wins_when_user_set(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=self._stub_row(
+                    "Claude Setup", "1", "feat(hooks): add x"
+                ),
+                stderr="",
+            ),
+        )
+        # Regression: pr_title had drifted to a commit message, but the
+        # drift-proof workspace_name field must win.
+        assert workspace_label._sidebar_label_from_db("manama", "/db") == "Claude Setup"
+
+    def test_pr_title_used_when_not_user_set(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=self._stub_row("", "0", "Some PR Title"),
+                stderr="",
+            ),
+        )
+        assert workspace_label._sidebar_label_from_db("ws", "/db") == "Some PR Title"
+
+    def test_pr_title_used_when_user_set_but_name_empty(self, monkeypatch):
+        # Defensive: user_set_workspace_name=1 with an empty workspace_name
+        # shouldn't happen in practice, but must not return "".
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=self._stub_row("", "1", "Fallback Title"),
+                stderr="",
+            ),
+        )
+        assert workspace_label._sidebar_label_from_db("ws", "/db") == "Fallback Title"
+
+    def test_escapes_single_quotes(self, monkeypatch):
         captured = {}
 
         def fake_run(cmd, **kw):
             captured["cmd"] = cmd
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0, stdout="", stderr=""
-            )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        workspace_label._pr_title_from_db("ws'evil", "/db")
+        workspace_label._sidebar_label_from_db("ws'evil", "/db")
         # Single quote must be doubled (SQL escape) — no raw quote in literal.
         assert "ws''evil" in captured["cmd"][-1]
 
-    def test_pr_title_returns_empty_on_sqlite_missing(self, monkeypatch):
+    def test_returns_empty_on_no_matching_row(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            ),
+        )
+        assert workspace_label._sidebar_label_from_db("ws", "/db") == ""
+
+    def test_returns_empty_on_sqlite_missing(self, monkeypatch):
         def fake_run(*a, **kw):
             raise FileNotFoundError("sqlite3 not installed")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         # Should NOT raise — caller falls back to raw workspace_name.
-        assert workspace_label._pr_title_from_db("ws", "/db") == ""
+        assert workspace_label._sidebar_label_from_db("ws", "/db") == ""
 
-    def test_pr_title_returns_empty_on_timeout(self, monkeypatch):
+    def test_returns_empty_on_timeout(self, monkeypatch):
         def fake_run(*a, **kw):
             raise subprocess.TimeoutExpired(cmd="sqlite3", timeout=0.5)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert workspace_label._pr_title_from_db("ws", "/db") == ""
+        assert workspace_label._sidebar_label_from_db("ws", "/db") == ""
 
 
 class TestDetectWorkspaceFromCwd:

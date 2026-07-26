@@ -34,6 +34,10 @@ install before this release.
   under the stdio transport, and each one was overwriting the shared settings;
   `heyvox speak` did the same. Both now only seed values that are genuinely
   unset (DEF-228).
+- Escape now clears the held-message queue too and tells in-flight TTS
+  generation to stop feeding it more sentence-parts — previously a long
+  spoken response needed one Escape press per remaining part instead of
+  one (DEF-229).
 
 ### Changed
 

@@ -42,6 +42,7 @@ from heyvox.constants import (
     QWEN_DAEMON_PID,
     QWEN_DAEMON_SOCK,
     HERALD_GENERATING_WAV_PREFIX,
+    HERALD_STOP_TS_FILE,
 )
 
 # Shared TTS helpers — single source of truth for mood detection + verbosity.
@@ -708,6 +709,21 @@ class HeraldWorker:
         self._enqueue_remaining_parts(temp_wav, timestamp, parts, "Kokoro")
         return True
 
+    def _stop_requested_after(self, started_at: float) -> bool:
+        """DEF-229: True if an Escape/full-stop (D-07) landed after this generation began.
+
+        Lets in-flight per-sentence generation stop feeding parts of a message
+        the user already silenced into the queue, instead of racing the stop
+        command's one-shot directory clear (heyvox.herald.cli._cmd_stop) with
+        parts that finish generating a moment later. Comparing against this
+        generation's own start time means a stale timestamp from an earlier,
+        unrelated stop can never cancel a later message.
+        """
+        try:
+            return float(Path(HERALD_STOP_TS_FILE).read_text()) > started_at
+        except (OSError, ValueError):
+            return False
+
     def _enqueue_remaining_parts(
         self,
         temp_wav: str,
@@ -721,11 +737,19 @@ class HeraldWorker:
         generation runs. DEF-073: if the watcher lost the race (very
         short generations finish before its first 100ms poll), rescue
         part 1 here from temp_wav before the unlink below deletes it.
+
+        DEF-229: if the user stopped TTS while this generation was still
+        running, discard the remaining parts instead of enqueueing them.
         """
         base = temp_wav.replace(".wav", "")
+        cancelled = self._stop_requested_after(int(timestamp) / 1000.0)
+
         for part_num in range(2, parts + 1):
             part_path = f"{base}.part{part_num}.wav"
             if os.path.isfile(part_path):
+                if cancelled:
+                    os.unlink(part_path)
+                    continue
                 wav_name = f"{timestamp}-{part_num:02d}.wav"
                 dest = os.path.join(HERALD_QUEUE_DIR, wav_name)
                 try:
@@ -737,7 +761,7 @@ class HeraldWorker:
 
         part1_name = f"{timestamp}-01.wav"
         part1_dest = os.path.join(HERALD_QUEUE_DIR, part1_name)
-        if not os.path.isfile(part1_dest) and os.path.isfile(temp_wav):
+        if not cancelled and not os.path.isfile(part1_dest) and os.path.isfile(temp_wav):
             try:
                 os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
                 shutil.move(temp_wav, part1_dest)
@@ -745,6 +769,8 @@ class HeraldWorker:
                 log.info("DEF-073: %s rescued part 1 via main-thread fallback -> %s", engine_name, part1_name)
             except OSError as exc:
                 log.warning("Failed to rescue part 1: %s", exc)
+        elif cancelled:
+            log.debug("DEF-229: stop requested mid-generation, discarding %s", timestamp)
 
         parts_file = os.path.join(HERALD_QUEUE_DIR, f"{timestamp}.parts")
         try:
@@ -776,8 +802,16 @@ class HeraldWorker:
         os.makedirs(HERALD_QUEUE_DIR, exist_ok=True)
         base = temp_wav.replace(".wav", "")
         enqueued_parts: set[int] = set()
+        generation_started = int(timestamp) / 1000.0
 
         for _ in range(300):  # Up to 30 seconds (300 × 0.1s)
+            if self._stop_requested_after(generation_started):
+                # DEF-229: user stopped TTS after this message started
+                # generating — stop feeding it into the queue and let
+                # _enqueue_remaining_parts's own check discard the rest.
+                log.debug("Stream-enqueue cancelled by stop request (%s)", timestamp)
+                return
+
             if stop.is_set():
                 # Generation finished — do one final sweep then exit
                 self._sweep_parts(base, timestamp, enqueued_parts)
