@@ -311,3 +311,93 @@ class TestDetectWorkspaceFromCwd:
         workspace_label.detect_workspace_from_cwd("/path/with'quote/dir")
         # Single quote in the path must be doubled in the SQL literal.
         assert "/path/with''quote/dir" in captured["sql"]
+
+
+class TestResolveWorkspaceId:
+    """DEF-237: workspace_id resolution feeding the switch sidecar."""
+
+    def test_empty_directory_name_short_circuits(self, monkeypatch):
+        monkeypatch.setattr(
+            workspace_label, "_get_workspace_db_path",
+            lambda c: pytest.fail("should not be reached for empty directory_name"),
+        )
+        assert workspace_label.resolve_workspace_id("") == ""
+
+    def test_no_db_path_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "")
+        assert workspace_label.resolve_workspace_id("seattle") == ""
+
+    def test_resolves_workspace_id_from_adapter(self, monkeypatch):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "/fake/db")
+
+        class _Identity:
+            workspace_id = "6d9c2881-edfa-4238-acdf-1d26e9b0103d"
+
+        monkeypatch.setattr(
+            "heyvox.adapters.conductor.get_active_workspace_and_session",
+            lambda directory_name, db_path: _Identity(),
+        )
+        assert workspace_label.resolve_workspace_id("seattle") == "6d9c2881-edfa-4238-acdf-1d26e9b0103d"
+
+    def test_adapter_returning_none_yields_empty(self, monkeypatch):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "/fake/db")
+        monkeypatch.setattr(
+            "heyvox.adapters.conductor.get_active_workspace_and_session",
+            lambda directory_name, db_path: None,
+        )
+        assert workspace_label.resolve_workspace_id("seattle") == ""
+
+    def test_adapter_exception_yields_empty(self, monkeypatch):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "/fake/db")
+
+        def _raise(*a, **kw):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr("heyvox.adapters.conductor.get_active_workspace_and_session", _raise)
+        assert workspace_label.resolve_workspace_id("seattle") == ""
+
+
+class TestSwitchSidecar:
+    """DEF-237: JSON .workspace sidecar carrying workspace_id/session_id."""
+
+    def test_write_then_read_round_trip(self, tmp_path):
+        wav = tmp_path / "1700000000000-01.wav"
+        workspace_label.write_switch_sidecar(
+            str(wav), "seattle", "ws-uuid-123", "sess-uuid-456",
+        )
+        sidecar = tmp_path / "1700000000000-01.workspace"
+        assert sidecar.exists()
+        identity = workspace_label.read_switch_sidecar(sidecar.read_text())
+        assert identity == {
+            "workspace": "seattle",
+            "workspace_id": "ws-uuid-123",
+            "session_id": "sess-uuid-456",
+        }
+
+    def test_write_skips_when_workspace_empty(self, tmp_path):
+        wav = tmp_path / "msg-01.wav"
+        workspace_label.write_switch_sidecar(str(wav), "", "ws-uuid-123", "sess-uuid-456")
+        assert not (tmp_path / "msg-01.workspace").exists()
+
+    def test_write_defaults_ids_to_empty(self, tmp_path):
+        wav = tmp_path / "msg-01.wav"
+        workspace_label.write_switch_sidecar(str(wav), "seattle")
+        identity = workspace_label.read_switch_sidecar((tmp_path / "msg-01.workspace").read_text())
+        assert identity == {"workspace": "seattle", "workspace_id": "", "session_id": ""}
+
+    def test_read_legacy_plain_string_sidecar(self):
+        """Sidecars written by a pre-DEF-237 worker/watcher still switch the workspace."""
+        assert workspace_label.read_switch_sidecar("seattle") == {
+            "workspace": "seattle", "workspace_id": "", "session_id": "",
+        }
+
+    def test_read_handles_malformed_json_as_plain_label(self):
+        # Starts with "{" but isn't valid JSON — must not raise or return empty.
+        assert workspace_label.read_switch_sidecar("{not json") == {
+            "workspace": "{not json", "workspace_id": "", "session_id": "",
+        }
+
+    def test_read_strips_whitespace(self):
+        assert workspace_label.read_switch_sidecar("  seattle\n") == {
+            "workspace": "seattle", "workspace_id": "", "session_id": "",
+        }

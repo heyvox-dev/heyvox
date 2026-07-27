@@ -341,6 +341,22 @@ class HeraldWorker:
                 log.warning("workspace cwd-detect raised (%s) — sidecar disabled (cwd=%r)", e, os.getcwd())
                 self._workspace = ""
 
+        # DEF-237: the Conductor session actually speaking right now.
+        # Conductor sets this in every session's env; nothing consumed it
+        # before, so the workspace-switch sidecar had no way to tell the
+        # orchestrator which session tab to select, only which workspace.
+        # workspace_id is resolved once here (not per WAV part written
+        # below) since it's the same DB round-trip every time for one
+        # worker instance.
+        self._session_id = os.environ.get("CONDUCTOR_SESSION_ID", "")
+        self._workspace_id = ""
+        if self._workspace:
+            try:
+                from heyvox.herald.workspace_label import resolve_workspace_id
+                self._workspace_id = resolve_workspace_id(self._workspace)
+            except Exception as e:
+                log.debug("workspace_id resolution failed (%s)", e)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -1275,12 +1291,10 @@ class HeraldWorker:
 
     def _write_workspace_sidecar(self, wav_path: str) -> None:
         """Write .workspace sidecar next to WAV file if workspace is known."""
-        if self._workspace:
-            sidecar = wav_path.replace(".wav", ".workspace")
-            try:
-                Path(sidecar).write_text(self._workspace)
-            except OSError as exc:
-                log.debug("Failed to write workspace sidecar: %s", exc)
+        if not self._workspace:
+            return
+        from heyvox.herald.workspace_label import write_switch_sidecar
+        write_switch_sidecar(wav_path, self._workspace, self._workspace_id, self._session_id)
 
     # ------------------------------------------------------------------
     # Private: state readers
