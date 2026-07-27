@@ -183,11 +183,9 @@ MIC_SWITCH_REQUEST_FILE = f"{_TMP}/heyvox-mic-switch"
 # Herald TTS orchestration constants (Phase 7)
 # ---------------------------------------------------------------------------
 
-# Herald queue/hold/history directories — WAV files pass through these.
-# Queue: ready to play. Hold: from inactive workspace, held until user idle.
-# History: last 50 played (for debugging).
+# Herald queue/history directories — WAV files pass through these.
+# Queue: ready to play. History: last 50 played (for debugging).
 HERALD_QUEUE_DIR = f"{_TMP}/herald-queue"
-HERALD_HOLD_DIR = f"{_TMP}/herald-hold"
 HERALD_HISTORY_DIR = f"{_TMP}/herald-history"
 HERALD_CLAIM_DIR = f"{_TMP}/herald-claim"
 
@@ -209,7 +207,13 @@ HERALD_MUTE_FLAG = f"{_TMP}/herald-mute"
 HERALD_STOP_TS_FILE = f"{_TMP}/herald-stop.ts"
 HERALD_MODE_FILE = f"{_TMP}/herald-mode"
 HERALD_LAST_PLAY = f"{_TMP}/herald-last-play"
-HERALD_PLAY_NEXT = f"{_TMP}/herald-play-next"
+
+# Workspace-switch countdown IPC. Written (with a timestamp) when a
+# non-continuation TTS message starts and a switch is pending; ptt.py polls
+# for its existence to gate the Right-Ctrl cancel key. The cancel flag is
+# one-shot, written by `herald cancel-switch` or by `_cmd_stop()`.
+HERALD_PENDING_SWITCH_FLAG = f"{_TMP}/herald-pending-switch"
+HERALD_CANCEL_SWITCH_FLAG = f"{_TMP}/herald-cancel-switch"
 
 # Kokoro TTS daemon IPC — Unix socket + PID file
 KOKORO_DAEMON_SOCK = f"{_TMP}/kokoro-daemon.sock"
@@ -300,7 +304,7 @@ TELEMETRY_COUNTER_SNAPSHOT = f"{TELEMETRY_DIR}/counter-snapshot.json"
 
 def ensure_run_dirs():
     """Create IPC directories if they don't exist."""
-    for d in (HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_HISTORY_DIR,
+    for d in (HERALD_QUEUE_DIR, HERALD_HISTORY_DIR,
               HERALD_CLAIM_DIR, HERALD_WATCHER_HANDLED_DIR, STT_DEBUG_DIR):
         os.makedirs(d, exist_ok=True)
 
@@ -341,7 +345,8 @@ def cleanup_ipc_files(herald_too: bool = True):
     for path in (HERALD_ORCH_PID, HERALD_PLAYING_PID,
                  HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG,
                  HERALD_MODE_FILE, HERALD_LAST_PLAY,
-                 HERALD_PLAY_NEXT, KOKORO_DAEMON_SOCK,
+                 HERALD_PENDING_SWITCH_FLAG, HERALD_CANCEL_SWITCH_FLAG,
+                 KOKORO_DAEMON_SOCK,
                  KOKORO_DAEMON_PID, HERALD_AMBIENT_FLAG,
                  HERALD_WORKSPACE_FILE, HERALD_ORIGINAL_VOL_FILE,
                  HERALD_WATCHER_PID, HERALD_STOP_TS_FILE):

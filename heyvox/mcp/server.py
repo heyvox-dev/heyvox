@@ -182,7 +182,7 @@ def voice_status() -> str:
     """
     from heyvox.constants import (
         RECORDING_FLAG, TTS_PLAYING_FLAG, HERALD_PLAYING_PID,
-        HERALD_QUEUE_DIR, HERALD_HOLD_DIR,
+        HERALD_QUEUE_DIR,
     )
     from heyvox.audio.tts import is_muted, get_verbosity, get_tts_style, get_tts_style_prompt
     from heyvox.ipc import read_state
@@ -206,11 +206,10 @@ def voice_status() -> str:
 
     import glob
     queue_count = len(glob.glob(HERALD_QUEUE_DIR + "/*.wav"))
-    hold_count = len(glob.glob(HERALD_HOLD_DIR + "/*.wav"))
 
     return (
         f"state={state} muted={is_muted()} verbosity={get_verbosity()} "
-        f"style={get_tts_style()} queue={queue_count} held={hold_count}\n"
+        f"style={get_tts_style()} queue={queue_count}\n"
         f"style_instruction: {get_tts_style_prompt()}"
     )
 

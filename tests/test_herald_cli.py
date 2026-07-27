@@ -2,10 +2,13 @@
 Tests for herald CLI stop and interrupt commands.
 
 Covers:
-- _cmd_stop: kills afplay PID, clears entire queue, clears TTS state
-- _cmd_interrupt: kills afplay PID, does NOT clear queue
-- dispatch routing for stop and interrupt
-- tts.py wiring: stop_all uses "stop", interrupt uses "interrupt", clear_queue uses "skip"
+- _cmd_stop: kills afplay PID, clears entire queue, clears TTS state, cancels
+  any pending workspace-switch countdown
+- _cmd_interrupt: kills afplay PID, does NOT clear queue or cancel a switch
+- _cmd_cancel_switch: writes the switch-cancel flag (Right-Ctrl key's target)
+- dispatch routing for stop, interrupt, and cancel-switch
+- tts.py wiring: stop_all uses "stop", interrupt uses "interrupt", clear_queue
+  uses "skip", cancel_pending_switch uses "cancel-switch"
 """
 
 import os
@@ -151,50 +154,47 @@ class TestCmdStopClearsTtsState(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests for DEF-229: _cmd_stop also clears the hold queue + records stop time
+# _cmd_stop also cancels a pending workspace-switch countdown
 # ---------------------------------------------------------------------------
 
-class TestCmdStopClearsHoldQueue(unittest.TestCase):
-    """_cmd_stop clears HERALD_HOLD_DIR too (DEF-229).
+class TestCmdStopCancelsSwitch(unittest.TestCase):
+    """_cmd_stop also cancels any pending workspace-switch countdown.
 
-    Before the fix, a multi-part message auto-draining from the hold queue
-    (held because the user was active in a different workspace) kept playing
-    one more part per Escape press, since only the main queue was cleared.
+    Stopping TTS but still switching workspaces a couple seconds later with
+    no audio context left would be confusing — orchestrator.py's
+    _run_switch_countdown polls this same flag (see herald/cli.py::_cmd_stop).
     """
 
-    def test_cmd_stop_clears_hold_dir(self):
-        """_cmd_stop removes all files from the hold directory."""
+    def test_cmd_stop_writes_cancel_switch_flag(self):
+        """_cmd_stop writes a parseable timestamp to HERALD_CANCEL_SWITCH_FLAG."""
         with tempfile.TemporaryDirectory() as tmp:
             pid_file, queue_dir, tts_flag = _make_tmp_env(tmp)
-            hold_dir = os.path.join(tmp, "herald-hold")
-            os.makedirs(hold_dir, exist_ok=True)
-            for name in ["1700000000000-01.wav", "1700000000000-02.wav", "1700000000000-02.workspace"]:
-                Path(os.path.join(hold_dir, name)).touch()
+            cancel_flag = os.path.join(tmp, "herald-cancel-switch")
 
             p1, p2, p3 = _patch_constants(pid_file, queue_dir, tts_flag)
-            with p1, p2, p3, patch("heyvox.constants.HERALD_HOLD_DIR", hold_dir), \
+            with p1, p2, p3, patch("heyvox.constants.HERALD_CANCEL_SWITCH_FLAG", cancel_flag), \
                  patch("heyvox.herald.cli.os.kill"):
+                before = time.time()
                 result = cli_mod._cmd_stop()
+                after = time.time()
 
             assert result == 0
-            remaining = os.listdir(hold_dir)
-            assert remaining == [], f"Hold queue not cleared: {remaining}"
+            written = float(Path(cancel_flag).read_text())
+            assert before <= written <= after
 
-    def test_cmd_interrupt_does_not_clear_hold_dir(self):
-        """_cmd_interrupt (D-06, selective) must NOT touch the hold queue."""
+    def test_cmd_interrupt_does_not_write_cancel_switch_flag(self):
+        """_cmd_interrupt (D-06, selective) must NOT cancel a pending switch."""
         with tempfile.TemporaryDirectory() as tmp:
             pid_file, queue_dir, tts_flag = _make_tmp_env(tmp)
-            hold_dir = os.path.join(tmp, "herald-hold")
-            os.makedirs(hold_dir, exist_ok=True)
-            Path(os.path.join(hold_dir, "1700000000000-01.wav")).touch()
+            cancel_flag = os.path.join(tmp, "herald-cancel-switch")
 
             p1, p2, p3 = _patch_constants(pid_file, queue_dir, tts_flag)
-            with p1, p2, p3, patch("heyvox.constants.HERALD_HOLD_DIR", hold_dir), \
+            with p1, p2, p3, patch("heyvox.constants.HERALD_CANCEL_SWITCH_FLAG", cancel_flag), \
                  patch("heyvox.herald.cli.os.kill"):
                 result = cli_mod._cmd_interrupt()
 
             assert result == 0
-            assert os.listdir(hold_dir) == ["1700000000000-01.wav"]
+            assert not os.path.exists(cancel_flag)
 
 
 class TestCmdStopMarksStopRequested(unittest.TestCase):
@@ -216,6 +216,35 @@ class TestCmdStopMarksStopRequested(unittest.TestCase):
             assert result == 0
             written = float(Path(stop_ts_file).read_text())
             assert before <= written <= after
+
+    def test_cmd_stop_writes_stop_timestamp_before_killing_afplay(self):
+        """DEF-235: the timestamp must land before the kill signal.
+
+        orchestrator.py's queue pickup (_generated_before_last_stop) only
+        catches an already-queued next part if HERALD_STOP_TS_FILE is
+        already fresh by the moment the kill unblocks the orchestrator's
+        proc.wait() — so _mark_stop_requested() must run first, not last.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file, queue_dir, tts_flag = _make_tmp_env(tmp)
+            stop_ts_file = os.path.join(tmp, "herald-stop.ts")
+            with open(pid_file, "w") as f:
+                f.write("12345\n")
+
+            stop_ts_existed_at_kill_time = []
+
+            def _fake_kill(pid, sig):
+                stop_ts_existed_at_kill_time.append(os.path.exists(stop_ts_file))
+
+            p1, p2, p3 = _patch_constants(pid_file, queue_dir, tts_flag)
+            with p1, p2, p3, patch("heyvox.constants.HERALD_STOP_TS_FILE", stop_ts_file), \
+                 patch("heyvox.herald.cli.os.kill", side_effect=_fake_kill):
+                result = cli_mod._cmd_stop()
+
+            assert result == 0
+            assert stop_ts_existed_at_kill_time == [True], (
+                "HERALD_STOP_TS_FILE must already exist by the time afplay is killed"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +316,15 @@ class TestDispatchRouting(unittest.TestCase):
 
         assert result == 0, f"interrupt command should return 0, got {result}"
 
+    def test_dispatch_routes_cancel_switch(self):
+        """dispatch(['cancel-switch']) routes to _cmd_cancel_switch (returns 0)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cancel_flag = os.path.join(tmp, "herald-cancel-switch")
+            with patch("heyvox.constants.HERALD_CANCEL_SWITCH_FLAG", cancel_flag):
+                result = cli_mod.dispatch(["cancel-switch"])
+
+        assert result == 0, f"cancel-switch command should return 0, got {result}"
+
     def test_dispatch_unknown_still_returns_1(self):
         """Genuinely unknown commands still return exit code 1."""
         result = cli_mod.dispatch(["nonexistent_command"])
@@ -320,6 +358,13 @@ class TestTtsWiring(unittest.TestCase):
         mock_herald.return_value = MagicMock(returncode=0)
         tts.clear_queue()
         mock_herald.assert_called_once_with("skip")
+
+    @patch("heyvox.audio.tts._herald")
+    def test_tts_cancel_pending_switch_calls_herald_cancel_switch(self, mock_herald):
+        """cancel_pending_switch() must call herald cancel-switch."""
+        mock_herald.return_value = MagicMock(returncode=0)
+        tts.cancel_pending_switch()
+        mock_herald.assert_called_once_with("cancel-switch")
 
 
 if __name__ == "__main__":

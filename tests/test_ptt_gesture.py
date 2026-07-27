@@ -13,7 +13,7 @@ timing logic is deterministic and no real threads or Quartz are involved.
 
 import pytest
 
-from heyvox.input.ptt import GestureRecognizer
+from heyvox.input.ptt import GestureRecognizer, _cancel_key_edge, _PTT_KEY_FLAGS
 
 
 # ---------------------------------------------------------------------------
@@ -299,3 +299,46 @@ def test_duplicate_down_while_holding_is_ignored():
     rec.on_key_down()         # start_ptt
     rec.on_key_down()         # spurious duplicate edge — must not re-fire
     assert events == ["start_ptt"]
+
+
+# ---------------------------------------------------------------------------
+# Workspace-switch cancel key — _cancel_key_edge (pure, Quartz-free)
+# ---------------------------------------------------------------------------
+
+_RCTRL = _PTT_KEY_FLAGS["right_ctrl"]
+_FN = _PTT_KEY_FLAGS["fn"]
+
+
+def test_cancel_key_edge_rises_on_key_down():
+    edge, now_down = _cancel_key_edge(_RCTRL, _RCTRL, was_down=False)
+    assert edge is True
+    assert now_down is True
+
+
+def test_cancel_key_edge_no_rise_while_already_held():
+    edge, now_down = _cancel_key_edge(_RCTRL, _RCTRL, was_down=True)
+    assert edge is False
+    assert now_down is True
+
+
+def test_cancel_key_edge_release_is_not_a_rising_edge():
+    edge, now_down = _cancel_key_edge(0, _RCTRL, was_down=True)
+    assert edge is False
+    assert now_down is False
+
+
+def test_cancel_key_edge_ignores_other_bits():
+    """A chord where an unrelated modifier flips must not look like our key."""
+    edge, now_down = _cancel_key_edge(_FN, _RCTRL, was_down=False)
+    assert edge is False
+    assert now_down is False
+
+
+def test_cancel_key_edge_distinguishes_from_fn():
+    """fn and right_ctrl are disjoint bits — holding fn never rises the
+    cancel-key edge even if the cancel key happens to be configured as fn
+    (a misconfiguration ptt.py guards against elsewhere, but the pure edge
+    function itself must still only look at its own bit)."""
+    edge, now_down = _cancel_key_edge(_FN | _RCTRL, _RCTRL, was_down=False)
+    assert edge is True
+    assert now_down is True

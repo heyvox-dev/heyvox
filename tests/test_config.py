@@ -49,6 +49,11 @@ class TestHeyvoxConfigDefaults:
         assert cfg.push_to_talk.tap_max_secs == 0.2
         assert cfg.push_to_talk.double_tap_secs == 0.35
 
+    def test_default_workspace_switch(self):
+        cfg = HeyvoxConfig()
+        assert cfg.workspace_switch.countdown_secs == 2.5
+        assert cfg.workspace_switch.cancel_key == "right_ctrl"
+
     def test_default_audio(self):
         cfg = HeyvoxConfig()
         assert cfg.audio.sample_rate == 16000
@@ -165,6 +170,50 @@ class TestHeyvoxConfigValidation:
         assert not hasattr(cfg, "unknown_field")
 
 
+class TestWorkspaceSwitchConfig:
+    """Replaces HoldQueueConfig — visible countdown+cancel, not a silent hold."""
+
+    def test_defaults(self):
+        from heyvox.config import WorkspaceSwitchConfig
+        cfg = WorkspaceSwitchConfig()
+        assert cfg.countdown_secs == 2.5
+        assert cfg.cancel_key == "right_ctrl"
+
+    def test_custom_values(self):
+        from heyvox.config import WorkspaceSwitchConfig
+        cfg = WorkspaceSwitchConfig(countdown_secs=3.0, cancel_key="right_shift")
+        assert cfg.countdown_secs == 3.0
+        assert cfg.cancel_key == "right_shift"
+
+    def test_warns_when_cancel_key_matches_ptt_key(self, capsys):
+        """Same key for PTT and switch-cancel is a footgun — warn, don't fail."""
+        cfg = HeyvoxConfig(
+            push_to_talk={"enabled": True, "key": "right_ctrl"},
+            workspace_switch={"cancel_key": "right_ctrl"},
+        )
+        assert cfg.workspace_switch.cancel_key == "right_ctrl"  # not fatal
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "right_ctrl" in captured.err
+
+    def test_no_warning_when_keys_differ(self, capsys):
+        HeyvoxConfig(
+            push_to_talk={"enabled": True, "key": "fn"},
+            workspace_switch={"cancel_key": "right_ctrl"},
+        )
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+
+    def test_no_warning_when_ptt_disabled(self, capsys):
+        """No collision risk if push-to-talk itself is off."""
+        HeyvoxConfig(
+            push_to_talk={"enabled": False, "key": "right_ctrl"},
+            workspace_switch={"cancel_key": "right_ctrl"},
+        )
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+
+
 class TestLoadConfig:
     """Test load_config() with real YAML files."""
 
@@ -230,6 +279,27 @@ class TestLoadConfig:
         f.write_text("future_feature: true\nthreshold: 0.7\n")
         cfg = load_config(f)
         assert cfg.threshold == 0.7
+
+    def test_hold_queue_key_warns_deprecated(self, tmp_path, capsys):
+        """The retired hold_queue key is silently ignored by pydantic
+        (extra='ignore') — that's the wrong UX for a key that used to do
+        something, so load_config() must warn explicitly (DEF-100/101 ethos:
+        no silent state changes)."""
+        f = tmp_path / "config.yaml"
+        f.write_text("hold_queue:\n  enabled: true\n")
+        cfg = load_config(f)
+        assert not hasattr(cfg, "hold_queue")
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "hold_queue" in captured.err
+        assert "workspace_switch" in captured.err
+
+    def test_no_hold_queue_key_no_warning(self, tmp_path, capsys):
+        f = tmp_path / "config.yaml"
+        f.write_text("threshold: 0.7\n")
+        load_config(f)
+        captured = capsys.readouterr()
+        assert "hold_queue" not in captured.err
 
 
 class TestAppProfileNewFields:

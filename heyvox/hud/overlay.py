@@ -549,16 +549,6 @@ def _apply_state(
             if crashed:
                 icon = "\u26a0"  # \u26a0 text-mode, no emoji overflow
                 label = f" {'&'.join(crashed)} err"
-        # DEF-100: held TTS count badge \u2014 surfaces hold-queue state.
-        # Stays at 0 with default config (hold_queue.enabled=false), but if
-        # the user opts back into hold-queue behaviour, this makes it visible.
-        _held_count = 0
-        try:
-            from pathlib import Path as _Path
-            from heyvox.constants import HERALD_HOLD_DIR
-            _held_count = sum(1 for _ in _Path(HERALD_HOLD_DIR).glob("*.wav"))
-        except Exception:
-            pass
         # HUDSurface banner \u2014 unified read for silent-state-change detectors.
         # Picks the highest-level live record (error > warn > info); falls
         # back to the legacy DEF-101 MIC_WARN_FILE via HUDSurface compat path.
@@ -589,8 +579,6 @@ def _apply_state(
         # The banner appears as a *suffix symbol*, not a title override \u2014
         # brand glyph + state stay intact, only a small badge gets added.
         _bar_title = f"{icon}{label}"
-        if _held_count > 0:
-            _bar_title += f"  \U0001f4e5{_held_count}"
         if _banner_symbol:
             _bar_title += f"  {_banner_symbol}"
         # Idle branch renders brand glyph + symbol suffix; non-idle uses text.
@@ -624,8 +612,6 @@ def _apply_state(
                 _mic_img = _brand_menubar_image()
             btn.setImage_(_mic_img)
             _idle_suffix = ""
-            if _held_count > 0:
-                _idle_suffix += f"  \U0001f4e5{_held_count}"
             if _spk_muted:
                 _idle_suffix += " \U0001f507"
             # Mic name is hover-only (tooltip). Title carries icon + suffixes only.
@@ -1298,20 +1284,6 @@ def _make_menu_action_class():
             from AppKit import NSApplication
             NSApplication.sharedApplication().terminate_(None)
 
-        def drainHeldQueue_(self, sender):
-            """DEF-100: drain one held TTS message from the cross-workspace hold queue.
-
-            Touches the orchestrator's play-next flag so the next held WAV plays
-            regardless of workspace mismatch. Useful when running parallel
-            Conductor sessions where TTS from background workspaces gets parked.
-            """
-            from pathlib import Path
-            from heyvox.constants import HERALD_PLAY_NEXT
-            try:
-                Path(HERALD_PLAY_NEXT).touch()
-            except OSError:
-                pass
-
     return _MenuActionHandler
 
 
@@ -1361,11 +1333,10 @@ def _build_transcript_menu(handler):
 
     # -- Gather state --
     from heyvox.constants import (
-        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_MUTE_FLAG,
+        HERALD_QUEUE_DIR, HERALD_MUTE_FLAG,
         HERALD_ORCH_PID, KOKORO_DAEMON_SOCK, KOKORO_DAEMON_PID, HUD_SOCKET_PATH,
     )
     queue_count = len(_glob.glob(HERALD_QUEUE_DIR + "/*.wav"))
-    hold_count = len(_glob.glob(HERALD_HOLD_DIR + "/*.wav"))
     try:
         from heyvox.audio.tts import is_muted as _tts_is_muted
         _is_muted = _tts_is_muted()
@@ -1892,8 +1863,8 @@ def _build_transcript_menu(handler):
 
     settings_sub.addItem_(_status_label("HUD", "running" if hud_ok else "idle"))
 
-    if queue_count > 0 or hold_count > 0:
-        q_title = f"  Queue: {queue_count} queued, {hold_count} held"
+    if queue_count > 0:
+        q_title = f"  Queue: {queue_count} queued"
         settings_sub.addItem_(_dimmed_item(q_title))
 
     settings_sub.addItem_(NSMenuItem.separatorItem())
@@ -1967,15 +1938,6 @@ def _build_transcript_menu(handler):
     tm_parent.setSubmenu_(tm_sub)
     settings_sub.addItem_(tm_parent)
 
-    # DEF-100: drain held TTS messages from cross-workspace hold queue.
-    # One tap drains one held WAV regardless of which workspace it belongs to.
-    drain_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Drain held messages", "drainHeldQueue:", "",
-    )
-    drain_item.setTarget_(handler)
-    drain_item.setEnabled_(True)
-    _styled(drain_item)
-    settings_sub.addItem_(drain_item)
 
     settings_parent.setSubmenu_(settings_sub)
     menu.addItem_(settings_parent)
