@@ -347,7 +347,10 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
     return False
 
 
-def _switch_workspace(workspace: str, cfg: OrchestratorConfig, *, force: bool = True) -> None:
+def _switch_workspace(
+    workspace: str, cfg: OrchestratorConfig, *,
+    workspace_id: str = "", session_id: str = "", force: bool = True,
+) -> None:
     """Switch the workspace-aware app to the given workspace name.
 
     Uses cfg.workspace_switch_cmd from the app profile. Falls back to
@@ -359,6 +362,13 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig, *, force: bool = 
     cancelable window IS the consent, so the bash script's independent idle
     heuristic would only add a second, invisible veto on top of an already
     explicit one.
+
+    DEF-237: when workspace_id is known, switches via `--id ... --session
+    ...` instead of the positional label search — --id is looked up by
+    stable UUID (survives renames) and is what unlocks --session (the
+    script only honours --session when --id is also given). Falls back to
+    the old positional call when workspace_id resolution failed upstream
+    (no DB, locked DB, no match) — same behavior as before this fix.
     """
     if not cfg.workspace_switch_cmd:
         return
@@ -370,14 +380,21 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig, *, force: bool = 
             switch_cmd = found
         else:
             return
+    if workspace_id:
+        argv = [switch_cmd, "--id", workspace_id]
+        if session_id:
+            argv.extend(["--session", session_id])
+    else:
+        argv = [switch_cmd, workspace]
+    argv.extend(["--force"] if force else [])
     try:
-        argv = [switch_cmd, workspace] + (["--force"] if force else [])
         r = subprocess.run(
             argv,
             capture_output=True, text=True, timeout=5.0,
         )
         _herald_log(
-            f"ORCH: switching to workspace={workspace!r} force={force} rc={r.returncode} "
+            f"ORCH: switching to workspace={workspace!r} workspace_id={workspace_id!r} "
+            f"session_id={session_id!r} force={force} rc={r.returncode} "
             f"stdout={(r.stdout or '').strip()[:200]!r} stderr={(r.stderr or '').strip()[:200]!r}",
             cfg.debug_log,
         )
@@ -492,7 +509,8 @@ def _play_switch_pending_cue() -> None:
 
 
 def _run_switch_countdown(
-    ws: str, cfg: OrchestratorConfig, debug_log: Path, stop_event: threading.Event
+    ws: str, cfg: OrchestratorConfig, debug_log: Path, stop_event: threading.Event,
+    *, workspace_id: str = "", session_id: str = "",
 ) -> None:
     """Fire-and-forget: announce a pending switch, give cfg.switch_countdown_secs
     to cancel (Right Ctrl, or Escape/stop — see herald/cli.py::_cmd_stop), then
@@ -501,6 +519,10 @@ def _run_switch_countdown(
     Runs on its own daemon thread (mirrors the watchdog_thread template —
     poll loop running parallel to playback) so audio is never blocked by it;
     the caller starts this thread and moves straight on to ducking/afplay.
+
+    DEF-237: workspace_id/session_id just ride along to the final
+    _switch_workspace call at the end of the countdown — see that
+    function's docstring for what they change.
     """
     countdown_start = time.time()
     cfg.cancel_switch_flag.unlink(missing_ok=True)  # clear stale/poltergeist flag first
@@ -556,7 +578,7 @@ def _run_switch_countdown(
             debug_log,
         )
         return
-    _switch_workspace(ws, cfg, force=True)
+    _switch_workspace(ws, cfg, workspace_id=workspace_id, session_id=session_id, force=True)
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +974,9 @@ def _play_wav(
         # Workspace switch -- only if the workspace-aware app is frontmost
         if workspace_file.exists():
             try:
-                ws = workspace_file.read_text().strip()
+                from heyvox.herald.workspace_label import read_switch_sidecar
+                identity = read_switch_sidecar(workspace_file.read_text())
+                ws = identity["workspace"]
                 current_workspace = ws
                 # DEF-070: Skip switch while HeyVox is recording/injecting. The
                 # forced Hammerspoon sidebar click steals focus mid-paste, so
@@ -971,6 +995,10 @@ def _play_wav(
                     threading.Thread(
                         target=_run_switch_countdown,
                         args=(ws, cfg, debug_log, switch_stop_event),
+                        kwargs={
+                            "workspace_id": identity["workspace_id"],
+                            "session_id": identity["session_id"],
+                        },
                         daemon=True,
                     ).start()
                 else:

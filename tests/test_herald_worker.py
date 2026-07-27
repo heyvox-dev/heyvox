@@ -424,9 +424,13 @@ class TestWorkspaceLabelPrepend:
     def _worker_with_ws(self, ws: str):
         from heyvox.herald.worker import HeraldWorker
         # Force the cwd-detect fallback to "" so the test only exercises
-        # the env-var path (and an empty ws actually stays empty).
+        # the env-var path (and an empty ws actually stays empty). Also
+        # stub resolve_workspace_id (DEF-237) so a non-empty ws doesn't
+        # make __init__ hit the real config/DB during this label-prepend
+        # test class — unrelated to what it's testing.
         with patch.dict(os.environ, {"HEYVOX_WORKSPACE": ws, "CONDUCTOR_WORKSPACE_NAME": ws}, clear=False), \
-             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""), \
+             patch("heyvox.herald.workspace_label.resolve_workspace_id", return_value=""):
             return HeraldWorker()
 
     def test_no_workspace_returns_speech_unchanged(self):
@@ -577,3 +581,74 @@ class TestEarlyEnqueueWatcherRespectsStop:
             worker._early_enqueue_watcher(temp_wav, timestamp, threading.Event())
 
         assert os.listdir(queue_dir) == [], "cancelled watcher must not enqueue part 1"
+
+
+# ---------------------------------------------------------------------------
+# DEF-237: CONDUCTOR_SESSION_ID + workspace_id feeding the switch sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestSessionIdAndWorkspaceId:
+    def _worker_with_session(self, ws: str, session_id: str, workspace_id: str = "resolved-ws-id"):
+        env = {
+            "HEYVOX_WORKSPACE": ws,
+            "CONDUCTOR_WORKSPACE_NAME": ws,
+            "CONDUCTOR_SESSION_ID": session_id,
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""), \
+             patch("heyvox.herald.workspace_label.resolve_workspace_id", return_value=workspace_id):
+            return HeraldWorker()
+
+    def test_picks_up_conductor_session_id(self):
+        w = self._worker_with_session("seattle", "sess-uuid-456")
+        assert w._session_id == "sess-uuid-456"
+
+    def test_resolves_workspace_id_when_workspace_known(self):
+        w = self._worker_with_session("seattle", "sess-uuid-456", workspace_id="ws-uuid-123")
+        assert w._workspace_id == "ws-uuid-123"
+
+    def test_no_session_id_env_defaults_to_empty(self, monkeypatch):
+        monkeypatch.setenv("HEYVOX_WORKSPACE", "seattle")
+        monkeypatch.setenv("CONDUCTOR_WORKSPACE_NAME", "seattle")
+        monkeypatch.delenv("CONDUCTOR_SESSION_ID", raising=False)
+        with patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""), \
+             patch("heyvox.herald.workspace_label.resolve_workspace_id", return_value=""):
+            w = HeraldWorker()
+        assert w._session_id == ""
+
+    def test_empty_workspace_skips_workspace_id_resolution(self):
+        """No workspace known — resolve_workspace_id must not even be called."""
+        env = {"HEYVOX_WORKSPACE": "", "CONDUCTOR_WORKSPACE_NAME": "", "CONDUCTOR_SESSION_ID": "sess-uuid-456"}
+        with patch.dict(os.environ, env, clear=False), \
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""), \
+             patch(
+                 "heyvox.herald.workspace_label.resolve_workspace_id",
+                 side_effect=AssertionError("must not be called without a workspace"),
+             ):
+            w = HeraldWorker()
+        assert w._workspace_id == ""
+
+    def test_write_workspace_sidecar_includes_session_and_workspace_id(self, tmp_path):
+        w = self._worker_with_session("seattle", "sess-uuid-456", workspace_id="ws-uuid-123")
+        wav_path = str(tmp_path / "1700000000000-01.wav")
+        w._write_workspace_sidecar(wav_path)
+
+        from heyvox.herald.workspace_label import read_switch_sidecar
+        sidecar = Path(tmp_path / "1700000000000-01.workspace")
+        assert sidecar.exists()
+        identity = read_switch_sidecar(sidecar.read_text())
+        assert identity == {
+            "workspace": "seattle",
+            "workspace_id": "ws-uuid-123",
+            "session_id": "sess-uuid-456",
+        }
+
+    def test_write_workspace_sidecar_skipped_without_workspace(self, tmp_path):
+        env = {"HEYVOX_WORKSPACE": "", "CONDUCTOR_WORKSPACE_NAME": "", "CONDUCTOR_SESSION_ID": "sess-uuid-456"}
+        with patch.dict(os.environ, env, clear=False), \
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
+            w = HeraldWorker()
+        wav_path = str(tmp_path / "msg-01.wav")
+        w._write_workspace_sidecar(wav_path)
+        assert not Path(tmp_path / "msg-01.workspace").exists()

@@ -949,6 +949,76 @@ class TestSwitchWorkspaceForce:
         assert "--force" not in argv
 
 
+class TestSwitchWorkspaceIdSession:
+    """DEF-237: --id/--session forwarding, falling back to the positional label."""
+
+    def _switch_cmd(self, tmp_path: Path) -> Path:
+        cmd = tmp_path / "switch.sh"
+        cmd.write_text("#!/bin/sh\n")
+        cmd.chmod(0o755)
+        return cmd
+
+    def test_workspace_id_uses_id_and_session_flags(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        switch_cmd = self._switch_cmd(tmp_path)
+        cfg = _cfg(tmp_path, workspace_switch_cmd=str(switch_cmd))
+        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            _switch_workspace(
+                "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456",
+            )
+        argv = mock_run.call_args[0][0]
+        assert argv == [str(switch_cmd), "--id", "ws-uuid-123", "--session", "sess-uuid-456", "--force"]
+
+    def test_workspace_id_without_session_id_omits_session_flag(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        switch_cmd = self._switch_cmd(tmp_path)
+        cfg = _cfg(tmp_path, workspace_switch_cmd=str(switch_cmd))
+        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            _switch_workspace("seattle", cfg, workspace_id="ws-uuid-123")
+        argv = mock_run.call_args[0][0]
+        assert argv == [str(switch_cmd), "--id", "ws-uuid-123", "--force"]
+
+    def test_no_workspace_id_falls_back_to_positional_label(self, tmp_path):
+        """No workspace_id resolved upstream (DB locked, no match, ...) — same
+        positional call as before DEF-237. session_id alone is not enough
+        since conductor-switch-workspace only honours --session when --id
+        is also given."""
+        from heyvox.herald.orchestrator import _switch_workspace
+        switch_cmd = self._switch_cmd(tmp_path)
+        cfg = _cfg(tmp_path, workspace_switch_cmd=str(switch_cmd))
+        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            _switch_workspace("seattle", cfg, session_id="sess-uuid-456")
+        argv = mock_run.call_args[0][0]
+        assert argv == [str(switch_cmd), "seattle", "--force"]
+
+    def test_run_switch_countdown_forwards_workspace_id_and_session_id(self, tmp_path):
+        """_run_switch_countdown's own workspace_id/session_id kwargs ride
+        through to the _switch_workspace call at the end of the countdown."""
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        # Same generous margins as TestRunSwitchCountdown._cfg_fast below —
+        # a tighter window here previously flaked on a loaded CI runner.
+        cfg = _cfg(
+            tmp_path, workspace_switch_cmd=str(self._switch_cmd(tmp_path)),
+            workspace_app_name="Conductor",
+            switch_countdown_secs=0.5, poll_interval=0.02,
+        )
+        stop_event = threading.Event()
+        with patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True), \
+             patch("heyvox.herald.orchestrator._switch_workspace") as mock_switch, \
+             patch("heyvox.herald.orchestrator._show_alert"), \
+             patch("heyvox.herald.orchestrator._play_switch_pending_cue"):
+            _run_switch_countdown(
+                "seattle", cfg, cfg.debug_log, stop_event,
+                workspace_id="ws-uuid-123", session_id="sess-uuid-456",
+            )
+        mock_switch.assert_called_once_with(
+            "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456", force=True,
+        )
+
+
 class TestRunSwitchCountdown:
     """_run_switch_countdown: announce, wait, cancel-or-fire. Uses a short
     switch_countdown_secs/poll_interval so tests run fast."""
@@ -979,7 +1049,9 @@ class TestRunSwitchCountdown:
 
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
-        mock_switch.assert_called_once_with("some-workspace", cfg, force=True)
+        mock_switch.assert_called_once_with(
+            "some-workspace", cfg, workspace_id="", session_id="", force=True,
+        )
         assert mock_alert.called
         assert not cfg.pending_switch_file.exists()
         assert not cfg.cancel_switch_flag.exists()
@@ -1024,7 +1096,9 @@ class TestRunSwitchCountdown:
 
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
-        mock_switch.assert_called_once_with("some-workspace", cfg, force=True)
+        mock_switch.assert_called_once_with(
+            "some-workspace", cfg, workspace_id="", session_id="", force=True,
+        )
 
     @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
     @patch("heyvox.herald.orchestrator._switch_workspace")
