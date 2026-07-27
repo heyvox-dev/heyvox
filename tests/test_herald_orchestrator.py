@@ -954,10 +954,13 @@ class TestRunSwitchCountdown:
     switch_countdown_secs/poll_interval so tests run fast."""
 
     def _cfg_fast(self, tmp_path, **kwargs):
+        # Generous margins (not "fast" in wall-clock terms) — a tight window
+        # here previously flaked on a loaded CI runner (thread-scheduling
+        # jitter ate the slack between the cancel-write and the deadline).
         defaults = dict(
             workspace_switch_cmd=str(tmp_path / "switch.sh"),
             workspace_app_name="Conductor",
-            switch_countdown_secs=0.15,
+            switch_countdown_secs=0.5,
             poll_interval=0.02,
         )
         defaults.update(kwargs)
@@ -993,7 +996,7 @@ class TestRunSwitchCountdown:
         stop_event = threading.Event()
 
         def _cancel_soon():
-            time.sleep(0.03)
+            time.sleep(0.15)  # ample slack before the 0.5s deadline
             cfg.cancel_switch_flag.write_text(str(time.time()))
 
         canceller = threading.Thread(target=_cancel_soon, daemon=True)
@@ -1070,7 +1073,7 @@ class TestRunSwitchCountdown:
         self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path
     ):
         from heyvox.herald.orchestrator import _run_switch_countdown
-        cfg = self._cfg_fast(tmp_path, switch_countdown_secs=0.3)
+        cfg = self._cfg_fast(tmp_path, switch_countdown_secs=0.6)
         stop_event = threading.Event()
         t = threading.Thread(
             target=_run_switch_countdown,
@@ -1078,7 +1081,7 @@ class TestRunSwitchCountdown:
             daemon=True,
         )
         t.start()
-        time.sleep(0.1)
+        time.sleep(0.15)
         assert cfg.pending_switch_file.exists(), "marker should exist mid-countdown"
         t.join(timeout=1.0)
         assert not cfg.pending_switch_file.exists(), "marker should be cleared after resolution"
