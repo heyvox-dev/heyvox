@@ -281,10 +281,17 @@ def _is_system_muted() -> bool:
         return False
 
 
-def is_muted() -> bool:
-    """Return current mute state (in-memory flag, file flag, or macOS system mute)."""
+def is_muted(*, check_system: bool = True) -> bool:
+    """Return current mute state (in-memory flag, file flag, or macOS system mute).
+
+    check_system=False skips the macOS system-mute check (an osascript
+    subprocess call) for latency-sensitive callers such as wake-word audio
+    cues, where spawning a process before every cue would regress WW_LATENCY.
+    """
     from heyvox.constants import HERALD_MUTE_FLAG
-    return _muted or os.path.exists(HERALD_MUTE_FLAG) or _is_system_muted()
+    if _muted or os.path.exists(HERALD_MUTE_FLAG):
+        return True
+    return check_system and _is_system_muted()
 
 
 def set_verbosity(level: str) -> None:

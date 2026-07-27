@@ -643,6 +643,28 @@
 - **Found by**: Investigating a flaky CI failure on an unrelated PR (DEF-223..228); confirmed unrelated to that PR's changes (none touch `heyvox/hud/ipc.py`) by reproducing the same failure standalone, then read `HUDServer`/`HUDClient` to find the mechanism rather than assume "flaky, rerun it." Verified the fix with a 150-run standalone stress loop (0 failures, versus ~1-in-30 before).
 - **Would have caught earlier**: The test itself already existed and caught this correctly — the gap was in the *code*, not test coverage. General pattern: a `listen()` backlog of 1 on any socket that gets reconnected in a tight loop (tests, or a real periodic retry path) has zero slack for scheduling jitter; default to a small but non-trivial backlog (5 is the classic Unix default) unless there's a specific reason to constrain it.
 
+## DEF-233 — Wake-word audio cues (listening/ok/paused/sending) ignored the TTS/output mute setting entirely (FIXED 2026-07-27)
+
+- **Date**: 2026-07-27
+- **Category**: ux
+- **Severity**: S3 (no functional break — recording/TTS pipeline still worked — but "muted" output wasn't actually silent, contradicting the mute toggle's own promise)
+- **Symptom**: User (dogfooding via voice) reported that with both mic and TTS/output muted (`voice_status()` showed `muted=True verbosity=skip` live), Herald TTS correctly stayed silent, but the "listening" cue sound still played on wake-word trigger.
+- **Root cause**: `audio_cue()` (`heyvox/audio/cues.py`) plays cue files (`listening`/`ok`/`paused`/`sending`.aiff) via sounddevice/afplay unconditionally — it never checked `heyvox.audio.tts.is_muted()` or the verbosity level. Herald's orchestrator (`_is_muted(cfg)` gate) and `tts.speak()` both correctly no-op when muted, but cues.py was never wired to the same mute state, so muting output silenced spoken responses while leaving the non-speech feedback sounds audible.
+- **Fix**: `audio_cue()` now returns immediately if `is_muted(check_system=False)`. Added a `check_system` kwarg to `tts.is_muted()` (default `True`, preserving all existing callers) so this latency-sensitive, wake-word-critical-path caller can skip the `osascript` system-mute subprocess check — cues are gated on the in-memory/file mute flags only, avoiding a new process-spawn on every wake-word trigger (this file already tracks WW_LATENCY and has prior fixes, DEF-150/207, specifically to avoid cold-start/spawn latency on this path).
+- **Found by**: User noticed the inconsistency directly while dogfooding (mic+output both toggled off, "it still works" — cue audible, TTS silent) and reported it via voice.
+- **Would have caught earlier**: No test asserted that *every* audio-producing path respects `is_muted()` — only Herald's own playback was covered. **Action item**: any new non-TTS audio-feedback path (cues, device-change sounds) should be checked against `is_muted()` the same way TTS playback is, and a guard test should assert this for each cue name.
+
+## DEF-234 — HUD menu item "Mute Microphone" actually only paused wake-word detection, not the microphone
+
+- **Date**: 2026-07-27
+- **Category**: ux
+- **Severity**: S3 (no functional bug — the behavior was intentional and correct — but the label claimed a broader effect than it had)
+- **Symptom**: User observed that with "Mute Microphone" toggled on, push-to-talk recording still worked — had to reason through the actual behavior themselves ("vielleicht ist nur das Wake-Word deaktiviert") rather than the UI stating it.
+- **Root cause**: The mic-mute flag (`MIC_MUTE_FLAG`) only ever paused wake-word processing (`main.py`'s wake-word loop skips processing while the flag file exists; `toggleMicMute_`'s own docstring already said "pauses wake word detection") — push-to-talk (`input/ptt.py`) is a separate code path never gated on this flag, by design. Only the user-facing strings (menu item "Mute Microphone", accessibility descriptions "Microphone muted", tooltip "(muted)", submenu header "Mic: Muted") never reflected that narrower scope.
+- **Fix**: Renamed user-facing strings in `heyvox/hud/overlay.py` and `heyvox/hud/menu_bar_title.py` to match actual scope: menu item -> "Mute Wake Word", accessibility descriptions -> "Wake word muted", submenu header -> "Mic: Wake Word Muted", tooltip suffix -> "(wake word muted)". No behavior change, labels only.
+- **Found by**: User inference while discussing DEF-233, confirmed against the existing `toggleMicMute_` docstring and the wake-word-loop gate in `main.py`.
+- **Would have caught earlier**: No process gap beyond "label drifted from actual behavior at write time and nothing checks that." Naming a flag/toggle after its narrowest actual effect (not its category) avoids this class of drift.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
