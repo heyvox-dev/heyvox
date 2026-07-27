@@ -240,6 +240,11 @@ def stop_all() -> None:
     _herald("stop")
 
 
+def cancel_pending_switch() -> None:
+    """Cancel a pending Herald workspace-switch countdown (Right-Ctrl key target)."""
+    _herald("cancel-switch")
+
+
 def clear_queue() -> None:
     """Clear queued messages without stopping current playback."""
     _herald("skip")

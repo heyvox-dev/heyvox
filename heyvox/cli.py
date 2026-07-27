@@ -79,13 +79,12 @@ def _cmd_status(args):
     print(f"  Muted:      {mute_str}")
 
     from heyvox.constants import (
-        HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_ORCH_PID,
+        HERALD_QUEUE_DIR, HERALD_ORCH_PID,
         KOKORO_DAEMON_SOCK, KOKORO_DAEMON_PID, HUD_SOCKET_PATH,
     )
     # Queue
     queue_files = glob.glob(HERALD_QUEUE_DIR + "/*.wav")
-    hold_files = glob.glob(HERALD_HOLD_DIR + "/*.wav")
-    print(f"  Queue:      {len(queue_files)} queued, {len(hold_files)} held")
+    print(f"  Queue:      {len(queue_files)} queued")
 
     # Daemons
     def _pid_alive(pidfile):

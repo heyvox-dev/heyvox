@@ -2,8 +2,8 @@
 
 Features:
   - Audio ducking: lowers system volume during playback, then restores
-  - Workspace auto-switch: switches app workspace if it's the frontmost app
-  - Hold mode: if user is active, hold messages from other workspaces
+  - Workspace auto-switch: announces + switches app workspace on a cancelable
+    countdown if it's the frontmost app (see _run_switch_countdown)
   - Media pause/resume (Hush / MediaRemote) during playback
   - Recording watchdog: kills afplay if recording starts mid-playback
   - WAV normalization: RMS-based loudness matching inline in Python
@@ -34,12 +34,13 @@ log = logging.getLogger(__name__)
 
 
 from heyvox.constants import (  # noqa: E402 — after __future__ import
-    HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_HISTORY_DIR, HERALD_CLAIM_DIR,
+    HERALD_QUEUE_DIR, HERALD_HISTORY_DIR, HERALD_CLAIM_DIR,
     HERALD_DEBUG_LOG, HERALD_VIOLATIONS_LOG,
     HERALD_ORCH_PID, HERALD_PLAYING_PID, HERALD_ORIGINAL_VOL_FILE,
-    HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG, RECORDING_FLAG, HERALD_PLAY_NEXT,
-    HERALD_LAST_PLAY, VERBOSITY_FILE, HERALD_WATCHER_HANDLED_DIR,
-    TTS_PLAYING_FLAG,
+    HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG, RECORDING_FLAG,
+    HERALD_PENDING_SWITCH_FLAG, HERALD_CANCEL_SWITCH_FLAG,
+    HERALD_LAST_PLAY, HERALD_STOP_TS_FILE, VERBOSITY_FILE,
+    HERALD_WATCHER_HANDLED_DIR, TTS_PLAYING_FLAG,
 )
 
 
@@ -49,7 +50,6 @@ class OrchestratorConfig:
 
     # Queue directories
     queue_dir: Path = field(default_factory=lambda: Path(HERALD_QUEUE_DIR))
-    hold_dir: Path = field(default_factory=lambda: Path(HERALD_HOLD_DIR))
     history_dir: Path = field(default_factory=lambda: Path(HERALD_HISTORY_DIR))
     claim_dir: Path = field(default_factory=lambda: Path(HERALD_CLAIM_DIR))
 
@@ -66,8 +66,10 @@ class OrchestratorConfig:
     pause_flag: Path = field(default_factory=lambda: Path(HERALD_PAUSE_FLAG))
     mute_flag: Path = field(default_factory=lambda: Path(HERALD_MUTE_FLAG))
     recording_flag: Path = field(default_factory=lambda: Path(RECORDING_FLAG))
-    play_next_flag: Path = field(default_factory=lambda: Path(HERALD_PLAY_NEXT))
+    pending_switch_file: Path = field(default_factory=lambda: Path(HERALD_PENDING_SWITCH_FLAG))
+    cancel_switch_flag: Path = field(default_factory=lambda: Path(HERALD_CANCEL_SWITCH_FLAG))
     last_play_file: Path = field(default_factory=lambda: Path(HERALD_LAST_PLAY))
+    stop_ts_file: Path = field(default_factory=lambda: Path(HERALD_STOP_TS_FILE))
     verbosity_file: Path = field(default_factory=lambda: Path(VERBOSITY_FILE))
 
     # Herald home (for relative paths)
@@ -78,6 +80,13 @@ class OrchestratorConfig:
     # App profile config for workspace switching (loaded from HeyvoxConfig)
     workspace_switch_cmd: str = ""  # Path to workspace switch CLI tool
     workspace_app_name: str = ""     # App name to check if frontmost
+
+    # Workspace-switch countdown (replaces the former hold-queue/idle-gate —
+    # see WorkspaceSwitchConfig in heyvox/config.py). Countdown window before
+    # a pending switch fires; cancel_key is informational here (the actual
+    # key capture lives in ptt.py) — used for the alert text.
+    switch_countdown_secs: float = 2.5
+    switch_cancel_key: str = "right_ctrl"
 
     # Audio ducking
     duck_enabled: bool = True
@@ -91,12 +100,6 @@ class OrchestratorConfig:
 
     # Queue caps
     max_queued: int = 10   # drop oldest messages when queue exceeds this
-    max_held: int = 5
-
-    # Cross-workspace hold queue (DEF-100). When False (default), every TTS
-    # plays immediately regardless of which workspace it came from. When True,
-    # TTS from non-current workspace is parked in hold/ until user goes idle.
-    hold_queue_enabled: bool = False
 
     # Media pause
     media_pause: bool = True
@@ -169,7 +172,6 @@ def _gc_queue_dirs(cfg: "OrchestratorConfig", debug_log: "Path") -> int:
     # Directory -> max age threshold in seconds
     dir_thresholds = [
         (cfg.queue_dir, 3600),    # 1 hour
-        (cfg.hold_dir, 14400),    # 4 hours
         (cfg.history_dir, 86400), # 24 hours
         (cfg.claim_dir, 3600),    # 1 hour (replaces inline claim GC)
     ]
@@ -276,6 +278,27 @@ def _is_skip(cfg: OrchestratorConfig) -> bool:
     return _get_verbosity(cfg) == "skip"
 
 
+def _generated_before_last_stop(wav_file: Path, cfg: OrchestratorConfig) -> bool:
+    """DEF-235: True if wav_file was queued before the last Escape/full-stop.
+
+    A part already sitting in HERALD_QUEUE_DIR when heyvox.herald.cli._cmd_stop
+    fires can still be picked up here before that same command's directory
+    clear lands — two separate processes, nothing serializes "kill current"
+    against "clear the rest". Comparing this file's mtime against the shared
+    stop timestamp catches it regardless of how that race resolves, the same
+    defense worker.py's _stop_requested_after() already uses on the
+    generation side (see HERALD_STOP_TS_FILE / _mark_stop_requested).
+    """
+    try:
+        stop_ts = float(cfg.stop_ts_file.read_text())
+    except (OSError, ValueError):
+        return False
+    try:
+        return wav_file.stat().st_mtime < stop_ts
+    except OSError:
+        return False
+
+
 def _user_is_active(cfg: OrchestratorConfig) -> bool:
     """Return True if user was recently listening (within 15s) or Herald is paused."""
     if _is_paused(cfg, cfg.debug_log):
@@ -324,11 +347,18 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
     return False
 
 
-def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
+def _switch_workspace(workspace: str, cfg: OrchestratorConfig, *, force: bool = True) -> None:
     """Switch the workspace-aware app to the given workspace name.
 
     Uses cfg.workspace_switch_cmd from the app profile. Falls back to
     searching PATH and ~/.local/bin/ if not explicitly configured.
+
+    force=True (default) passes --force to the switch script, bypassing its
+    own hs.host.idleTime() gate. That gate used to be the only thing deciding
+    whether a switch was welcome; now _run_switch_countdown's visible,
+    cancelable window IS the consent, so the bash script's independent idle
+    heuristic would only add a second, invisible veto on top of an already
+    explicit one.
     """
     if not cfg.workspace_switch_cmd:
         return
@@ -341,18 +371,13 @@ def _switch_workspace(workspace: str, cfg: OrchestratorConfig) -> None:
         else:
             return
     try:
-        # No --force: bash idle gate (now lowered to 2s via
-        # /tmp/herald-switch-idle-threshold) must be honoured. If the user
-        # is actively typing/clicking, we skip the switch — same intent as
-        # the original gate, paired with the post-paste RECORDING_FLAG
-        # grace window in recording.py to cover the auto-Enter race
-        # (DEF-070-style intra-Conductor focus steal after Sent!).
+        argv = [switch_cmd, workspace] + (["--force"] if force else [])
         r = subprocess.run(
-            [switch_cmd, workspace],
+            argv,
             capture_output=True, text=True, timeout=5.0,
         )
         _herald_log(
-            f"ORCH: switching to workspace={workspace!r} rc={r.returncode} "
+            f"ORCH: switching to workspace={workspace!r} force={force} rc={r.returncode} "
             f"stdout={(r.stdout or '').strip()[:200]!r} stderr={(r.stderr or '').strip()[:200]!r}",
             cfg.debug_log,
         )
@@ -419,26 +444,119 @@ def _lua_str_escape(value: str) -> str:
     )
 
 
-def _notify_held(workspace: str, cfg: OrchestratorConfig) -> None:
-    """Send a Hammerspoon notification for a held workspace message."""
-    held = list(cfg.hold_dir.glob("*.wav"))
-    count = len(held)
-    ws_escaped = _lua_str_escape(workspace)
+def _show_alert(message: str, duration: float = 1.5) -> None:
+    """Show a transient Hammerspoon alert.
+
+    Message is run through _lua_str_escape since callers may pass workspace
+    display names, which can contain arbitrary characters (colons, commas,
+    quotes) that would otherwise break out of the `hs -c` Lua literal
+    (DEF-177 Lua-string-breakout guard).
+    """
     hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
     if not Path(hs).exists() or not _hammerspoon_running():
         return
-    script = (
-        f"hs.notify.new({{"
-        f"title='Workspace message held',"
-        f"informativeText='{ws_escaped} has a message ({count} pending). Press Cmd+Shift+N to play.',"
-        f"withdrawAfter=10}}"
-        f"):send(); hs.alert.show('{ws_escaped}: message held ({count})', 2)"
-    )
+    safe_message = _lua_str_escape(message)
     try:
-        subprocess.Popen([hs, "-c", script],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            [hs, "-c", f"hs.alert.show('{safe_message}', {duration})"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     except Exception:
         pass
+
+
+def _play_switch_pending_cue() -> None:
+    """Play a short system sound announcing a pending workspace switch.
+
+    Plays directly via afplay (mirrors device_change_cue in
+    heyvox/audio/cues.py) rather than through heyvox.audio.cues.audio_cue():
+    that function's wake-word suppression window (_cue_suppress_until) is
+    process-local module state and would do nothing useful called from this
+    separate orchestrator process. No new suppression wiring is needed here
+    either — this plays while TTS_PLAYING_FLAG is already set (the countdown
+    starts as the new message begins playing), which heyvox/main.py's
+    wake-word loop already treats specially (raised threshold in
+    echo_safe/headset mode, mic muted otherwise).
+    """
+    sound = "/System/Library/Sounds/Glass.aiff"
+    if not os.path.exists(sound):
+        return
+    try:
+        subprocess.Popen(
+            ["afplay", sound],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def _run_switch_countdown(
+    ws: str, cfg: OrchestratorConfig, debug_log: Path, stop_event: threading.Event
+) -> None:
+    """Fire-and-forget: announce a pending switch, give cfg.switch_countdown_secs
+    to cancel (Right Ctrl, or Escape/stop — see herald/cli.py::_cmd_stop), then
+    switch with force=True if uncancelled.
+
+    Runs on its own daemon thread (mirrors the watchdog_thread template —
+    poll loop running parallel to playback) so audio is never blocked by it;
+    the caller starts this thread and moves straight on to ducking/afplay.
+    """
+    countdown_start = time.time()
+    cfg.cancel_switch_flag.unlink(missing_ok=True)  # clear stale/poltergeist flag first
+    try:
+        cfg.pending_switch_file.write_text(str(countdown_start))
+    except OSError:
+        pass
+
+    _show_alert(
+        f"Switching to {ws} in {cfg.switch_countdown_secs:.0f}s — Right Ctrl to cancel",
+        duration=cfg.switch_countdown_secs,
+    )
+    _play_switch_pending_cue()
+    try:
+        from heyvox.hud.surface import HUDSurface
+        HUDSurface.banner(
+            "info", "herald-switch-pending",
+            f"Switching to {ws} in {cfg.switch_countdown_secs:.0f}s",
+        )
+    except Exception:
+        pass
+
+    cancelled = False
+    deadline = countdown_start + cfg.switch_countdown_secs
+    while time.time() < deadline:
+        if stop_event.is_set():
+            return  # superseded by a newer message's countdown
+        try:
+            flag_ts = float(cfg.cancel_switch_flag.read_text().strip())
+            if flag_ts >= countdown_start:
+                cancelled = True
+                break
+        except (OSError, ValueError):
+            pass
+        time.sleep(cfg.poll_interval)
+
+    cfg.cancel_switch_flag.unlink(missing_ok=True)
+    cfg.pending_switch_file.unlink(missing_ok=True)
+    try:
+        from heyvox.hud.surface import HUDSurface
+        HUDSurface.clear("herald-switch-pending")
+    except Exception:
+        pass
+
+    if cancelled:
+        _herald_log(f"ORCH: switch to {ws!r} cancelled before deadline", debug_log)
+        return
+    if stop_event.is_set():
+        return
+    if Path(RECORDING_FLAG).exists() or not _workspace_app_is_frontmost(cfg):
+        _herald_log(
+            f"ORCH: switch to {ws!r} skipped at expiry (recording or app not frontmost)",
+            debug_log,
+        )
+        return
+    _switch_workspace(ws, cfg, force=True)
 
 
 # ---------------------------------------------------------------------------
@@ -802,20 +920,20 @@ def _play_wav(
     original_vol: float | None,
     cfg: OrchestratorConfig,
     *,
-    skip_workspace_switch: bool = False,
-) -> tuple[str, str, float | None, bool]:
+    switch_stop_event: threading.Event | None = None,
+) -> tuple[str, str, float | None, bool, threading.Event | None]:
     """Play a single WAV file, handling ducking, pausing, and workspace switching.
 
     Args:
-        skip_workspace_switch: When True, play audio without firing
-            conductor-switch-workspace. Used by the hold-queue auto-drain
-            path so a delayed TTS does not yank the user's Conductor view
-            out of the workspace they're currently working in (DEF-094).
-            The .workspace sidecar is still consumed so the file is
-            cleaned up correctly.
+        switch_stop_event: threading.Event for the most recently started
+            _run_switch_countdown thread, or None. When a new non-continuation
+            message arrives, any still-running countdown from a prior message
+            is superseded (its stop_event is set) before starting a fresh one
+            — carried across calls the same way current_workspace is.
 
     Returns:
-        (new_last_msg_prefix, new_current_workspace, original_vol, was_interrupted)
+        (new_last_msg_prefix, new_current_workspace, original_vol, was_interrupted,
+         new_switch_stop_event)
     """
     debug_log = cfg.debug_log
     basename = wav_file.name
@@ -846,19 +964,15 @@ def _play_wav(
                         f"(HeyVox recording/injecting)",
                         debug_log,
                     )
-                elif skip_workspace_switch:
-                    # DEF-094: hold-queue auto-drain — user has moved on to
-                    # a different workspace; play the audio in their current
-                    # context without yanking Conductor away from where they
-                    # are now.
-                    _herald_log(
-                        f"ORCH: skipping workspace switch to {ws!r} "
-                        f"(hold-queue auto-drain, audio-only mode)",
-                        debug_log,
-                    )
                 elif _workspace_app_is_frontmost(cfg):
-                    _switch_workspace(ws, cfg)
-                    time.sleep(0.3)
+                    if switch_stop_event is not None:
+                        switch_stop_event.set()  # supersede any in-flight countdown
+                    switch_stop_event = threading.Event()
+                    threading.Thread(
+                        target=_run_switch_countdown,
+                        args=(ws, cfg, debug_log, switch_stop_event),
+                        daemon=True,
+                    ).start()
                 else:
                     _herald_log("ORCH: skipping workspace switch (app not frontmost)", debug_log)
                 workspace_file.unlink(missing_ok=True)
@@ -1001,19 +1115,18 @@ def _play_wav(
     except Exception:
         pass
 
-    # Check if queue and hold are empty → resume media + restore volume
+    # Check if queue is empty → resume media + restore volume
     # Also check for .parts manifests — a worker may still be generating parts.
     queue_empty = not any(cfg.queue_dir.glob("*.wav"))
-    hold_empty = not any(cfg.hold_dir.glob("*.wav"))
     parts_coming = _parts_pending(cfg.queue_dir)
-    if queue_empty and hold_empty and not parts_coming:
+    if queue_empty and not parts_coming:
         if cfg.media_pause:
             _media_resume(cfg)
             _herald_log("ORCH: media RESUMED", debug_log)
         _restore_audio(original_vol, cfg, debug_log)
         original_vol = None
 
-    return last_msg_prefix, current_workspace, original_vol, was_interrupted
+    return last_msg_prefix, current_workspace, original_vol, was_interrupted, switch_stop_event
 
 
 # ---------------------------------------------------------------------------
@@ -1025,8 +1138,9 @@ class HeraldOrchestrator:
     """Pure-Python Herald orchestrator.
 
     Runs as a singleton daemon process. Polls the herald-queue directory,
-    plays WAV files via afplay, handles audio ducking, workspace switching,
-    hold queue, and recording watchdog.
+    plays WAV files via afplay, handles audio ducking, workspace switching
+    (via a cancelable countdown — see _run_switch_countdown), and recording
+    watchdog.
 
     Usage:
         orch = HeraldOrchestrator()
@@ -1066,7 +1180,6 @@ class HeraldOrchestrator:
             except OSError:
                 pass
         cfg.playing_pid_file.unlink(missing_ok=True)
-        cfg.play_next_flag.unlink(missing_ok=True)
         try:
             from heyvox.ipc import update_state
             update_state({"herald_playing_pid": None, "tts_playing": False})
@@ -1079,7 +1192,7 @@ class HeraldOrchestrator:
         debug_log = cfg.debug_log
 
         # Ensure runtime directories exist
-        for d in (cfg.queue_dir, cfg.hold_dir, cfg.history_dir, cfg.claim_dir):
+        for d in (cfg.queue_dir, cfg.history_dir, cfg.claim_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         # Singleton lock: only one orchestrator can run at a time.
@@ -1116,6 +1229,7 @@ class HeraldOrchestrator:
         original_vol: float | None = None
         current_workspace: str = ""
         last_msg_prefix: str = ""
+        switch_stop_event: threading.Event | None = None
         _last_vol_check: float = 0.0
 
         # Signal handlers
@@ -1130,21 +1244,6 @@ class HeraldOrchestrator:
 
         try:
             while not self._stop_event.is_set():
-                # Play-next flag: drain hold queue first
-                if cfg.play_next_flag.exists():
-                    cfg.play_next_flag.unlink(missing_ok=True)
-                    held = sorted(cfg.hold_dir.glob("*.wav"))
-                    if held:
-                        next_held = held[0]
-                        if next_held.exists():
-                            last_msg_prefix, current_workspace, original_vol, _ = _play_wav(
-                                next_held, last_msg_prefix, current_workspace, original_vol, cfg
-                            )
-                            remaining = list(cfg.hold_dir.glob("*.wav"))
-                            if remaining:
-                                self._show_alert(f"{len(remaining)} more pending")
-                            continue
-
                 # Enforce queue cap before picking next file
                 _enforce_queue_cap(cfg, debug_log)
 
@@ -1162,59 +1261,23 @@ class HeraldOrchestrator:
                         next_wav.with_suffix(".workspace").unlink(missing_ok=True)
                         continue
 
-                    # Workspace hold logic
-                    workspace_file = next_wav.with_suffix(".workspace")
-                    next_workspace = ""
-                    if workspace_file.exists():
-                        try:
-                            next_workspace = workspace_file.read_text().strip()
-                        except (OSError, ValueError):
-                            pass
-
-                    if (
-                        cfg.hold_queue_enabled
-                        and next_workspace
-                        and current_workspace
-                        and next_workspace != current_workspace
-                        and _user_is_active(cfg)
-                    ):
-                        # Move to hold queue
-                        basename = next_wav.name
-                        hold_target = cfg.hold_dir / basename
-                        try:
-                            shutil.move(str(next_wav), str(hold_target))
-                            if workspace_file.exists():
-                                shutil.move(
-                                    str(workspace_file),
-                                    str(cfg.hold_dir / workspace_file.name),
-                                )
-                        except (OSError, ValueError):
-                            pass
+                    # DEF-235: drop parts queued before the last Escape/stop —
+                    # closes the race where this loop picks up an
+                    # already-generated part before _cmd_stop()'s own
+                    # directory clear lands.
+                    if _generated_before_last_stop(next_wav, cfg):
+                        next_wav.unlink(missing_ok=True)
+                        next_wav.with_suffix(".workspace").unlink(missing_ok=True)
                         _herald_log(
-                            f"ORCH: held {basename} from {next_workspace} (user active on {current_workspace})",
+                            f"ORCH: dropping stale part {next_wav.name} (queued before last stop)",
                             debug_log,
                         )
-                        if not _is_paused(cfg, debug_log):
-                            _notify_held(next_workspace, cfg)
-
-                        # Enforce hold cap
-                        held_wavs = sorted(
-                            cfg.hold_dir.glob("*.wav"),
-                            key=lambda p: p.stat().st_mtime,
-                        )
-                        excess = len(held_wavs) - cfg.max_held
-                        if excess > 0:
-                            for old in held_wavs[:excess]:
-                                old.unlink(missing_ok=True)
-                                old.with_suffix(".workspace").unlink(missing_ok=True)
-                                _herald_log(
-                                    f"ORCH: dropped oldest held {old.name} (cap={cfg.max_held})",
-                                    debug_log,
-                                )
                         continue
 
-                    last_msg_prefix, current_workspace, original_vol, interrupted = _play_wav(
-                        next_wav, last_msg_prefix, current_workspace, original_vol, cfg
+                    (last_msg_prefix, current_workspace, original_vol,
+                     interrupted, switch_stop_event) = _play_wav(
+                        next_wav, last_msg_prefix, current_workspace, original_vol, cfg,
+                        switch_stop_event=switch_stop_event,
                     )
 
                     # If recording interrupted playback, drop remaining parts of this message
@@ -1223,76 +1286,16 @@ class HeraldOrchestrator:
                         last_msg_prefix = ""  # reset so next message isn't treated as continuation
 
                 else:
-                    # Queue empty — check hold queue auto-drain
-                    held_wavs = sorted(cfg.hold_dir.glob("*.wav"))
-                    if held_wavs and not _user_is_active(cfg):
-                        _herald_log(
-                            f"ORCH: auto-draining held queue ({len(held_wavs)} pending, audio-only)",
-                            debug_log,
-                        )
-                        # DEF-094: audio-only auto-drain. The user has moved
-                        # to a different workspace since these messages were
-                        # held; play their audio in the current context
-                        # without yanking Conductor's view away from the
-                        # workspace they are working in now. The .workspace
-                        # sidecar is still consumed for cleanup.
-                        while held_wavs:
-                            next_held = held_wavs[0]
-                            if not next_held.exists():
-                                held_wavs = held_wavs[1:]
-                                continue
-                            last_msg_prefix, current_workspace, original_vol, interrupted = _play_wav(
-                                next_held, last_msg_prefix, current_workspace, original_vol, cfg,
-                                skip_workspace_switch=True,
-                            )
-                            if interrupted and last_msg_prefix:
-                                # Purge remaining parts of this message from hold too
-                                for h in list(cfg.hold_dir.glob("*.wav")):
-                                    hp = h.name.split("-")[0] if "-" in h.name else h.name
-                                    if hp == last_msg_prefix:
-                                        h.unlink(missing_ok=True)
-                                        h.with_suffix(".workspace").unlink(missing_ok=True)
-                                _herald_log(f"ORCH: purged held parts of interrupted {last_msg_prefix}", debug_log)
-                                last_msg_prefix = ""
-                                break
-                            # Check if next held file is a continuation of same message
-                            held_wavs = sorted(cfg.hold_dir.glob("*.wav"))
-                            if not held_wavs:
-                                break
-                            next_prefix = held_wavs[0].name.split("-")[0] if "-" in held_wavs[0].name else ""
-                            if next_prefix != last_msg_prefix:
-                                break  # Different message — re-enter main loop for activity check
-                        remaining = list(cfg.hold_dir.glob("*.wav"))
-                        if remaining:
-                            self._show_alert(f"{len(remaining)} more pending")
-                    else:
-                        time.sleep(cfg.poll_interval)
-                        _gc_queue_dirs(cfg, cfg.debug_log)
-                        # Periodic volume-zero check — refresh banner every 30s
-                        _now_mono = time.monotonic()
-                        if _now_mono - _last_vol_check >= 30.0:
-                            _last_vol_check = _now_mono
-                            _warn_if_vol_zero(cfg, cfg.debug_log)
+                    time.sleep(cfg.poll_interval)
+                    _gc_queue_dirs(cfg, cfg.debug_log)
+                    # Periodic volume-zero check — refresh banner every 30s
+                    _now_mono = time.monotonic()
+                    if _now_mono - _last_vol_check >= 30.0:
+                        _last_vol_check = _now_mono
+                        _warn_if_vol_zero(cfg, cfg.debug_log)
 
         finally:
             self._cleanup(original_vol)
-
-    def _show_alert(self, message: str) -> None:
-        """Show a transient Hammerspoon alert."""
-        hs = shutil.which("hs") or "/opt/homebrew/bin/hs"
-        if not Path(hs).exists() or not _hammerspoon_running():
-            return
-        # Escape even though current callers pass int-formatted strings: the
-        # message lands in an `hs -c` Lua literal, so any future caller passing
-        # user text would otherwise reopen the DEF-177 Lua string-breakout.
-        safe_message = _lua_str_escape(message)
-        try:
-            subprocess.Popen(
-                [hs, "-c", f"hs.alert.show('{safe_message}', 1.5)"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1357,18 +1360,12 @@ def main() -> None:
         stream=sys.stderr,
     )
 
-    # Lower the bash switch script's idle threshold to 2s so brief pauses
-    # don't block legitimate TTS-time switches, while real typing/clicking
-    # still gates the switch. Pairs with --force removal in _switch_workspace.
-    try:
-        Path("/tmp/herald-switch-idle-threshold").write_text("2\n")
-    except OSError:
-        pass
-
     # Load app profile config for workspace switching
     ws_switch_cmd = ""
     ws_app_name = ""
     tts_min_volume: float | None = None
+    switch_countdown_secs: float | None = None
+    switch_cancel_key: str | None = None
     try:
         from heyvox.config import load_config
         heyvox_cfg = load_config()
@@ -1378,6 +1375,8 @@ def main() -> None:
                 ws_app_name = profile.name
                 break
         tts_min_volume = float(heyvox_cfg.tts.min_volume)
+        switch_countdown_secs = float(heyvox_cfg.workspace_switch.countdown_secs)
+        switch_cancel_key = heyvox_cfg.workspace_switch.cancel_key
     except Exception:
         pass
 
@@ -1390,6 +1389,10 @@ def main() -> None:
     )
     if tts_min_volume is not None:
         cfg_kwargs["tts_min_volume"] = tts_min_volume
+    if switch_countdown_secs is not None:
+        cfg_kwargs["switch_countdown_secs"] = switch_countdown_secs
+    if switch_cancel_key is not None:
+        cfg_kwargs["switch_cancel_key"] = switch_cancel_key
     cfg = OrchestratorConfig(**cfg_kwargs)
 
     orch = HeraldOrchestrator(config=cfg)

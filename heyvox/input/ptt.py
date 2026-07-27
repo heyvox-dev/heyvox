@@ -5,7 +5,9 @@ Uses Quartz event tap instead of pynput because pynput misses the fn/Globe key.
 Runs the CFRunLoop in a background daemon thread.
 
 Supports: fn, right_cmd, right_alt, right_ctrl, right_shift modifier keys.
-Also handles Escape key to cancel active recordings or pending transcriptions.
+Also handles Escape key to cancel active recordings or pending transcriptions,
+and an independent cancel key (default right_ctrl) to cancel a pending Herald
+workspace switch without affecting TTS playback.
 """
 
 import threading
@@ -25,6 +27,19 @@ _PTT_KEY_FLAGS = {
 }
 
 ESCAPE_KEYCODE = 53
+
+
+def _cancel_key_edge(flags: int, mask: int, was_down: bool) -> tuple[bool, bool]:
+    """Rising-edge detector for the workspace-switch cancel key.
+
+    Pure and Quartz-free (no timers, no hold/tap/double-tap ambiguity — a
+    switch is either pending or it isn't) so it's independently unit-testable,
+    mirroring GestureRecognizer's own testability contract.
+
+    Returns (is_rising_edge, now_down).
+    """
+    now_down = bool(flags & mask)
+    return (now_down and not was_down), now_down
 
 
 class GestureRecognizer:
@@ -238,6 +253,7 @@ def start_ptt_listener(
     double_tap: bool = True,
     tap_max_secs: float = 0.2,
     double_tap_secs: float = 0.35,
+    cancel_key: str | None = None,
 ) -> threading.Thread | None:
     """Start push-to-talk using Quartz CGEventTap.
 
@@ -251,6 +267,8 @@ def start_ptt_listener(
     - On Escape (busy): calls callbacks["on_cancel_transcription"]()
     - On Escape (recording): calls callbacks["on_cancel_recording"]()
     - On Escape (speaking): calls callbacks["on_cancel_tts"]()
+    - On cancel_key down, while callbacks["is_switch_pending"]() is true:
+      calls callbacks["on_cancel_switch"]()
 
     Args:
         ptt_key: Key name from _PTT_KEY_FLAGS (e.g. "fn", "right_cmd").
@@ -264,13 +282,21 @@ def start_ptt_listener(
             - "on_cancel_transcription": callable() — Escape during transcription
             - "on_cancel_recording": callable() — Escape during recording
             - "on_cancel_tts": callable() — Escape during TTS playback
+            - "on_cancel_switch": callable() — cancel_key pressed while a
+              Herald workspace switch is pending
             - "is_busy": callable() -> bool — is transcription in progress?
             - "is_recording": callable() -> bool — is recording active?
             - "is_speaking": callable() -> bool — is TTS playing?
+            - "is_switch_pending": callable() -> bool — is a Herald
+              workspace-switch countdown currently running?
         log_fn: Optional callable(str) for log output.
         double_tap: enable the double-tap → hands-free gesture.
         tap_max_secs: max press duration counted as a tap (also hold delay).
         double_tap_secs: max gap between the two taps.
+        cancel_key: Key name from _PTT_KEY_FLAGS for cancelling a pending
+            workspace switch (e.g. "right_ctrl"). None/unrecognized/same as
+            ptt_key disables this feature (graceful degradation, same
+            contract as an unrecognized ptt_key).
 
     Returns:
         Background thread running the CFRunLoop, or None if setup failed.
@@ -287,6 +313,22 @@ def start_ptt_listener(
     if flag_mask is None:
         _log(f"WARNING: PTT key '{ptt_key}' not supported for Quartz mode, disabling PTT")
         return None
+
+    cancel_flag_mask = None
+    if cancel_key:
+        if cancel_key.lower() == ptt_key.lower():
+            _log(
+                f"WARNING: workspace_switch.cancel_key '{cancel_key}' is the same as "
+                f"push_to_talk.key — disabling the switch-cancel binding to avoid "
+                f"double-booking the key."
+            )
+        else:
+            cancel_flag_mask = _PTT_KEY_FLAGS.get(cancel_key.lower())
+            if cancel_flag_mask is None:
+                _log(
+                    f"WARNING: cancel_key '{cancel_key}' not supported for Quartz "
+                    f"mode, disabling switch-cancel"
+                )
 
     # Gesture FSM — all recording-mode logic lives here; the Quartz callback
     # below only does edge detection and forwards on_key_down / on_key_up.
@@ -312,6 +354,7 @@ def start_ptt_listener(
     )
 
     ptt_held = False  # Quartz-level edge tracking (debounce duplicate flags)
+    cancel_key_held = False  # same, for the workspace-switch cancel key
     _last_keydown_time = 0.0  # suppress false fn-release after keyDown events
 
     # DEF-087: Track actual event flow so the watchdog can distinguish
@@ -349,7 +392,7 @@ def start_ptt_listener(
             return event  # pass event through on error
 
     def _callback_inner(proxy, event_type, event, refcon):
-        nonlocal ptt_held, _last_keydown_time
+        nonlocal ptt_held, cancel_key_held, _last_keydown_time
 
         # macOS disables the tap after a slow callback response (timeout) or
         # a secure-input prompt (user input), and notifies via this special
@@ -423,6 +466,18 @@ def start_ptt_listener(
                 return event
             ptt_held = False
             recognizer.on_key_up()
+
+        # Workspace-switch cancel key — independent of the PTT gesture above.
+        # Only acts while a switch is actually pending, so it's a no-op for
+        # every other state and never intercepts the key's normal behavior
+        # otherwise.
+        if cancel_flag_mask is not None:
+            edge, cancel_key_held = _cancel_key_edge(flags, cancel_flag_mask, cancel_key_held)
+            if edge and callbacks.get("is_switch_pending", lambda: False)():
+                on_cancel_switch = callbacks.get("on_cancel_switch")
+                if on_cancel_switch:
+                    on_cancel_switch()
+                _log("Cancel key: cancelling pending workspace switch")
 
         return event
 

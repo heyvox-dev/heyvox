@@ -253,21 +253,26 @@ class TTSConfig(BaseModel):
         return v
 
 
-class HoldQueueConfig(BaseModel):
-    """Cross-workspace TTS hold-queue behaviour (DEF-100).
+class WorkspaceSwitchConfig(BaseModel):
+    """Herald's TTS-triggered workspace-switch countdown behaviour.
 
-    The Herald orchestrator originally moved TTS WAVs from inactive workspaces
-    to a hold dir until the user went idle, on the theory that a user focused
-    on workspace A doesn't want to hear a TTS response from workspace B.
+    When a new (non-continuation) TTS message starts, Herald announces (visual
+    alert + sound cue) that it's about to switch the workspace-aware app to
+    match where the message came from, then waits `countdown_secs` before
+    actually switching — giving the user a window to cancel via `cancel_key`
+    without affecting TTS playback, which always starts immediately regardless.
 
-    In practice — especially with parallel Conductor sessions — this silently
-    swallows most TTS messages with no visible feedback. Default is now
-    disabled; users who want the original behaviour can opt in.
+    Replaces the former hold-queue behaviour (DEF-100/094), which hid
+    cross-workspace messages until the user went idle — in practice this
+    silently swallowed most TTS messages with no visible feedback. Making the
+    switch visible and cancelable solves the same problem without hiding
+    anything.
     """
-    # When False (default), every TTS plays immediately regardless of which
-    # workspace it came from. When True, retain the original hold-queue
-    # behaviour (TTS from non-current workspace held until user is idle).
-    enabled: bool = False
+    countdown_secs: float = 2.5
+    # Which key cancels a pending switch. Looked up the same way as
+    # push_to_talk.key — an unrecognized name just disables this feature
+    # rather than failing config load.
+    cancel_key: str = "right_ctrl"
 
 
 class AppProfileConfig(BaseModel):
@@ -680,7 +685,7 @@ class HeyvoxConfig(BaseModel):
     stt: STTConfig = STTConfig()
     vocab_learner: VocabLearnerConfig = VocabLearnerConfig()
     tts: TTSConfig = TTSConfig()
-    hold_queue: HoldQueueConfig = HoldQueueConfig()
+    workspace_switch: WorkspaceSwitchConfig = WorkspaceSwitchConfig()
     push_to_talk: PushToTalkConfig = PushToTalkConfig()
     audio: AudioConfig = AudioConfig()
     echo_suppression: EchoSuppressionConfig = EchoSuppressionConfig()
@@ -736,6 +741,28 @@ class HeyvoxConfig(BaseModel):
                 self.app_profiles.append(AppProfileConfig(**default))
         return self
 
+    @model_validator(mode="after")
+    def warn_ptt_cancel_key_collision(self) -> "HeyvoxConfig":
+        """Warn if push_to_talk.key and workspace_switch.cancel_key are the same.
+
+        Not fatal — ptt.py itself disables the cancel-key branch when this
+        happens (same graceful-degradation contract as an unrecognized key
+        name) — but a silent double-binding would be confusing, so surface it
+        at config-load time too.
+        """
+        if (self.push_to_talk.enabled
+                and self.push_to_talk.key.lower() == self.workspace_switch.cancel_key.lower()):
+            try:
+                print(
+                    f"WARNING: push_to_talk.key and workspace_switch.cancel_key "
+                    f"are both '{self.push_to_talk.key}' — the switch-cancel "
+                    f"binding will be disabled to avoid double-booking the key.",
+                    file=sys.stderr,
+                )
+            except (BrokenPipeError, OSError):
+                pass
+        return self
+
     def get_app_profile(self, app_name: str) -> AppProfileConfig | None:
         """Look up an app profile by name (case-insensitive substring match).
 
@@ -789,6 +816,18 @@ def load_config(config_path: Path | None = None) -> HeyvoxConfig:
             return HeyvoxConfig()
         if raw is None:
             raw = {}
+        if isinstance(raw, dict) and "hold_queue" in raw:
+            try:
+                print(
+                    "WARNING: config key 'hold_queue' is deprecated and has no "
+                    "effect (replaced by 'workspace_switch' — the TTS-triggered "
+                    "workspace switch is now a visible, cancelable countdown "
+                    "instead of a silent hold queue). Remove it from "
+                    f"{path}.",
+                    file=sys.stderr,
+                )
+            except (BrokenPipeError, OSError):
+                pass
         try:
             return HeyvoxConfig(**raw)
         except ValidationError as e:

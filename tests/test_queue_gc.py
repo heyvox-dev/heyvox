@@ -10,15 +10,13 @@ from heyvox.herald.orchestrator import OrchestratorConfig, _gc_queue_dirs
 def _make_cfg(tmp_path) -> OrchestratorConfig:
     """Create an OrchestratorConfig wired to tmp_path subdirectories."""
     queue_dir = tmp_path / "herald-queue"
-    hold_dir = tmp_path / "herald-hold"
     history_dir = tmp_path / "herald-history"
     claim_dir = tmp_path / "herald-claim"
-    for d in (queue_dir, hold_dir, history_dir, claim_dir):
+    for d in (queue_dir, history_dir, claim_dir):
         d.mkdir()
     debug_log = tmp_path / "herald-debug.log"
     return OrchestratorConfig(
         queue_dir=queue_dir,
-        hold_dir=hold_dir,
         history_dir=history_dir,
         claim_dir=claim_dir,
         debug_log=debug_log,
@@ -72,26 +70,6 @@ def test_gc_removes_orphaned_workspace_sidecars(tmp_path):
     removed = _gc_queue_dirs(cfg, cfg.debug_log)
 
     assert not sidecar.exists(), "Orphaned old .workspace sidecar should be removed"
-    assert removed >= 1
-
-
-def test_gc_respects_hold_dir_threshold(tmp_path):
-    """Hold dir files use 4-hour threshold; 2-hour-old file should survive."""
-    cfg = _make_cfg(tmp_path)
-    wav = cfg.hold_dir / "held.wav"
-    wav.write_bytes(b"\x00" * 44)
-    _set_old(wav, 7200)  # 2 hours — within 4-hour hold threshold
-
-    _gc_queue_dirs(cfg, cfg.debug_log)
-
-    assert wav.exists(), "2-hour-old hold-dir file should NOT be removed (threshold is 4h)"
-
-    # Now age it beyond the 4-hour threshold and re-run
-    _set_old(wav, 18000)  # 5 hours old
-    orch_module._last_gc = 0.0  # reset gate for second call
-    removed = _gc_queue_dirs(cfg, cfg.debug_log)
-
-    assert not wav.exists(), "5-hour-old hold-dir file SHOULD be removed"
     assert removed >= 1
 
 

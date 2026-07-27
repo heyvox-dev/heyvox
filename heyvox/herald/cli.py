@@ -37,6 +37,8 @@ def dispatch(args: list[str]) -> int:
         return _cmd_stop()
     elif cmd == "interrupt":
         return _cmd_interrupt()
+    elif cmd == "cancel-switch":
+        return _cmd_cancel_switch()
     elif cmd == "mute":
         return _cmd_mute()
     elif cmd == "status":
@@ -112,10 +114,14 @@ def _cmd_skip() -> int:
 def _mark_stop_requested() -> None:
     """DEF-229: record when the last full stop happened.
 
-    worker.py's early-enqueue watcher compares its own generation start time
-    against this file so it stops adding parts of a message the user already
-    silenced, instead of racing this command's one-shot directory clears
-    below with parts that are still mid-generation in another process.
+    Two independent consumers compare their own timestamp against this file
+    so they don't race this command's one-shot cleanup with something that
+    lands a moment later in another process: worker.py's early-enqueue
+    watcher stops adding parts of a message the user already silenced, and
+    orchestrator.py's queue pickup (DEF-235) drops any already-generated
+    part whose mtime predates this timestamp instead of playing it. Called
+    FIRST in _cmd_stop(), before the kill below, so the timestamp is always
+    fresh by the time the orchestrator's poll loop can possibly react to it.
     """
     from heyvox.constants import HERALD_STOP_TS_FILE
     try:
@@ -125,21 +131,38 @@ def _mark_stop_requested() -> None:
 
 
 def _cmd_stop() -> int:
-    """Kill current afplay and clear entire queue + hold (D-07: Escape behavior).
+    """Kill current afplay and clear the queue (D-07: Escape behavior).
 
     Clears TTS state immediately so echo suppression doesn't stay muted.
-
-    DEF-229: previously only cleared HERALD_QUEUE_DIR. The hold directory
-    (parts held because the user was active in a different workspace, see
-    HERALD_HOLD_DIR) was never touched, so a multi-part held message kept
-    auto-draining one part per Escape press instead of stopping outright.
+    Also cancels any pending workspace-switch countdown (see
+    _run_switch_countdown in orchestrator.py) — stopping TTS but still
+    switching workspaces a couple seconds later with no audio context left
+    would be confusing.
     """
-    from heyvox.constants import HERALD_HOLD_DIR
+    _mark_stop_requested()
     _kill_afplay()
     _clear_tts_state()
     _cmd_skip()
-    _clear_dir(HERALD_HOLD_DIR)
-    _mark_stop_requested()
+    _write_cancel_switch_flag()
+    return 0
+
+
+def _write_cancel_switch_flag() -> None:
+    """Write the switch-cancel flag with a timestamp.
+
+    Shared by _cmd_cancel_switch() (the Right-Ctrl key's target) and
+    _cmd_stop() (Escape during TTS also cancels any pending switch).
+    """
+    from heyvox.constants import HERALD_CANCEL_SWITCH_FLAG
+    try:
+        Path(HERALD_CANCEL_SWITCH_FLAG).write_text(str(time.time()))
+    except OSError:
+        pass
+
+
+def _cmd_cancel_switch() -> int:
+    """Cancel a pending workspace-switch countdown."""
+    _write_cancel_switch_flag()
     return 0
 
 
@@ -202,7 +225,7 @@ def _cmd_mute() -> int:
 
 def _cmd_status() -> int:
     """Print Herald status."""
-    from heyvox.constants import HERALD_ORCH_PID, HERALD_QUEUE_DIR, HERALD_HOLD_DIR, HERALD_MUTE_FLAG, HERALD_PAUSE_FLAG
+    from heyvox.constants import HERALD_ORCH_PID, HERALD_QUEUE_DIR, HERALD_MUTE_FLAG, HERALD_PAUSE_FLAG
     orch_running = False
     if os.path.exists(HERALD_ORCH_PID):
         try:
@@ -212,10 +235,8 @@ def _cmd_status() -> int:
         except (OSError, ValueError):
             pass
     queue_count = len([f for f in os.listdir(HERALD_QUEUE_DIR) if f.endswith(".wav")]) if os.path.isdir(HERALD_QUEUE_DIR) else 0
-    hold_count = len([f for f in os.listdir(HERALD_HOLD_DIR) if f.endswith(".wav")]) if os.path.isdir(HERALD_HOLD_DIR) else 0
     print(f"orchestrator: {'running' if orch_running else 'stopped'}")
     print(f"queue: {queue_count} WAVs")
-    print(f"held: {hold_count} WAVs")
     print(f"muted: {os.path.exists(HERALD_MUTE_FLAG)}")
     print(f"paused: {os.path.exists(HERALD_PAUSE_FLAG)}")
     return 0

@@ -30,6 +30,7 @@ from heyvox.herald.orchestrator import (
     _herald_log,
     _get_verbosity,
     _is_skip,
+    _generated_before_last_stop,
     _user_is_active,
     _violation_check,
     _media_pause,
@@ -68,7 +69,6 @@ def _cfg(tmp_path: Path, **kwargs) -> OrchestratorConfig:
     """Return an OrchestratorConfig wired to tmp_path for isolation."""
     return OrchestratorConfig(
         queue_dir=tmp_path / "herald-queue",
-        hold_dir=tmp_path / "herald-hold",
         history_dir=tmp_path / "herald-history",
         claim_dir=tmp_path / "herald-claim",
         debug_log=tmp_path / "herald-debug.log",
@@ -79,8 +79,10 @@ def _cfg(tmp_path: Path, **kwargs) -> OrchestratorConfig:
         pause_flag=tmp_path / "herald-pause",
         mute_flag=tmp_path / "herald-mute",
         recording_flag=tmp_path / "heyvox-recording",
-        play_next_flag=tmp_path / "herald-play-next",
+        pending_switch_file=tmp_path / "herald-pending-switch",
+        cancel_switch_flag=tmp_path / "herald-cancel-switch",
         last_play_file=tmp_path / "herald-last-play",
+        stop_ts_file=tmp_path / "herald-stop.ts",
         verbosity_file=tmp_path / "heyvox-verbosity",
         **kwargs,
     )
@@ -96,13 +98,14 @@ class TestOrchestratorConfig:
         """All directory/file fields should be Path instances."""
         cfg = OrchestratorConfig()
         assert isinstance(cfg.queue_dir, Path)
-        assert isinstance(cfg.hold_dir, Path)
         assert isinstance(cfg.history_dir, Path)
         assert isinstance(cfg.claim_dir, Path)
         assert isinstance(cfg.pause_flag, Path)
         assert isinstance(cfg.recording_flag, Path)
         assert isinstance(cfg.orch_pid_file, Path)
         assert isinstance(cfg.original_vol_file, Path)
+        assert isinstance(cfg.pending_switch_file, Path)
+        assert isinstance(cfg.cancel_switch_flag, Path)
 
     def test_default_poll_interval(self):
         cfg = OrchestratorConfig()
@@ -113,9 +116,10 @@ class TestOrchestratorConfig:
         assert cfg.duck_level == pytest.approx(0.03)
         assert cfg.duck_enabled is True
 
-    def test_default_max_held(self):
+    def test_default_switch_countdown_secs(self):
         cfg = OrchestratorConfig()
-        assert cfg.max_held == 5
+        assert cfg.switch_countdown_secs == pytest.approx(2.5)
+        assert cfg.switch_cancel_key == "right_ctrl"
 
     def test_default_history_cap(self):
         cfg = OrchestratorConfig()
@@ -403,6 +407,52 @@ class TestVerbosity:
 
 
 # ---------------------------------------------------------------------------
+# _generated_before_last_stop tests (DEF-235)
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratedBeforeLastStop:
+    """DEF-235: compares a WAV's mtime against HERALD_STOP_TS_FILE to detect
+    a part that was queued before the last Escape/full-stop landed — closes
+    the race where the orchestrator's poll loop picks up an already-generated
+    part before heyvox.herald.cli._cmd_stop()'s own directory clear lands."""
+
+    def test_no_stop_file_returns_false(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        wav = tmp_path / "0001.wav"
+        wav.touch()
+        assert _generated_before_last_stop(wav, cfg) is False
+
+    def test_wav_older_than_stop_returns_true(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        wav = tmp_path / "0001.wav"
+        wav.touch()
+        old_time = time.time() - 10
+        os.utime(wav, (old_time, old_time))
+        cfg.stop_ts_file.write_text(str(time.time()))
+        assert _generated_before_last_stop(wav, cfg) is True
+
+    def test_wav_newer_than_stop_returns_false(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg.stop_ts_file.write_text(str(time.time() - 10))
+        wav = tmp_path / "0001.wav"
+        wav.touch()  # mtime = now, after the stop timestamp
+        assert _generated_before_last_stop(wav, cfg) is False
+
+    def test_corrupt_stop_file_returns_false(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg.stop_ts_file.write_text("not-a-timestamp")
+        wav = tmp_path / "0001.wav"
+        wav.touch()
+        assert _generated_before_last_stop(wav, cfg) is False
+
+    def test_missing_wav_returns_false(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg.stop_ts_file.write_text(str(time.time()))
+        assert _generated_before_last_stop(tmp_path / "gone.wav", cfg) is False
+
+
+# ---------------------------------------------------------------------------
 # _user_is_active tests
 # ---------------------------------------------------------------------------
 
@@ -529,7 +579,6 @@ class TestHeraldOrchestratorLifecycle:
         cfg = _cfg(tmp_path, poll_interval=0.05)
         # Create directories
         cfg.queue_dir.mkdir(parents=True)
-        cfg.hold_dir.mkdir(parents=True)
         cfg.history_dir.mkdir(parents=True)
         cfg.claim_dir.mkdir(parents=True)
 
@@ -559,7 +608,7 @@ class TestHeraldOrchestratorLifecycle:
         orch.stop()  # should not raise
 
     def test_run_creates_directories(self, tmp_path):
-        """run() should create queue/hold/history/claim dirs if missing."""
+        """run() should create queue/history/claim dirs if missing."""
         cfg = _cfg(tmp_path, poll_interval=0.05)
         orch = HeraldOrchestrator(config=cfg)
 
@@ -575,7 +624,6 @@ class TestHeraldOrchestratorLifecycle:
         t.join(timeout=2.0)
 
         assert cfg.queue_dir.exists()
-        assert cfg.hold_dir.exists()
         assert cfg.history_dir.exists()
         assert cfg.claim_dir.exists()
 
@@ -614,7 +662,6 @@ class TestHeraldOrchestratorLifecycle:
         """WAV files should be deleted when muted, not played."""
         cfg = _cfg(tmp_path, poll_interval=0.05, media_pause=False, duck_enabled=False)
         cfg.queue_dir.mkdir(parents=True)
-        cfg.hold_dir.mkdir(parents=True)
         cfg.history_dir.mkdir(parents=True)
         cfg.claim_dir.mkdir(parents=True)
         cfg.mute_flag.touch()
@@ -643,7 +690,6 @@ class TestHeraldOrchestratorLifecycle:
         """WAV files should be deleted when verbosity=skip."""
         cfg = _cfg(tmp_path, poll_interval=0.05, media_pause=False, duck_enabled=False)
         cfg.queue_dir.mkdir(parents=True)
-        cfg.hold_dir.mkdir(parents=True)
         cfg.history_dir.mkdir(parents=True)
         cfg.claim_dir.mkdir(parents=True)
         cfg.verbosity_file.write_text("skip")
@@ -659,6 +705,37 @@ class TestHeraldOrchestratorLifecycle:
         t.join(timeout=2.0)
 
         assert not wav.exists(), "WAV should be deleted when verbosity=skip"
+
+    @patch("heyvox.herald.orchestrator.subprocess.Popen")
+    def test_stale_wav_from_before_last_stop_deleted_not_played(self, mock_popen, tmp_path):
+        """DEF-235: a part queued before the last Escape/stop must be dropped,
+        not played — reproduces the "second Escape press needed" bug where
+        an already-generated next part slipped past _cmd_stop()'s queue
+        clear because the orchestrator's poll picked it up first."""
+        cfg = _cfg(tmp_path, poll_interval=0.05, media_pause=False, duck_enabled=False)
+        cfg.queue_dir.mkdir(parents=True)
+        cfg.history_dir.mkdir(parents=True)
+        cfg.claim_dir.mkdir(parents=True)
+
+        wav = cfg.queue_dir / "20260101-120000-0002.wav"
+        _make_wav(wav)
+        old_time = time.time() - 10
+        os.utime(wav, (old_time, old_time))
+        cfg.stop_ts_file.write_text(str(time.time()))  # stop landed AFTER the wav was written
+
+        orch = HeraldOrchestrator(config=cfg)
+        t = threading.Thread(target=orch.run, daemon=True)
+        t.start()
+        time.sleep(0.3)
+        orch.stop()
+        t.join(timeout=2.0)
+
+        for call in mock_popen.call_args_list:
+            args = call[0][0] if call[0] else call[1].get("args", [])
+            if isinstance(args, list):
+                assert "afplay" not in args, "afplay should not be called for a stale pre-stop part"
+
+        assert not wav.exists(), "Stale WAV (queued before last stop) should be deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -840,3 +917,168 @@ def test_afplay_ceiling_corrupt_file_falls_back_to_cap(tmp_path):
     bad = tmp_path / "bad.wav"
     bad.write_bytes(b"not a wav at all")
     assert _afplay_ceiling(bad) == 300.0
+
+
+# ---------------------------------------------------------------------------
+# Workspace-switch countdown — replaces the former hold-queue/idle-gate.
+# ---------------------------------------------------------------------------
+
+
+class TestSwitchWorkspaceForce:
+    def test_default_passes_force(self, tmp_path):
+        """_switch_workspace defaults to force=True — the countdown IS consent now."""
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = _cfg(tmp_path, workspace_switch_cmd=str(tmp_path / "switch.sh"))
+        (tmp_path / "switch.sh").write_text("#!/bin/sh\n")
+        (tmp_path / "switch.sh").chmod(0o755)
+        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            _switch_workspace("some-workspace", cfg)
+        argv = mock_run.call_args[0][0]
+        assert "--force" in argv
+
+    def test_force_false_omits_flag(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = _cfg(tmp_path, workspace_switch_cmd=str(tmp_path / "switch.sh"))
+        (tmp_path / "switch.sh").write_text("#!/bin/sh\n")
+        (tmp_path / "switch.sh").chmod(0o755)
+        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            _switch_workspace("some-workspace", cfg, force=False)
+        argv = mock_run.call_args[0][0]
+        assert "--force" not in argv
+
+
+class TestRunSwitchCountdown:
+    """_run_switch_countdown: announce, wait, cancel-or-fire. Uses a short
+    switch_countdown_secs/poll_interval so tests run fast."""
+
+    def _cfg_fast(self, tmp_path, **kwargs):
+        defaults = dict(
+            workspace_switch_cmd=str(tmp_path / "switch.sh"),
+            workspace_app_name="Conductor",
+            switch_countdown_secs=0.15,
+            poll_interval=0.02,
+        )
+        defaults.update(kwargs)
+        return _cfg(tmp_path, **defaults)
+
+    @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
+    @patch("heyvox.herald.orchestrator._switch_workspace")
+    @patch("heyvox.herald.orchestrator._play_switch_pending_cue")
+    @patch("heyvox.herald.orchestrator._show_alert")
+    def test_fires_switch_when_uncancelled(
+        self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path
+    ):
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        cfg = self._cfg_fast(tmp_path)
+        stop_event = threading.Event()
+
+        _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
+
+        mock_switch.assert_called_once_with("some-workspace", cfg, force=True)
+        assert mock_alert.called
+        assert not cfg.pending_switch_file.exists()
+        assert not cfg.cancel_switch_flag.exists()
+
+    @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
+    @patch("heyvox.herald.orchestrator._switch_workspace")
+    @patch("heyvox.herald.orchestrator._play_switch_pending_cue")
+    @patch("heyvox.herald.orchestrator._show_alert")
+    def test_cancel_flag_prevents_switch(
+        self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path
+    ):
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        cfg = self._cfg_fast(tmp_path)
+        stop_event = threading.Event()
+
+        def _cancel_soon():
+            time.sleep(0.03)
+            cfg.cancel_switch_flag.write_text(str(time.time()))
+
+        canceller = threading.Thread(target=_cancel_soon, daemon=True)
+        canceller.start()
+        _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
+        canceller.join(timeout=1.0)
+
+        mock_switch.assert_not_called()
+        assert not cfg.pending_switch_file.exists()
+        assert not cfg.cancel_switch_flag.exists()
+
+    @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
+    @patch("heyvox.herald.orchestrator._switch_workspace")
+    @patch("heyvox.herald.orchestrator._play_switch_pending_cue")
+    @patch("heyvox.herald.orchestrator._show_alert")
+    def test_stale_cancel_flag_is_ignored(
+        self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path
+    ):
+        """A cancel flag timestamped BEFORE this window started must not
+        poltergeist-cancel it (defends the back-to-back-messages race)."""
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        cfg = self._cfg_fast(tmp_path)
+        cfg.cancel_switch_flag.write_text(str(time.time() - 10))  # stale, pre-dates window
+        stop_event = threading.Event()
+
+        _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
+
+        mock_switch.assert_called_once_with("some-workspace", cfg, force=True)
+
+    @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
+    @patch("heyvox.herald.orchestrator._switch_workspace")
+    @patch("heyvox.herald.orchestrator._play_switch_pending_cue")
+    @patch("heyvox.herald.orchestrator._show_alert")
+    def test_superseded_by_stop_event_never_switches(
+        self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path
+    ):
+        """Setting stop_event (a newer message's countdown started) aborts
+        this thread without switching, even past the deadline."""
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        cfg = self._cfg_fast(tmp_path)
+        stop_event = threading.Event()
+        stop_event.set()  # already superseded before the loop even starts
+
+        _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
+
+        mock_switch.assert_not_called()
+
+    @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
+    @patch("heyvox.herald.orchestrator._switch_workspace")
+    @patch("heyvox.herald.orchestrator._play_switch_pending_cue")
+    @patch("heyvox.herald.orchestrator._show_alert")
+    def test_recording_flag_at_deadline_skips_switch(
+        self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path, monkeypatch
+    ):
+        """RECORDING_FLAG appearing during the countdown skips the switch at
+        expiry (DEF-070) — the async design turns the old tiny race window
+        into a multi-second one, so this recheck is load-bearing."""
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        cfg = self._cfg_fast(tmp_path)
+        recording_flag = tmp_path / "heyvox-recording"
+        monkeypatch.setattr("heyvox.herald.orchestrator.RECORDING_FLAG", str(recording_flag))
+        recording_flag.touch()
+        stop_event = threading.Event()
+
+        _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
+
+        mock_switch.assert_not_called()
+
+    @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
+    @patch("heyvox.herald.orchestrator._switch_workspace")
+    @patch("heyvox.herald.orchestrator._play_switch_pending_cue")
+    @patch("heyvox.herald.orchestrator._show_alert")
+    def test_writes_and_clears_pending_switch_file(
+        self, mock_alert, mock_cue, mock_switch, mock_frontmost, tmp_path
+    ):
+        from heyvox.herald.orchestrator import _run_switch_countdown
+        cfg = self._cfg_fast(tmp_path, switch_countdown_secs=0.3)
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=_run_switch_countdown,
+            args=("some-workspace", cfg, cfg.debug_log, stop_event),
+            daemon=True,
+        )
+        t.start()
+        time.sleep(0.1)
+        assert cfg.pending_switch_file.exists(), "marker should exist mid-countdown"
+        t.join(timeout=1.0)
+        assert not cfg.pending_switch_file.exists(), "marker should be cleared after resolution"
