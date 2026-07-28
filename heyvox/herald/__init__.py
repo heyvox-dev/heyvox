@@ -32,22 +32,13 @@ def start_orchestrator() -> None:
 
     Loads the app profile config to configure workspace switching.
     """
-    from pathlib import Path as _Path
     from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
-
-    # DEF-092 hybrid C: lower bash idle gate from 5s to 2s, paired with
-    # --force removal in _switch_workspace and the post-Sent flag grace
-    # in recording.py. Brief listening pauses no longer false-skip;
-    # real typing/clicking (sub-2s idle) still gates the switch.
-    try:
-        _Path("/tmp/herald-switch-idle-threshold").write_text("2\n")
-    except OSError:
-        pass
 
     ws_switch_cmd = ""
     ws_app_name = ""
-    hold_queue_enabled = False
     tts_min_volume: float | None = None
+    switch_countdown_secs: float | None = None
+    switch_cancel_key: str | None = None
     try:
         from heyvox.config import load_config
         cfg = load_config()
@@ -56,17 +47,21 @@ def start_orchestrator() -> None:
                 ws_switch_cmd = profile.workspace_switch_cmd
                 ws_app_name = profile.name
                 break
-        hold_queue_enabled = bool(cfg.hold_queue.enabled)
         tts_min_volume = float(cfg.tts.min_volume)
+        switch_countdown_secs = float(cfg.workspace_switch.countdown_secs)
+        switch_cancel_key = cfg.workspace_switch.cancel_key
     except Exception:
         pass
     orch_kwargs = dict(
         workspace_switch_cmd=ws_switch_cmd,
         workspace_app_name=ws_app_name,
-        hold_queue_enabled=hold_queue_enabled,
     )
     if tts_min_volume is not None:
         orch_kwargs["tts_min_volume"] = tts_min_volume
+    if switch_countdown_secs is not None:
+        orch_kwargs["switch_countdown_secs"] = switch_countdown_secs
+    if switch_cancel_key is not None:
+        orch_kwargs["switch_cancel_key"] = switch_cancel_key
     orch_cfg = OrchestratorConfig(**orch_kwargs)
     orch = HeraldOrchestrator(config=orch_cfg)
     orch.run()

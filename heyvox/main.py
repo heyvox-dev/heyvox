@@ -48,6 +48,7 @@ from heyvox.constants import (
     HERALD_WORKSPACE_FILE,
     HERALD_GENERATING_WAV_PREFIX,
     HERALD_PLAYING_PID,
+    HERALD_PENDING_SWITCH_FLAG,
     VERBOSITY_FILE,
     ensure_run_dirs,
     cleanup_ipc_files,
@@ -570,6 +571,13 @@ def _stop_tts_from_escape(hud_send_fn) -> None:
     log("TTS stopped via Escape key.")
 
 
+def _cancel_pending_switch() -> None:
+    """Cancel a pending Herald workspace-switch countdown (cancel key handler)."""
+    from heyvox.audio.tts import cancel_pending_switch
+    cancel_pending_switch()
+    log("Pending workspace switch cancelled.")
+
+
 # ---------------------------------------------------------------------------
 # Setup phase (D-05)
 # ---------------------------------------------------------------------------
@@ -852,17 +860,20 @@ def _setup(config: HeyvoxConfig):
             "on_cancel_transcription": lambda: ctx.cancel_transcription.set(),
             "on_cancel_recording": lambda: recording.cancel(),
             "on_cancel_tts": lambda: _stop_tts_from_escape(hud_send),
+            "on_cancel_switch": _cancel_pending_switch,
             "is_busy": lambda: ctx.busy,
             "is_recording": lambda: ctx.is_recording,
             "is_speaking": lambda: (
                 os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
             ),
+            "is_switch_pending": lambda: os.path.exists(HERALD_PENDING_SWITCH_FLAG),
         }
         start_ptt_listener(
             config.push_to_talk.key, ptt_callbacks, log_fn=log,
             double_tap=config.push_to_talk.double_tap_handsfree,
             tap_max_secs=config.push_to_talk.tap_max_secs,
             double_tap_secs=config.push_to_talk.double_tap_secs,
+            cancel_key=config.workspace_switch.cancel_key,
         )
 
     # Load wake word models

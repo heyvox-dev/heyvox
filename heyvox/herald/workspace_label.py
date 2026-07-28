@@ -24,6 +24,7 @@ so callers can do ``if label:`` to gate prepending.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -256,3 +257,72 @@ def reset_cache() -> None:
     """Drop the cached DB path. Used by tests; not part of the runtime API."""
     global _cached_db_path
     _cached_db_path = None
+
+
+# ---------------------------------------------------------------------------
+# Workspace/session identity for the .workspace switch sidecar (DEF-237)
+# ---------------------------------------------------------------------------
+
+
+def resolve_workspace_id(directory_name: str, cfg: "HeyvoxConfig | None" = None) -> str:
+    """Resolve the Conductor workspace UUID for a directory_name.
+
+    Reuses the same DB the label lookup above already reads. Returns "" on
+    any failure (no DB configured, no match, locked DB) — callers fall back
+    to the plain positional switch, the same fail-soft contract
+    get_active_workspace_and_session already documents.
+    """
+    if not directory_name:
+        return ""
+    db_path = _get_workspace_db_path(cfg)
+    if not db_path:
+        return ""
+    try:
+        from heyvox.adapters.conductor import get_active_workspace_and_session
+        identity = get_active_workspace_and_session(directory_name=directory_name, db_path=db_path)
+    except Exception:
+        return ""
+    return identity.workspace_id if identity else ""
+
+
+def write_switch_sidecar(wav_path: str, workspace: str, workspace_id: str = "", session_id: str = "") -> None:
+    """Write the .workspace sidecar that tells the orchestrator what to switch to.
+
+    JSON so workspace_id/session_id can ride along with the label — the
+    orchestrator forwards them to conductor-switch-workspace's --id/--session
+    flags instead of the fuzzy positional-label search (DEF-237). Both are
+    best-effort: empty string when resolution failed, and the orchestrator
+    falls back to the old positional-label switch in that case.
+    """
+    if not workspace:
+        return
+    sidecar = wav_path.replace(".wav", ".workspace")
+    try:
+        with open(sidecar, "w") as f:
+            json.dump(
+                {"workspace": workspace, "workspace_id": workspace_id, "session_id": session_id}, f,
+            )
+    except OSError as exc:
+        log.debug("write_switch_sidecar: failed to write %s: %s", sidecar, exc)
+
+
+def read_switch_sidecar(text: str) -> dict:
+    """Parse .workspace sidecar content.
+
+    Accepts the current JSON format and falls back to treating the whole
+    string as a plain label — the format every sidecar used before DEF-237,
+    so any sidecar an old worker.py/watcher.py process left in flight across
+    a deploy still switches the workspace (just without --session).
+    """
+    text = text.strip()
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            return {
+                "workspace": data.get("workspace", ""),
+                "workspace_id": data.get("workspace_id", ""),
+                "session_id": data.get("session_id", ""),
+            }
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return {"workspace": text, "workspace_id": "", "session_id": ""}

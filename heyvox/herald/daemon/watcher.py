@@ -132,9 +132,19 @@ def detect_workspace_from_path(jsonl_path):
 
 
 def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
-                    workspace="", hook_epoch_ms=0):
+                    workspace="", hook_epoch_ms=0, session_id=""):
     """Send speech text to Kokoro daemon and enqueue result."""
     global last_tts_time
+
+    # DEF-237: resolve once per message (all parts below share it), not once
+    # per part — same DB round-trip either way for one send_to_kokoro call.
+    workspace_id = ""
+    if workspace:
+        try:
+            from heyvox.herald.workspace_label import resolve_workspace_id
+            workspace_id = resolve_workspace_id(workspace)
+        except Exception:
+            pass
 
     # Apply verbosity filtering before synthesis
     verbosity = _get_verbosity()
@@ -212,8 +222,8 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
         wav_name = f"{timestamp}-01.wav"
         os.rename(temp_wav, f"{QUEUE_DIR}/{wav_name}")
         if workspace:
-            with open(f"{QUEUE_DIR}/{wav_name.replace('.wav', '.workspace')}", "w") as f:
-                f.write(workspace)
+            from heyvox.herald.workspace_label import write_switch_sidecar
+            write_switch_sidecar(f"{QUEUE_DIR}/{wav_name}", workspace, workspace_id, session_id)
         # Write timing sidecar
         timing_str = f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{tts_end_ms}"
         with open(f"{QUEUE_DIR}/{wav_name.replace('.wav', '.timing')}", "w") as f:
@@ -225,8 +235,8 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             part_name = f"{timestamp}-{part:02d}.wav"
             os.rename(f"{base}.part{part}.wav", f"{QUEUE_DIR}/{part_name}")
             if workspace:
-                with open(f"{QUEUE_DIR}/{part_name.replace('.wav', '.workspace')}", "w") as f:
-                    f.write(workspace)
+                from heyvox.herald.workspace_label import write_switch_sidecar
+                write_switch_sidecar(f"{QUEUE_DIR}/{part_name}", workspace, workspace_id, session_id)
             part_ms = int(time.time() * 1000)
             with open(f"{QUEUE_DIR}/{part_name.replace('.wav', '.timing')}", "w") as f:
                 f.write(f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{part_ms}")
@@ -290,6 +300,10 @@ def process_new_lines(filepath):
             file_positions[filepath] = f.tell()
 
         workspace = detect_workspace_from_path(filepath)
+        # DEF-237: Claude Code names transcripts <session-id>.jsonl, so the
+        # session that produced this line is the filename stem — no DB
+        # lookup needed, unlike workspace_id.
+        session_id = os.path.splitext(os.path.basename(filepath))[0]
 
         for line in new_data.strip().split("\n"):
             if not line.strip():
@@ -331,7 +345,7 @@ def process_new_lines(filepath):
                     except Exception as _e:
                         log(f"DEF-078: register_tts_text failed: {_e}")
                     ok = send_to_kokoro(speech, workspace=workspace,
-                                        hook_epoch_ms=detect_ms)
+                                        hook_epoch_ms=detect_ms, session_id=session_id)
                     if not ok:
                         try:
                             os.unlink(claim_file)
