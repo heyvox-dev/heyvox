@@ -5,7 +5,7 @@
 - owner: Franz Felberer (Personal)
 - context: Personal product, not just internal tooling — MIT-licensed OSS core (`heyvox` on PyPI, `heyvox-dev` GitHub org, heyvox.dev site) plus a paid Pro tier per the maintainer's own framing; pricing/business docs are deliberately kept untracked (DEF-185) while CLAUDE.md and .planning/ stay public. Run as a full GSD project (.planning/ROADMAP.md, MILESTONES.md, STATE.md, DEFECT-LOG.md).
 - tech: Python 3.12+, Bash; PyObjC (AppKit/Quartz) for HUD/menu bar; openwakeword (wake word), MLX Whisper + sherpa-onnx (local STT), Kokoro/mlx-audio (local TTS); MCP Python SDK; pyaudio/sounddevice (audio I/O); launchd (background services); Chrome Manifest V3 extension (Hush, vanilla JS); pytest, ruff; GitHub Actions CI; setuptools packaging published to PyPI.
-- current_focus: Post-v1.1.0-launch stabilization (liveness watchdog DEF-213, audio-transport caching DEF-217, HUD overlay desync fix DEF-215; branch heyvox/release-1.1.1, version bumped to 1.1.2) alongside the v1.2 "Paste Injection Reliability" milestone, Phase 16 (STT auto-glossary, wake-word latency, audio cues/sounddevice).
+- current_focus: Post-v1.2.1-launch stabilization (2026-07-28: workspace-switch resolution hardening DEF-242/244/245/248, dependency version ceilings DEF-246/247; branch heyvox/release-1.2.0, v1.2.1 released to PyPI) alongside the v1.2 "Paste Injection Reliability" milestone, Phase 16 (STT auto-glossary, wake-word latency, audio cues/sounddevice).
 - keywords: heyvox, vox, voice, wake word, hey vox, STT, TTS, speech-to-text, text-to-speech, MCP, HUD, herald, hush, push-to-talk, media control, openwakeword, MLX Whisper, sherpa-onnx, Kokoro, launchd, Chrome extension, microphone, recording indicator
 - workflow_mode: gsd-quick
 - model: sonnet
@@ -145,7 +145,8 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 - [ ] Pause/resume recording (Escape pauses, second press resumes) — cancel works, pause/resume state machine not built
 - [ ] Evaluate Cohere Transcribe as alternative STT (v2)
 - [ ] TTS server on Mac Mini (v2) — no remote TTS code yet
-- [ ] Evaluate ripping out the Bluetooth mic-selection machinery entirely (A2DP→HFP wait/trigger, BT gain-boost, BT cooldown tiers in device_manager.py/mic.py/bt.py) now that a single pinned USB/wired default + built-in fallback is the model (2026-07-16) — currently left in place (dormant, not on the selection path) rather than deleted; revisit once the simplified model has run for a while
+- [ ] Evaluate ripping out the Bluetooth mic-selection machinery entirely (A2DP→HFP wait/trigger, BT gain-boost, BT cooldown tiers in device_manager.py/mic.py/bt.py) now that a single pinned USB/wired default + built-in fallback is the model (2026-07-16) — currently left in place (dormant, not on the selection path) rather than deleted; revisit once the simplified model has run for a while. Reconsidered 2026-07-28 after DEF-243 (transport-blind BT pop-suppression mute) surfaced in this same code — still deferred; wants a dedicated session, not a reactive tack-on to a bug fix.
+- [ ] Diagnose the G435 CoreAudio-level fault seen 2026-07-28 during DEF-243 (`AudioUnit Invalid Property Value -10851`, `Stream closed -9988` on every manual pin attempt) — self-resolved without a fix, root cause unknown, confirmed NOT the known stale-PortAudio-handle bug (DEF-153). Revisit if it recurs.
 
 ## Done (previously pending)
 - [x] Generic app switching / de-hardcoded Conductor (2026-07-23) — WorkspaceProvider protocol + registry, generic TargetLock workspace_id/session_id, per-app ax_value_paste flag; Herald was already profile-driven
@@ -155,6 +156,8 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 - [x] Landing page on heyvox.dev — docs/index.html + CNAME, served via GitHub Pages
 - [x] GitHub repo under heyvox org — heyvox-dev/heyvox.git remote configured
 - [x] Hold queue cap enforcement — max_queued=10, _enforce_queue_cap() in orchestrator.py
+- [x] Workspace-switch resolution hardening (2026-07-28) — DEF-242 (workspace_name-slug match, not just directory codename), DEF-244 (cwd fallback via workspace_path when neither name form matches), DEF-245 (caller's own session_id from CONDUCTOR_SESSION_ID always wins over Conductor's active_session_id bookkeeping), DEF-248 (cwd fallback extended to the watcher.py JSONL-tailing trigger path, not just the primary hook path); shipped as v1.2.1 (PR #37)
+- [x] Dependency version ceilings (2026-07-28) — DEF-246 (mcp capped to <2.0 after an unbounded floor let a same-day upstream 2.0.0 release break CI) + DEF-247 (every other pyproject.toml dependency, runtime and dev, capped one major version above its currently-installed/tested version)
 
 ## Defect Log Protocol
 
