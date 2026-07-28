@@ -519,8 +519,15 @@ def probe_device_level(
     # do not receive a volume=0 HFP command (which the G435 and similar
     # headsets remember and later re-report, causing macOS to reset the
     # system volume to 0).
+    # DEF-243: skip entirely for confirmed-USB transport — there is no A2DP/HFP
+    # profile switch on USB, so the mute has no artifact to hide. Without this,
+    # a persistently-silent USB mic (dead battery, held mute button, dongle
+    # drop) gets probed on every scan retry forever (DEF-208's USB tiers cap
+    # cooldown at 60s, never demoting further) and mutes system output each
+    # time — audible as a recurring playback interruption. Unknown transport
+    # still mutes (conservative default, matches DEF-217).
     _probe_was_muted = None
-    if not is_builtin_mic(name):
+    if not is_builtin_mic(name) and not is_usb_transport(name):
         try:
             from heyvox.herald.coreaudio import is_system_muted, set_system_muted
             _probe_was_muted = is_system_muted()
