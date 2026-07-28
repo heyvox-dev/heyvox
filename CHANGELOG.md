@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The TTS-triggered workspace-switch working-directory fallback (DEF-244)
+  now also covers the secondary, JSONL-tailing trigger path — previously
+  only the primary hook-driven path had it (DEF-248).
+
+### Changed
+
+- Every dependency in `pyproject.toml` now has an upper version bound,
+  capped one major version above whatever is currently installed and
+  tested — an unbounded floor is what let `mcp` 2.0.0 silently break
+  installs in DEF-246; the rest of the dependency list had the same gap
+  (DEF-247).
+
 ## [1.2.1] - 2026-07-28
 
 ### Fixed

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -132,15 +133,19 @@ class TestProcessNewLinesSessionId:
         jsonl_path.write_text(json.dumps(message) + "\n")
 
         monkeypatch.setattr(watcher, "file_positions", {})
-        monkeypatch.setattr(watcher, "detect_workspace_from_path", lambda p: "seattle")
+        monkeypatch.setattr(
+            watcher, "detect_workspace_from_path",
+            lambda p: ("seattle", "/ws/vox-v2/seattle"),
+        )
         # Never let this test touch Franz's real, shared herald-claim dir.
         monkeypatch.setattr(watcher, "CLAIM_DIR", str(tmp_path / "claim"))
 
         captured = {}
 
-        def _fake_send(speech, workspace="", hook_epoch_ms=0, session_id=""):
+        def _fake_send(speech, workspace="", hook_epoch_ms=0, session_id="", cwd=""):
             captured["session_id"] = session_id
             captured["workspace"] = workspace
+            captured["cwd"] = cwd
             return True
 
         with patch.object(watcher, "send_to_kokoro", side_effect=_fake_send), \
@@ -149,3 +154,59 @@ class TestProcessNewLinesSessionId:
 
         assert captured["session_id"] == "c02c05c3-cf55-458a-978d-76fb8842c81a"
         assert captured["workspace"] == "seattle"
+        # DEF-248: cwd (the second element detect_workspace_from_path now
+        # returns) must actually reach send_to_kokoro, not just workspace.
+        assert captured["cwd"] == "/ws/vox-v2/seattle"
+
+
+class TestDetectWorkspaceFromPath:
+    """DEF-248: detect_workspace_from_path now returns (workspace, cwd) —
+    cwd is the matched row's own workspace_path, not a reconstruction of the
+    escaped path (ambiguous whenever the real path contains a literal '-')."""
+
+    def _build_fixture_db(self, path, rows):
+        """rows = [(directory_name, workspace_path), ...]"""
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE workspaces (directory_name TEXT, workspace_path TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO workspaces (directory_name, workspace_path) VALUES (?,?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
+    def test_matches_workspace_and_returns_its_cwd(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "c.db")
+        self._build_fixture_db(
+            db_path,
+            [("seattle", "/Users/work/conductor/workspaces/vox-v2/seattle")],
+        )
+        monkeypatch.setattr(watcher, "_cached_ws_db_path", db_path)
+
+        jsonl_path = (
+            "/Users/work/.claude/projects/"
+            "-Users-work-conductor-workspaces-vox-v2-seattle/session123.jsonl"
+        )
+        result = watcher.detect_workspace_from_path(jsonl_path)
+
+        assert result == ("seattle", "/Users/work/conductor/workspaces/vox-v2/seattle")
+
+    def test_no_matching_workspace_returns_empty_tuple(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "c.db")
+        self._build_fixture_db(
+            db_path,
+            [("dakar", "/Users/work/conductor/workspaces/invoice-match-mcp/dakar")],
+        )
+        monkeypatch.setattr(watcher, "_cached_ws_db_path", db_path)
+
+        jsonl_path = (
+            "/Users/work/.claude/projects/"
+            "-Users-work-conductor-workspaces-vox-v2-seattle/session123.jsonl"
+        )
+        assert watcher.detect_workspace_from_path(jsonl_path) == ("", "")
+
+    def test_no_db_path_returns_empty_tuple(self, monkeypatch):
+        monkeypatch.setattr(watcher, "_cached_ws_db_path", "")
+        assert watcher.detect_workspace_from_path("/anything.jsonl") == ("", "")

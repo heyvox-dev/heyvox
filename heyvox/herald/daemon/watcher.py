@@ -96,15 +96,24 @@ def _get_workspace_db_path():
 
 
 def detect_workspace_from_path(jsonl_path):
-    """Extract workspace name from the JSONL path.
+    """Extract workspace name AND cwd from the JSONL path.
 
     Claude Code stores transcripts in paths like:
       ~/.claude/projects/-Users-<user>-<app>-workspaces-<workspace>/...
     We match against known workspace names from the workspace-aware app's DB.
+
+    Returns (workspace_name, cwd) — both "" if no match. DEF-248: cwd is the
+    matched row's own `workspace_path` column, not a reconstruction of the
+    escaped path (un-escaping `-` back to `/` is ambiguous whenever the real
+    path itself contains a literal hyphen, e.g. "vox-v2"). Matching forward —
+    escape each DB candidate's workspace_path and check if it's a substring of
+    the escaped jsonl_path, exactly like the existing directory_name match
+    below — sidesteps that ambiguity entirely, mirroring worker.py's DEF-244
+    cwd fallback so both TTS-trigger paths carry the same resolution signal.
     """
     db_path = _get_workspace_db_path()
     if not db_path:
-        return ""
+        return "", ""
     parts = jsonl_path.split("/")
     for part in parts:
         # Match any workspace path pattern (not hardcoded to a specific app)
@@ -114,15 +123,16 @@ def detect_workspace_from_path(jsonl_path):
             try:
                 r = subprocess.run(
                     ["sqlite3", db_path,
-                     "SELECT directory_name FROM workspaces"],
+                     "SELECT directory_name, COALESCE(workspace_path, '') FROM workspaces"],
                     capture_output=True, text=True, timeout=0.5)
-                for ws_name in r.stdout.strip().split("\n"):
+                for row in r.stdout.strip().split("\n"):
+                    ws_name, _, ws_path = row.strip().partition("|")
                     ws_name = ws_name.strip()
                     if ws_name and ws_name.replace("/", "-") in remainder:
-                        return ws_name
+                        return ws_name, ws_path
             except Exception:
                 pass
-    return ""
+    return "", ""
 
 
 # _get_verbosity and _apply_verbosity are imported from
@@ -132,7 +142,7 @@ def detect_workspace_from_path(jsonl_path):
 
 
 def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
-                    workspace="", hook_epoch_ms=0, session_id=""):
+                    workspace="", hook_epoch_ms=0, session_id="", cwd=""):
     """Send speech text to Kokoro daemon and enqueue result."""
     global last_tts_time
 
@@ -223,7 +233,7 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
         os.rename(temp_wav, f"{QUEUE_DIR}/{wav_name}")
         if workspace:
             from heyvox.herald.workspace_label import write_switch_sidecar
-            write_switch_sidecar(f"{QUEUE_DIR}/{wav_name}", workspace, workspace_id, session_id)
+            write_switch_sidecar(f"{QUEUE_DIR}/{wav_name}", workspace, workspace_id, session_id, cwd)
         # Write timing sidecar
         timing_str = f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{tts_end_ms}"
         with open(f"{QUEUE_DIR}/{wav_name.replace('.wav', '.timing')}", "w") as f:
@@ -236,7 +246,7 @@ def send_to_kokoro(speech, voice="af_sarah", lang="en-us", speed=1.2,
             os.rename(f"{base}.part{part}.wav", f"{QUEUE_DIR}/{part_name}")
             if workspace:
                 from heyvox.herald.workspace_label import write_switch_sidecar
-                write_switch_sidecar(f"{QUEUE_DIR}/{part_name}", workspace, workspace_id, session_id)
+                write_switch_sidecar(f"{QUEUE_DIR}/{part_name}", workspace, workspace_id, session_id, cwd)
             part_ms = int(time.time() * 1000)
             with open(f"{QUEUE_DIR}/{part_name.replace('.wav', '.timing')}", "w") as f:
                 f.write(f"{hook_epoch_ms}|{watcher_start_ms}|{watcher_start_ms}|{part_ms}")
@@ -299,7 +309,7 @@ def process_new_lines(filepath):
             new_data = f.read()
             file_positions[filepath] = f.tell()
 
-        workspace = detect_workspace_from_path(filepath)
+        workspace, cwd = detect_workspace_from_path(filepath)
         # DEF-237: Claude Code names transcripts <session-id>.jsonl, so the
         # session that produced this line is the filename stem — no DB
         # lookup needed, unlike workspace_id.
@@ -345,7 +355,8 @@ def process_new_lines(filepath):
                     except Exception as _e:
                         log(f"DEF-078: register_tts_text failed: {_e}")
                     ok = send_to_kokoro(speech, workspace=workspace,
-                                        hook_epoch_ms=detect_ms, session_id=session_id)
+                                        hook_epoch_ms=detect_ms, session_id=session_id,
+                                        cwd=cwd)
                     if not ok:
                         try:
                             os.unlink(claim_file)
