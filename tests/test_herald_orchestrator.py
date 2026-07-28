@@ -983,6 +983,51 @@ class TestSwitchWorkspaceIdSession:
         mock_provider.resolve_by_name.return_value = None
         with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
             _switch_workspace("seattle", cfg)
+        mock_provider.resolve_by_cwd.assert_not_called()
+        mock_provider.activate.assert_not_called()
+
+    def test_unresolvable_name_falls_back_to_resolve_by_cwd(self, tmp_path):
+        """DEF-244: when the name itself doesn't resolve (confirmed live: it
+        can be neither the codename nor the display-name slug), cwd is an
+        independent fallback signal, not another guess at the same name."""
+        from heyvox.adapters.base import WorkspaceIdentity
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = None
+        mock_provider.resolve_by_cwd.return_value = WorkspaceIdentity(
+            workspace_id="cwd-resolved-uuid", session_id=None,
+        )
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace(
+                "personal--personal-agent-system", cfg,
+                cwd="/ws/autonomous-agents-v1/kingston-v1",
+            )
+        mock_provider.resolve_by_cwd.assert_called_once_with(
+            "/ws/autonomous-agents-v1/kingston-v1", unittest.mock.ANY,
+        )
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.workspace_id == "cwd-resolved-uuid"
+
+    def test_unresolvable_name_and_cwd_skips_activate(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = None
+        mock_provider.resolve_by_cwd.return_value = None
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace("some-unresolvable-name", cfg, cwd="/nowhere")
+        mock_provider.activate.assert_not_called()
+
+    def test_resolve_by_cwd_raising_skips_activate(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = None
+        mock_provider.resolve_by_cwd.side_effect = RuntimeError("boom")
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace("some-unresolvable-name", cfg, cwd="/somewhere")
         mock_provider.activate.assert_not_called()
 
     def test_run_switch_countdown_forwards_workspace_id_and_session_id(self, tmp_path):
@@ -1002,10 +1047,11 @@ class TestSwitchWorkspaceIdSession:
              patch("heyvox.herald.orchestrator._play_switch_pending_cue"):
             _run_switch_countdown(
                 "seattle", cfg, cfg.debug_log, stop_event,
-                workspace_id="ws-uuid-123", session_id="sess-uuid-456",
+                workspace_id="ws-uuid-123", session_id="sess-uuid-456", cwd="/ws/vox-v2/seattle",
             )
         mock_switch.assert_called_once_with(
             "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456",
+            cwd="/ws/vox-v2/seattle",
         )
 
 
@@ -1041,7 +1087,7 @@ class TestRunSwitchCountdown:
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
         mock_switch.assert_called_once_with(
-            "some-workspace", cfg, workspace_id="", session_id="",
+            "some-workspace", cfg, workspace_id="", session_id="", cwd="",
         )
         assert mock_alert.called
         assert not cfg.pending_switch_file.exists()
@@ -1088,7 +1134,7 @@ class TestRunSwitchCountdown:
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
         mock_switch.assert_called_once_with(
-            "some-workspace", cfg, workspace_id="", session_id="",
+            "some-workspace", cfg, workspace_id="", session_id="", cwd="",
         )
 
     @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)

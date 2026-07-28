@@ -358,12 +358,13 @@ class TestResolveWorkspaceId:
 
 
 class TestSwitchSidecar:
-    """DEF-237: JSON .workspace sidecar carrying workspace_id/session_id."""
+    """DEF-237: JSON .workspace sidecar carrying workspace_id/session_id.
+    DEF-244 added a fourth field, cwd — a last-resort resolution signal."""
 
     def test_write_then_read_round_trip(self, tmp_path):
         wav = tmp_path / "1700000000000-01.wav"
         workspace_label.write_switch_sidecar(
-            str(wav), "seattle", "ws-uuid-123", "sess-uuid-456",
+            str(wav), "seattle", "ws-uuid-123", "sess-uuid-456", "/ws/vox-v2/seattle",
         )
         sidecar = tmp_path / "1700000000000-01.workspace"
         assert sidecar.exists()
@@ -372,6 +373,7 @@ class TestSwitchSidecar:
             "workspace": "seattle",
             "workspace_id": "ws-uuid-123",
             "session_id": "sess-uuid-456",
+            "cwd": "/ws/vox-v2/seattle",
         }
 
     def test_write_skips_when_workspace_empty(self, tmp_path):
@@ -383,21 +385,33 @@ class TestSwitchSidecar:
         wav = tmp_path / "msg-01.wav"
         workspace_label.write_switch_sidecar(str(wav), "seattle")
         identity = workspace_label.read_switch_sidecar((tmp_path / "msg-01.workspace").read_text())
-        assert identity == {"workspace": "seattle", "workspace_id": "", "session_id": ""}
+        assert identity == {
+            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "",
+        }
 
     def test_read_legacy_plain_string_sidecar(self):
         """Sidecars written by a pre-DEF-237 worker/watcher still switch the workspace."""
         assert workspace_label.read_switch_sidecar("seattle") == {
-            "workspace": "seattle", "workspace_id": "", "session_id": "",
+            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "",
         }
 
     def test_read_handles_malformed_json_as_plain_label(self):
         # Starts with "{" but isn't valid JSON — must not raise or return empty.
         assert workspace_label.read_switch_sidecar("{not json") == {
-            "workspace": "{not json", "workspace_id": "", "session_id": "",
+            "workspace": "{not json", "workspace_id": "", "session_id": "", "cwd": "",
         }
 
     def test_read_strips_whitespace(self):
         assert workspace_label.read_switch_sidecar("  seattle\n") == {
-            "workspace": "seattle", "workspace_id": "", "session_id": "",
+            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "",
+        }
+
+    def test_read_pre_def243_json_sidecar_defaults_cwd_to_empty(self):
+        """A DEF-237-format sidecar (no cwd key) written before DEF-244 shipped
+        must still parse — cwd defaults to "" rather than raising/dropping."""
+        pre_def243_json = (
+            '{"workspace": "seattle", "workspace_id": "ws-1", "session_id": "sess-1"}'
+        )
+        assert workspace_label.read_switch_sidecar(pre_def243_json) == {
+            "workspace": "seattle", "workspace_id": "ws-1", "session_id": "sess-1", "cwd": "",
         }

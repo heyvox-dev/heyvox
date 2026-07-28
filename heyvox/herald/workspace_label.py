@@ -285,14 +285,22 @@ def resolve_workspace_id(directory_name: str, cfg: "HeyvoxConfig | None" = None)
     return identity.workspace_id if identity else ""
 
 
-def write_switch_sidecar(wav_path: str, workspace: str, workspace_id: str = "", session_id: str = "") -> None:
+def write_switch_sidecar(
+    wav_path: str, workspace: str, workspace_id: str = "", session_id: str = "", cwd: str = "",
+) -> None:
     """Write the .workspace sidecar that tells the orchestrator what to switch to.
 
     JSON so workspace_id/session_id can ride along with the label — the
     orchestrator forwards them to conductor-switch-workspace's --id/--session
-    flags instead of the fuzzy positional-label search (DEF-237). Both are
-    best-effort: empty string when resolution failed, and the orchestrator
-    falls back to the old positional-label switch in that case.
+    flags instead of the fuzzy positional-label search (DEF-237). All three
+    are best-effort: empty string when resolution failed, and the orchestrator
+    falls back one tier at a time (see DEF-244) when a value is missing or
+    doesn't resolve.
+
+    cwd (DEF-244) rides along as a last-resort resolution signal for the
+    orchestrator: when `workspace` doesn't match anything by name, cwd can
+    still identify the workspace via its DB `workspace_path` — independent of
+    whatever string the caller's own name-resolution produced.
     """
     if not workspace:
         return
@@ -300,7 +308,11 @@ def write_switch_sidecar(wav_path: str, workspace: str, workspace_id: str = "", 
     try:
         with open(sidecar, "w") as f:
             json.dump(
-                {"workspace": workspace, "workspace_id": workspace_id, "session_id": session_id}, f,
+                {
+                    "workspace": workspace, "workspace_id": workspace_id,
+                    "session_id": session_id, "cwd": cwd,
+                },
+                f,
             )
     except OSError as exc:
         log.debug("write_switch_sidecar: failed to write %s: %s", sidecar, exc)
@@ -312,7 +324,8 @@ def read_switch_sidecar(text: str) -> dict:
     Accepts the current JSON format and falls back to treating the whole
     string as a plain label — the format every sidecar used before DEF-237,
     so any sidecar an old worker.py/watcher.py process left in flight across
-    a deploy still switches the workspace (just without --session).
+    a deploy still switches the workspace (just without --session/--cwd).
+    `cwd` defaults to "" for sidecars written before DEF-244 added it.
     """
     text = text.strip()
     if text.startswith("{"):
@@ -322,7 +335,8 @@ def read_switch_sidecar(text: str) -> dict:
                 "workspace": data.get("workspace", ""),
                 "workspace_id": data.get("workspace_id", ""),
                 "session_id": data.get("session_id", ""),
+                "cwd": data.get("cwd", ""),
             }
         except (json.JSONDecodeError, AttributeError):
             pass
-    return {"workspace": text, "workspace_id": "", "session_id": ""}
+    return {"workspace": text, "workspace_id": "", "session_id": "", "cwd": ""}

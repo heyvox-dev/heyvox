@@ -642,7 +642,20 @@ class TestSessionIdAndWorkspaceId:
             "workspace": "seattle",
             "workspace_id": "ws-uuid-123",
             "session_id": "sess-uuid-456",
+            "cwd": w._cwd,
         }
+
+    def test_write_workspace_sidecar_includes_cwd(self, tmp_path):
+        """DEF-244: cwd rides along in the sidecar as an independent
+        resolution signal, regardless of how _workspace was resolved."""
+        w = self._worker_with_session("seattle", "sess-uuid-456")
+        assert w._cwd == os.getcwd()
+        wav_path = str(tmp_path / "msg-01.wav")
+        w._write_workspace_sidecar(wav_path)
+
+        from heyvox.herald.workspace_label import read_switch_sidecar
+        identity = read_switch_sidecar((tmp_path / "msg-01.workspace").read_text())
+        assert identity["cwd"] == os.getcwd()
 
     def test_write_workspace_sidecar_skipped_without_workspace(self, tmp_path):
         env = {"HEYVOX_WORKSPACE": "", "CONDUCTOR_WORKSPACE_NAME": "", "CONDUCTOR_SESSION_ID": "sess-uuid-456"}

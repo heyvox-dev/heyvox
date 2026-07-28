@@ -13,6 +13,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory codename — Conductor exports either form depending on the
   workspace, and the codename-only match silently failed to switch for any
   workspace where it exported the display name instead (DEF-242).
+- TTS-triggered workspace switching now falls back to matching by working
+  directory when the workspace name it was given doesn't match anything at
+  all — covers workspaces where Conductor's exported name is neither the
+  directory codename nor the display name (DEF-244).
 
 ## [1.2.0] - 2026-07-28
 

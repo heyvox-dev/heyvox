@@ -40,10 +40,11 @@ from heyvox.adapters.conductor import (
 
 
 def _build_fixture_db(path: str, rows: list[tuple]) -> None:
-    """rows = [(id, directory_name, branch, active_session_id, state[, workspace_name]), ...]
+    """rows = [(id, directory_name, branch, active_session_id, state[, workspace_name[, workspace_path]]), ...]
 
-    workspace_name is optional (defaults to NULL) so existing 5-tuple callers
-    are unaffected — only DEF-242's workspace_name-slug tests need to pass it.
+    workspace_name/workspace_path are optional (default to NULL) so existing
+    5- and 6-tuple callers are unaffected — only DEF-242's workspace_name-slug
+    and DEF-244's cwd-fallback tests need to pass them.
     """
     conn = sqlite3.connect(path)
     conn.execute(
@@ -54,15 +55,19 @@ def _build_fixture_db(path: str, rows: list[tuple]) -> None:
             branch TEXT,
             active_session_id TEXT,
             state TEXT,
-            workspace_name TEXT
+            workspace_name TEXT,
+            workspace_path TEXT
         )
         """
     )
-    normalized = [row if len(row) == 6 else (*row, None) for row in rows]
+    normalized = [
+        row + (None,) * (7 - len(row)) if len(row) < 7 else row
+        for row in rows
+    ]
     conn.executemany(
         "INSERT INTO workspaces "
-        "(id, directory_name, branch, active_session_id, state, workspace_name) "
-        "VALUES (?,?,?,?,?,?)",
+        "(id, directory_name, branch, active_session_id, state, workspace_name, workspace_path) "
+        "VALUES (?,?,?,?,?,?,?)",
         normalized,
     )
     conn.commit()
@@ -133,6 +138,88 @@ def test_lookup_by_workspace_name_slug_returns_identity(tmp_path):
     )
     assert result_by_codename is not None
     assert result_by_codename.workspace_id == "ws-dakar"
+
+
+def test_lookup_by_cwd_exact_workspace_path_returns_identity(tmp_path):
+    """DEF-244: cwd is a last-resort resolution signal, independent of
+    whatever string the name-based lookup was given — matched against
+    workspace_path rather than directory_name/workspace_name."""
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(
+        db_path,
+        [
+            (
+                "ws-kingston", "kingston-v1", "ideation", "sess-k", "ready",
+                "Autonomous Agents",
+                "/Users/work/conductor/workspaces/autonomous-agents-v1/kingston-v1",
+            ),
+        ],
+    )
+
+    result = get_active_workspace_and_session(
+        cwd="/Users/work/conductor/workspaces/autonomous-agents-v1/kingston-v1",
+        db_path=db_path,
+    )
+    assert result is not None
+    assert result.workspace_id == "ws-kingston"
+
+
+def test_lookup_by_cwd_subdirectory_returns_identity(tmp_path):
+    """A cwd inside the workspace root (shell cd'd into a subdir) still
+    resolves — mirrors detect_workspace_from_cwd()'s own prefix match."""
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(
+        db_path,
+        [("ws-1", "seattle", "main", "sess-1", "ready", "HeyVox", "/ws/vox-v2/seattle")],
+    )
+
+    result = get_active_workspace_and_session(
+        cwd="/ws/vox-v2/seattle/heyvox/adapters", db_path=db_path,
+    )
+    assert result is not None
+    assert result.workspace_id == "ws-1"
+
+
+def test_lookup_by_cwd_no_match_returns_none(tmp_path):
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(
+        db_path,
+        [("ws-1", "seattle", "main", "sess-1", "ready", "HeyVox", "/ws/vox-v2/seattle")],
+    )
+
+    result = get_active_workspace_and_session(cwd="/somewhere/else", db_path=db_path)
+    assert result is None
+
+
+def test_provider_resolve_by_cwd_converts_identity(tmp_path):
+    """Same fix, exercised through the provider entry point
+    orchestrator.py._switch_workspace actually calls as its last resort."""
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(
+        db_path,
+        [(
+            "ws-kingston", "kingston-v1", "ideation", "sess-k", "ready",
+            "Autonomous Agents",
+            "/Users/work/conductor/workspaces/autonomous-agents-v1/kingston-v1",
+        )],
+    )
+
+    profile = SimpleNamespace(workspace_db=db_path)
+    provider = ConductorWorkspaceProvider()
+    identity = provider.resolve_by_cwd(
+        "/Users/work/conductor/workspaces/autonomous-agents-v1/kingston-v1", profile,
+    )
+
+    assert identity == WorkspaceIdentity(workspace_id="ws-kingston", session_id="sess-k")
+
+
+def test_provider_resolve_by_cwd_no_match_returns_none(tmp_path):
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(db_path, [("ws-1", "seattle", "main", "sess-1", "ready")])
+
+    profile = SimpleNamespace(workspace_db=db_path)
+    provider = ConductorWorkspaceProvider()
+    assert provider.resolve_by_cwd("/nowhere", profile) is None
 
 
 def test_lookup_with_no_filters_returns_first_ready_row(tmp_path):
