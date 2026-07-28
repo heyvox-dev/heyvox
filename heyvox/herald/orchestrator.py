@@ -376,6 +376,18 @@ def _switch_workspace(
     slug (confirmed live: an unrelated string, likely a stale value from a
     long-running process) — cwd is an independent signal, not another guess
     at the same name.
+
+    DEF-245: session_id (when the caller already knows it, from
+    CONDUCTOR_SESSION_ID captured at the session that actually produced this
+    TTS) always wins over whatever resolve_by_name()/resolve_by_cwd() return
+    for session_id. Both of those resolve identity via a fresh DB lookup keyed
+    by name/cwd, whose only session signal is `workspaces.active_session_id`
+    — Conductor's own "last-focused session for this workspace" bookkeeping,
+    which live testing confirmed can differ from the session that is actually
+    speaking (workspace has multiple concurrently-relevant sessions; DEF-237
+    already made this exact point for the *known-workspace_id* path — this
+    closes the same gap for the name/cwd-fallback paths, which previously
+    silently discarded the caller's own, more specific session_id).
     """
     if not cfg.workspace_provider:
         return
@@ -416,6 +428,13 @@ def _switch_workspace(
                 f"ORCH: resolve_by_cwd({cwd!r}) -> workspace_id={identity.workspace_id!r}",
                 cfg.debug_log,
             )
+        if session_id and identity.session_id != session_id:
+            _herald_log(
+                f"ORCH: overriding resolved session_id={identity.session_id!r} "
+                f"with caller's session_id={session_id!r} (DEF-245)",
+                cfg.debug_log,
+            )
+            identity = WorkspaceIdentity(workspace_id=identity.workspace_id, session_id=session_id)
 
     try:
         ok = provider.activate(identity, profile)

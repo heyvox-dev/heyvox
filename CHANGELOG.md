@@ -17,6 +17,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory when the workspace name it was given doesn't match anything at
   all — covers workspaces where Conductor's exported name is neither the
   directory codename nor the display name (DEF-244).
+- TTS-triggered workspace switching now always lands on the session that
+  actually produced the TTS, even when the workspace itself had to be
+  resolved by name or working directory — those fallback paths previously
+  landed on whichever session Conductor had last focused in that workspace
+  instead (DEF-245).
 
 ## [1.2.0] - 2026-07-28
 

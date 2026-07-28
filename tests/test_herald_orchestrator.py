@@ -975,6 +975,68 @@ class TestSwitchWorkspaceIdSession:
         mock_provider.resolve_by_name.assert_called_once_with("seattle", unittest.mock.ANY)
         identity = mock_provider.activate.call_args[0][0]
         assert identity.workspace_id == "resolved-uuid"
+        # DEF-245: the caller's own session_id (the session that actually
+        # spoke) must survive the resolve_by_name() round trip.
+        assert identity.session_id == "sess-uuid-456"
+
+    def test_resolve_by_name_active_session_id_overridden_by_callers_session_id(self, tmp_path):
+        """DEF-245: resolve_by_name()'s DB lookup returns Conductor's own
+        active_session_id for the workspace — e.g. whatever session tab the
+        user was last looking at, which can be an unrelated, concurrently
+        open session. The caller's own session_id (from CONDUCTOR_SESSION_ID
+        at the session that actually produced the TTS) must win instead."""
+        from heyvox.adapters.base import WorkspaceIdentity
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = WorkspaceIdentity(
+            workspace_id="resolved-uuid", session_id="fix-audio-problems-session",
+        )
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace(
+                "seattle", cfg, session_id="the-session-that-actually-spoke",
+            )
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.workspace_id == "resolved-uuid"
+        assert identity.session_id == "the-session-that-actually-spoke"
+
+    def test_resolve_by_cwd_active_session_id_overridden_by_callers_session_id(self, tmp_path):
+        """Same override, via the DEF-244 cwd-fallback path."""
+        from heyvox.adapters.base import WorkspaceIdentity
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = None
+        mock_provider.resolve_by_cwd.return_value = WorkspaceIdentity(
+            workspace_id="cwd-resolved-uuid", session_id="fix-audio-problems-session",
+        )
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace(
+                "personal--personal-agent-system", cfg,
+                cwd="/ws/autonomous-agents-v1/kingston-v1",
+                session_id="the-session-that-actually-spoke",
+            )
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.workspace_id == "cwd-resolved-uuid"
+        assert identity.session_id == "the-session-that-actually-spoke"
+
+    def test_no_caller_session_id_keeps_resolved_session_id(self, tmp_path):
+        """When the caller never knew a session_id at all, the resolved
+        active_session_id is the best available signal — no override."""
+        from heyvox.adapters.base import WorkspaceIdentity
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = WorkspaceIdentity(
+            workspace_id="resolved-uuid", session_id="whatever-was-active",
+        )
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace("seattle", cfg)
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.session_id == "whatever-was-active"
 
     def test_no_workspace_id_and_unresolvable_name_skips_activate(self, tmp_path):
         from heyvox.herald.orchestrator import _switch_workspace
