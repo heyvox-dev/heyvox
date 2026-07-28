@@ -1433,6 +1433,13 @@ def _build_transcript_menu(handler):
     except Exception:
         _menu_config = None
 
+    if _menu_config:
+        from heyvox.constants import is_excluded_device_name
+        _input_devices = [
+            d for d in _input_devices
+            if not is_excluded_device_name(d, _menu_config.excluded_devices)
+        ]
+
     for _dev_name in _input_devices:
         _is_active = _dev_name == _active_mic
         _vi = vi_suffix_for_device(_dev_name, _menu_config) if _menu_config else ""
@@ -1477,6 +1484,12 @@ def _build_transcript_menu(handler):
     try:
         from heyvox.audio.output import list_output_devices, friendly_output_name
         _output_devices = list_output_devices()
+        if _menu_config:
+            from heyvox.constants import is_excluded_device_name
+            _output_devices = [
+                d for d in _output_devices
+                if not is_excluded_device_name(d.name, _menu_config.excluded_devices)
+            ]
     except Exception:
         _output_devices = []
 

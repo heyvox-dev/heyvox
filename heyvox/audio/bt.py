@@ -158,6 +158,7 @@ class BtHfpMixin:
 
     def _continue_bt_hfp_wait(
         self, mic_priority: list[str] | None, sample_rate: int, chunk_size: int,
+        excluded_devices: list[str] | None = None,
     ) -> bool:
         """Non-blocking check: has the BT device switched to HFP yet?
 
@@ -199,7 +200,7 @@ class BtHfpMixin:
             self._bt_hfp_pin_mode = False
             if pin_mode:
                 return self._do_manual_pin(target, sample_rate, chunk_size)
-            return self._do_mic_switch(target, mic_priority, sample_rate, chunk_size)
+            return self._do_mic_switch(target, mic_priority, sample_rate, chunk_size, excluded_devices)
 
         if self._bt_hfp_attempts >= self._BT_HFP_MAX_ATTEMPTS:
             target = self._bt_hfp_target
