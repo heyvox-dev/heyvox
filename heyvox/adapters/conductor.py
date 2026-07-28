@@ -57,16 +57,31 @@ def get_active_workspace_and_session(
     directory_name: Optional[str] = None,
     branch: Optional[str] = None,
     db_path: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> Optional[ConductorIdentity]:
-    """Look up the active Conductor workspace + session by directory or branch.
+    """Look up the active Conductor workspace + session by directory, branch, or cwd.
 
     Args:
-        directory_name: Workspace directory basename (e.g. "seattle"). If None,
-            matches any directory.
+        directory_name: Workspace directory basename (e.g. "seattle"), OR a
+            case-insensitive match against the workspace's display name with
+            spaces normalized to hyphens (e.g. "invoice-match-mcp" for a
+            workspace named "Invoice Match-mcp"). Conductor's own exported env
+            (CONDUCTOR_WORKSPACE_NAME/HEYVOX_WORKSPACE) has been observed to
+            carry either form depending on the workspace (DEF-242, confirmed
+            live on 2 of 3 sampled workspaces) — name-based callers can't
+            assume which one they'll get. If None, matches any directory.
         branch: Git branch name (e.g. "main"). If None, matches any branch.
         db_path: Override for the sqlite DB path. Defaults to DEFAULT_DB_PATH.
             Callers driven by `AppProfileConfig.workspace_db` (D-23) pass that
             value here so the profile remains the single source of truth.
+        cwd: Absolute path of the process that wants to identify its own
+            workspace (e.g. `os.getcwd()` at hook-fire time). Matched against
+            `workspace_path` (exact, or cwd as a subdirectory of it) — DEF-244:
+            a last-resort signal for when neither `directory_name` nor branch
+            is available or resolvable, since the caller's own name string can
+            itself be neither the codename nor the display-name slug (e.g. a
+            stale value cached by a long-running process). If None, matches
+            any workspace_path.
 
     Returns:
         ConductorIdentity with stable IDs, or None on any failure (missing DB,
@@ -90,12 +105,21 @@ def get_active_workspace_and_session(
             """
             SELECT id, active_session_id, branch, directory_name
             FROM workspaces
-            WHERE (directory_name = ?1 OR ?1 IS NULL)
+            WHERE (
+                    directory_name = ?1
+                    OR LOWER(REPLACE(workspace_name, ' ', '-')) = LOWER(?1)
+                    OR ?1 IS NULL
+                  )
               AND (branch = ?2 OR ?2 IS NULL)
+              AND (
+                    ?3 IS NULL
+                    OR workspace_path = ?3
+                    OR ?3 LIKE workspace_path || '/%'
+                  )
               AND state = 'ready'
             LIMIT 1
             """,
-            (directory_name, branch),
+            (directory_name, branch, cwd),
         ).fetchone()
     except (sqlite3.Error, OSError) as e:
         _log(f"lookup failed: {e}")
@@ -504,13 +528,22 @@ def activate_workspace(identity, profile, *, pid: Optional[int] = None) -> bool:
     Verifies success via read-back (detect_context/resolve) before returning
     True — mirrors the DEF-192 paste pattern's "don't assume success" rule.
     Never raises.
+
+    DEF-244: every return path logs `[TIMING] activate_workspace` with total
+    elapsed ms — this is the in-process, verified mechanism that replaced the
+    old fire-and-forget external script (DEF-241), and unlike that script this
+    one is synchronous with the caller (deliberate settle-then-verify sleeps
+    included), so its latency is now directly observable instead of assumed.
     """
+    t0 = time.time()
+    elapsed_ms = lambda: (time.time() - t0) * 1000  # noqa: E731 — local, single-use
+
     provider = ConductorWorkspaceProvider()
     db_path = _profile_db_path(profile)
 
     resolved_pid = pid if pid is not None else _find_conductor_pid()
     if resolved_pid is None:
-        _log("activate: Conductor not running")
+        _log(f"activate: Conductor not running [TIMING] activate_workspace: {elapsed_ms():.0f}ms")
         return False
 
     # Session write is unconditional and happens before the already-on-target
@@ -525,17 +558,23 @@ def activate_workspace(identity, profile, *, pid: Optional[int] = None) -> bool:
     if current_ctx:
         current_identity = provider.resolve(current_ctx, profile)
         if current_identity is not None and current_identity.workspace_id == identity.workspace_id:
-            _log(f"activate: already on target {identity.workspace_id!r} — skip AX switch")
+            _log(
+                f"activate: already on target {identity.workspace_id!r} — skip AX switch "
+                f"[TIMING] activate_workspace: {elapsed_ms():.0f}ms"
+            )
             return True
 
     labels = _labels_for_workspace_id(identity.workspace_id, db_path)
     if not labels:
-        _log(f"activate: no label found for workspace_id={identity.workspace_id!r}")
+        _log(
+            f"activate: no label found for workspace_id={identity.workspace_id!r} "
+            f"[TIMING] activate_workspace: {elapsed_ms():.0f}ms"
+        )
         return False
 
     _ax_app, win = _get_app_and_window(resolved_pid)
     if win is None:
-        _log("activate: no window")
+        _log(f"activate: no window [TIMING] activate_workspace: {elapsed_ms():.0f}ms")
         return False
     win_pos, _win_size = _read_pos_size(win)
     if win_pos is None:
@@ -543,7 +582,10 @@ def activate_workspace(identity, profile, *, pid: Optional[int] = None) -> bool:
 
     match = _find_matching_row(win, win_pos, labels)
     if match is None:
-        _log(f"activate: no matching row for labels={labels!r}")
+        _log(
+            f"activate: no matching row for labels={labels!r} "
+            f"[TIMING] activate_workspace: {elapsed_ms():.0f}ms"
+        )
         return False
 
     settle = getattr(profile, "activate_settle_secs", 0.3) if profile else 0.3
@@ -554,9 +596,13 @@ def activate_workspace(identity, profile, *, pid: Optional[int] = None) -> bool:
         new_ctx = provider.detect_context(resolved_pid)
         new_identity = provider.resolve(new_ctx, profile) if new_ctx else None
         if new_identity is not None and new_identity.workspace_id == identity.workspace_id:
-            _log(f"activate: verified via {mechanism}")
+            _log(
+                f"activate: verified via {mechanism} "
+                f"[TIMING] activate_workspace: {elapsed_ms():.0f}ms"
+            )
             return True
         _log(f"activate: {mechanism} dispatched but verify failed — trying next mechanism")
+    _log(f"activate: all mechanisms exhausted [TIMING] activate_workspace: {elapsed_ms():.0f}ms")
     return False
 
 
@@ -592,6 +638,17 @@ class ConductorWorkspaceProvider:
         identity = get_active_workspace_and_session(
             directory_name=name, branch=None, db_path=db_path,
         )
+        if identity is None:
+            return None
+        return WorkspaceIdentity(
+            workspace_id=identity.workspace_id,
+            session_id=identity.session_id,
+        )
+
+    def resolve_by_cwd(self, cwd, profile):
+        from heyvox.adapters.base import WorkspaceIdentity
+        db_path = _profile_db_path(profile)
+        identity = get_active_workspace_and_session(cwd=cwd, db_path=db_path)
         if identity is None:
             return None
         return WorkspaceIdentity(

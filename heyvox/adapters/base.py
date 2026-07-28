@@ -73,6 +73,14 @@ class WorkspaceProvider(Protocol):
         fail-to-None contract as resolve()."""
         ...
 
+    def resolve_by_cwd(self, cwd: str, profile) -> Optional[WorkspaceIdentity]:
+        """Map a working directory to stable IDs — a fallback for when the
+        caller's name string doesn't match anything (DEF-244: the sender's
+        own idea of its "name" can be neither the directory codename nor the
+        display name, e.g. a stale value from a long-running process). Same
+        fail-to-None contract as resolve()."""
+        ...
+
     def activate(self, identity: WorkspaceIdentity, profile, *, pid: Optional[int] = None) -> bool:
         """Make `identity` the visibly active workspace (+session, if set)
         in the app. Includes its own already-on-target short-circuit —

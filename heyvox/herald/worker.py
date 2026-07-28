@@ -312,6 +312,8 @@ class HeraldWorker:
     """
 
     def __init__(self) -> None:
+        self._cwd = os.getcwd()
+
         # Workspace name resolution order:
         #   1. HEYVOX_WORKSPACE env (generic, what heyvox setup will ship)
         #   2. CONDUCTOR_WORKSPACE_NAME (deprecated legacy fallback)
@@ -321,24 +323,29 @@ class HeraldWorker:
         #      has to derive the workspace from the current directory.
         #      Without this fallback, the workspace announcement and the
         #      .workspace sidecar both silently no-op for hook-driven TTS.
+        # self._cwd itself also rides along in the sidecar regardless of
+        # which branch resolves _workspace (DEF-244): the env var is not
+        # always trustworthy even when non-empty (observed carrying a value
+        # matching neither the directory codename nor the display-name slug),
+        # so the orchestrator gets cwd as an independent fallback signal.
         env_ws = (
             os.environ.get("HEYVOX_WORKSPACE", "")
             or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
         )
         if env_ws:
             self._workspace: str = env_ws
-            log.info("workspace resolved via env: %r (cwd=%r)", env_ws, os.getcwd())
+            log.info("workspace resolved via env: %r (cwd=%r)", env_ws, self._cwd)
         else:
             try:
                 from heyvox.herald.workspace_label import detect_workspace_from_cwd
                 self._workspace = detect_workspace_from_cwd()
                 log.info(
                     "workspace cwd-detect: cwd=%r → %r",
-                    os.getcwd(),
+                    self._cwd,
                     self._workspace,
                 )
             except Exception as e:
-                log.warning("workspace cwd-detect raised (%s) — sidecar disabled (cwd=%r)", e, os.getcwd())
+                log.warning("workspace cwd-detect raised (%s) — sidecar disabled (cwd=%r)", e, self._cwd)
                 self._workspace = ""
 
         # DEF-237: the Conductor session actually speaking right now.
@@ -1294,7 +1301,9 @@ class HeraldWorker:
         if not self._workspace:
             return
         from heyvox.herald.workspace_label import write_switch_sidecar
-        write_switch_sidecar(wav_path, self._workspace, self._workspace_id, self._session_id)
+        write_switch_sidecar(
+            wav_path, self._workspace, self._workspace_id, self._session_id, self._cwd,
+        )
 
     # ------------------------------------------------------------------
     # Private: state readers

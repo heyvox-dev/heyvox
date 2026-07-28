@@ -350,7 +350,7 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
 
 def _switch_workspace(
     workspace: str, cfg: OrchestratorConfig, *,
-    workspace_id: str = "", session_id: str = "",
+    workspace_id: str = "", session_id: str = "", cwd: str = "",
 ) -> None:
     """Switch the workspace-aware app to the given workspace name.
 
@@ -369,6 +369,25 @@ def _switch_workspace(
     (stable UUID, survives renames). Falls back to provider.resolve_by_name()
     when workspace_id resolution failed upstream (no DB, locked DB, no
     match) — same fallback intent as before this fix.
+
+    DEF-244: when resolve_by_name() also finds no match, tries
+    provider.resolve_by_cwd() as a last resort. This covers the case where
+    `workspace` itself is neither the directory codename nor the display-name
+    slug (confirmed live: an unrelated string, likely a stale value from a
+    long-running process) — cwd is an independent signal, not another guess
+    at the same name.
+
+    DEF-245: session_id (when the caller already knows it, from
+    CONDUCTOR_SESSION_ID captured at the session that actually produced this
+    TTS) always wins over whatever resolve_by_name()/resolve_by_cwd() return
+    for session_id. Both of those resolve identity via a fresh DB lookup keyed
+    by name/cwd, whose only session signal is `workspaces.active_session_id`
+    — Conductor's own "last-focused session for this workspace" bookkeeping,
+    which live testing confirmed can differ from the session that is actually
+    speaking (workspace has multiple concurrently-relevant sessions; DEF-237
+    already made this exact point for the *known-workspace_id* path — this
+    closes the same gap for the name/cwd-fallback paths, which previously
+    silently discarded the caller's own, more specific session_id).
     """
     if not cfg.workspace_provider:
         return
@@ -395,7 +414,27 @@ def _switch_workspace(
             return
         if identity is None:
             _herald_log(f"ORCH: resolve_by_name({workspace!r}) found no match", cfg.debug_log)
-            return
+            if not cwd:
+                return
+            try:
+                identity = provider.resolve_by_cwd(cwd, profile)
+            except Exception as e:
+                _herald_log(f"ORCH: resolve_by_cwd({cwd!r}) raised {e!r}", cfg.debug_log)
+                return
+            if identity is None:
+                _herald_log(f"ORCH: resolve_by_cwd({cwd!r}) found no match", cfg.debug_log)
+                return
+            _herald_log(
+                f"ORCH: resolve_by_cwd({cwd!r}) -> workspace_id={identity.workspace_id!r}",
+                cfg.debug_log,
+            )
+        if session_id and identity.session_id != session_id:
+            _herald_log(
+                f"ORCH: overriding resolved session_id={identity.session_id!r} "
+                f"with caller's session_id={session_id!r} (DEF-245)",
+                cfg.debug_log,
+            )
+            identity = WorkspaceIdentity(workspace_id=identity.workspace_id, session_id=session_id)
 
     try:
         ok = provider.activate(identity, profile)
@@ -516,7 +555,7 @@ def _play_switch_pending_cue() -> None:
 
 def _run_switch_countdown(
     ws: str, cfg: OrchestratorConfig, debug_log: Path, stop_event: threading.Event,
-    *, workspace_id: str = "", session_id: str = "",
+    *, workspace_id: str = "", session_id: str = "", cwd: str = "",
 ) -> None:
     """Fire-and-forget: announce a pending switch, give cfg.switch_countdown_secs
     to cancel (Right Ctrl, or Escape/stop — see herald/cli.py::_cmd_stop), then
@@ -528,7 +567,8 @@ def _run_switch_countdown(
 
     DEF-237: workspace_id/session_id just ride along to the final
     _switch_workspace call at the end of the countdown — see that
-    function's docstring for what they change.
+    function's docstring for what they change. DEF-244: cwd rides along the
+    same way, as a last-resort resolution signal if ws doesn't resolve.
     """
     countdown_start = time.time()
     cfg.cancel_switch_flag.unlink(missing_ok=True)  # clear stale/poltergeist flag first
@@ -584,7 +624,7 @@ def _run_switch_countdown(
             debug_log,
         )
         return
-    _switch_workspace(ws, cfg, workspace_id=workspace_id, session_id=session_id)
+    _switch_workspace(ws, cfg, workspace_id=workspace_id, session_id=session_id, cwd=cwd)
 
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1044,7 @@ def _play_wav(
                         kwargs={
                             "workspace_id": identity["workspace_id"],
                             "session_id": identity["session_id"],
+                            "cwd": identity["cwd"],
                         },
                         daemon=True,
                     ).start()

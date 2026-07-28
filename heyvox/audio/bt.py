@@ -60,11 +60,14 @@ def mute_output_during_bt_switch(device_name: str, settle_secs: float = 0.8):
     A2DP → HFP profile switches emit a pop/static burst. Muting output during
     the stream open (and for settle_secs after) hides that artifact.
 
-    Skipped for built-in mics (no profile switch). Silently no-op if volume
-    helpers aren't importable (e.g. during CLI-only invocation).
+    Skipped for built-in mics (no profile switch) and for any device not
+    confirmed as Bluetooth (DEF-243) — a USB/wired device never does an
+    A2DP→HFP switch, so there is no pop to hide and muting is pure overhead.
+    Silently no-op if volume helpers aren't importable (e.g. during CLI-only
+    invocation).
     """
     from heyvox.audio.mic import is_builtin_mic
-    if is_builtin_mic(device_name):
+    if is_builtin_mic(device_name) or not is_bluetooth_device(device_name):
         yield
         return
 

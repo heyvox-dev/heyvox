@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-28
+
+### Fixed
+
+- TTS-triggered workspace switching now also matches a workspace by its
+  display name (case-insensitive, spaces as hyphens), not only its internal
+  directory codename — Conductor exports either form depending on the
+  workspace, and the codename-only match silently failed to switch for any
+  workspace where it exported the display name instead (DEF-242).
+- The Bluetooth pop-suppression mute no longer fires for USB/wired
+  microphones — it was muting system output on every retry of a
+  persistently failing USB mic, indefinitely, because the mute step wasn't
+  checking device transport (DEF-243).
+- TTS-triggered workspace switching now falls back to matching by working
+  directory when the workspace name it was given doesn't match anything at
+  all — covers workspaces where Conductor's exported name is neither the
+  directory codename nor the display name (DEF-244).
+- TTS-triggered workspace switching now always lands on the session that
+  actually produced the TTS, even when the workspace itself had to be
+  resolved by name or working directory — those fallback paths previously
+  landed on whichever session Conductor had last focused in that workspace
+  instead (DEF-245).
+- Capped the `mcp` SDK dependency to `<2.0` — an unbounded lower-only
+  version constraint let a same-day upstream major release silently break
+  fresh installs and CI (DEF-246).
+
 ## [1.2.0] - 2026-07-28
 
 **If you installed an earlier version, re-run `heyvox setup`.** Voice output did

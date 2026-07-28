@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import heyvox.audio.bt as bt
 import heyvox.audio.mic as mic
 
 
@@ -393,3 +394,69 @@ def test_reinit_usb_retry_skips_cooldown_and_demotion(monkeypatch):
     assert dm.reinit(require_audio=True) is True
     assert dm.dev_name == _G535
     assert not mic.is_device_cooled_down(_G535)
+
+
+# ---------------------------------------------------------------------------
+# DEF-243: A2DP→HFP pop-suppression mute must not fire for non-Bluetooth
+# transports — it has no pop to hide and was muting system output on every
+# USB probe retry, indefinitely, for a persistently-silent USB mic.
+# ---------------------------------------------------------------------------
+
+def _mock_probe_stream():
+    stream = MagicMock()
+    stream.read.return_value = b"\x00\x00" * 1280
+    return stream
+
+
+def test_probe_device_level_skips_mute_for_usb(monkeypatch):
+    monkeypatch.setattr(mic, "is_usb_transport", lambda name: True)
+    mute_calls = []
+    monkeypatch.setattr("heyvox.herald.coreaudio.is_system_muted", lambda: False)
+    monkeypatch.setattr("heyvox.herald.coreaudio.set_system_muted", lambda v: mute_calls.append(v))
+
+    pa = MagicMock()
+    pa.open.return_value = _mock_probe_stream()
+    mic.probe_device_level(pa, 0, "G435 Wireless Gaming Headset")
+
+    assert mute_calls == [], "confirmed-USB probe must never touch system mute"
+
+
+def test_probe_device_level_still_mutes_for_non_usb(monkeypatch):
+    """Bluetooth (and unknown-transport, per DEF-217's conservative default)
+    devices keep the pop-suppression mute."""
+    monkeypatch.setattr(mic, "is_usb_transport", lambda name: False)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    mute_calls = []
+    monkeypatch.setattr("heyvox.herald.coreaudio.is_system_muted", lambda: False)
+    monkeypatch.setattr("heyvox.herald.coreaudio.set_system_muted", lambda v: mute_calls.append(v))
+
+    pa = MagicMock()
+    pa.open.return_value = _mock_probe_stream()
+    mic.probe_device_level(pa, 0, "G435 Bluetooth")
+
+    assert mute_calls == [True, False]
+
+
+def test_mute_during_bt_switch_skips_for_non_bluetooth(monkeypatch):
+    monkeypatch.setattr(bt, "is_bluetooth_device", lambda name: False)
+    mute_calls = []
+    monkeypatch.setattr("heyvox.herald.coreaudio.is_system_muted", lambda: False)
+    monkeypatch.setattr("heyvox.herald.coreaudio.set_system_muted", lambda v: mute_calls.append(v))
+
+    with bt.mute_output_during_bt_switch("G435 Wireless Gaming Headset"):
+        pass
+
+    assert mute_calls == [], "non-Bluetooth device must not trigger the A2DP pop mute"
+
+
+def test_mute_during_bt_switch_still_mutes_for_bluetooth(monkeypatch):
+    monkeypatch.setattr(bt, "is_bluetooth_device", lambda name: True)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    mute_calls = []
+    monkeypatch.setattr("heyvox.herald.coreaudio.is_system_muted", lambda: False)
+    monkeypatch.setattr("heyvox.herald.coreaudio.set_system_muted", lambda v: mute_calls.append(v))
+
+    with bt.mute_output_during_bt_switch("G435 Bluetooth"):
+        pass
+
+    assert mute_calls == [True, False]
