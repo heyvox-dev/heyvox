@@ -28,6 +28,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolved by name or working directory — those fallback paths previously
   landed on whichever session Conductor had last focused in that workspace
   instead (DEF-245).
+- Capped the `mcp` SDK dependency to `<2.0` — an unbounded lower-only
+  version constraint let a same-day upstream major release silently break
+  fresh installs and CI (DEF-246).
 
 ## [1.2.0] - 2026-07-28
 

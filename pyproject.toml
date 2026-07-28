@@ -42,7 +42,7 @@ dependencies = [
     # false green. Paste still worked via the osascript fallback, which is why
     # this went unnoticed for four releases.
     "pyobjc-framework-ApplicationServices>=10.0",
-    "mcp>=1.0",
+    "mcp>=1.0,<2.0",
     "psutil>=5.9",
     "rich>=13.0",
     # Core, not TTS-only: huggingface_hub downloads every model (wake word,
