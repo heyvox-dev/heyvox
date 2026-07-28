@@ -6,9 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-First-run repairs found by a pre-release readiness audit. If you installed an
-earlier version, re-run `heyvox setup` — voice output did not work on a fresh
-install before this release.
+## [1.2.0] - 2026-07-28
+
+**If you installed an earlier version, re-run `heyvox setup`.** Voice output did
+not work on a fresh install before this release — the hooks were written in a
+shape Claude Code does not execute, and nothing ever told the agent to produce
+the `<tts>` blocks those hooks look for. Both are fixed, and the Claude Code
+integration now ships as a plugin instead of edits to your settings file.
+
+The first-run problems were found by a readiness audit that walked the whole
+install-to-first-use path on a clean machine.
 
 ### Fixed
 
@@ -40,6 +47,24 @@ install before this release.
   one (DEF-229).
 - HUD IPC reconnects no longer occasionally lose the race against the
   server's accept loop (DEF-230).
+- Cross-workspace speech is no longer silently swallowed: re-enabling the hold
+  queue had suppressed the workspace switch for most held messages, and the
+  switch itself could block audio start for up to 5 seconds while an idle-gate
+  vetoed most switches outright (DEF-231, DEF-232).
+- Wake-word audio cues (listening / ok / paused / sending) now respect the mute
+  setting instead of playing regardless of it (DEF-233).
+- The HUD menu item "Mute Microphone" now mutes the microphone. It previously
+  only paused wake-word detection, which is a different thing (DEF-234).
+- Workspace switching matches the workspace name shown in the sidebar rather
+  than the pull-request title, and now carries the session ID — so it lands on
+  the intended session instead of whichever one was last focused
+  (DEF-236, DEF-237).
+- Virtual and loopback audio devices (Microsoft Teams' driver, BlackHole and
+  similar) are no longer auto-selected as your microphone or output. Add your
+  own via the new `excluded_devices` config key (DEF-239).
+- The workspace-switch recording guard reads the configured recording flag
+  instead of a hard-coded global, which also stops its tests depending on
+  whether the machine happened to be recording (DEF-240).
 
 ### Changed
 
@@ -52,6 +77,12 @@ install before this release.
   (DEF-227).
 - MCP registration for Cursor, Windsurf and Continue.dev is now labelled
   experimental — those config paths remain unverified.
+- Conductor workspace switching runs in-process through
+  `WorkspaceProvider.activate()`. It previously depended on an external,
+  untracked, hand-maintained Hammerspoon script parsing undocumented
+  accessibility structure — that dependency is retired, and Hammerspoon is no
+  longer needed for this operation (DEF-241).
+- The workspace-switch countdown is now visible and cancelable (DEF-231).
 
 ## [1.1.3] - 2026-07-24
 
@@ -184,7 +215,8 @@ detection, local STT (MLX Whisper / sherpa-onnx), local TTS (Kokoro / Piper),
 HUD overlay, MCP integration, and Hush browser media control. Earlier
 development history is available in the git log.
 
-[Unreleased]: https://github.com/heyvox-dev/heyvox/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/heyvox-dev/heyvox/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/heyvox-dev/heyvox/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/heyvox-dev/heyvox/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/heyvox-dev/heyvox/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/heyvox-dev/heyvox/compare/v1.1.0...v1.1.1
