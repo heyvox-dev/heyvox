@@ -66,3 +66,18 @@ class WorkspaceProvider(Protocol):
         """Map a detected context to stable IDs. May block on DB/IPC —
         callers wrap this in a timeout. None when unresolvable."""
         ...
+
+    def resolve_by_name(self, name: str, profile) -> Optional[WorkspaceIdentity]:
+        """Map a stored/sidecar display-name string (as opposed to
+        detect_context()'s live-detected output) to stable IDs. Same
+        fail-to-None contract as resolve()."""
+        ...
+
+    def activate(self, identity: WorkspaceIdentity, profile, *, pid: Optional[int] = None) -> bool:
+        """Make `identity` the visibly active workspace (+session, if set)
+        in the app. Includes its own already-on-target short-circuit —
+        callers must NOT pre-check this themselves. Verifies success via
+        read-back before returning True. Never raises. `pid` is an optional
+        fast-path hint for callers that already have one; omitted callers
+        get it resolved internally."""
+        ...

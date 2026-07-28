@@ -924,75 +924,66 @@ def test_afplay_ceiling_corrupt_file_falls_back_to_cap(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-class TestSwitchWorkspaceForce:
-    def test_default_passes_force(self, tmp_path):
-        """_switch_workspace defaults to force=True — the countdown IS consent now."""
-        from heyvox.herald.orchestrator import _switch_workspace
-        cfg = _cfg(tmp_path, workspace_switch_cmd=str(tmp_path / "switch.sh"))
-        (tmp_path / "switch.sh").write_text("#!/bin/sh\n")
-        (tmp_path / "switch.sh").chmod(0o755)
-        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
-            _switch_workspace("some-workspace", cfg)
-        argv = mock_run.call_args[0][0]
-        assert "--force" in argv
-
-    def test_force_false_omits_flag(self, tmp_path):
-        from heyvox.herald.orchestrator import _switch_workspace
-        cfg = _cfg(tmp_path, workspace_switch_cmd=str(tmp_path / "switch.sh"))
-        (tmp_path / "switch.sh").write_text("#!/bin/sh\n")
-        (tmp_path / "switch.sh").chmod(0o755)
-        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
-            _switch_workspace("some-workspace", cfg, force=False)
-        argv = mock_run.call_args[0][0]
-        assert "--force" not in argv
-
-
 class TestSwitchWorkspaceIdSession:
-    """DEF-237: --id/--session forwarding, falling back to the positional label."""
+    """DEF-237/provider migration: identity resolution via the
+    WorkspaceProvider, activation via provider.activate(), falling back to
+    resolve_by_name() when workspace_id is unknown."""
 
-    def _switch_cmd(self, tmp_path: Path) -> Path:
-        cmd = tmp_path / "switch.sh"
-        cmd.write_text("#!/bin/sh\n")
-        cmd.chmod(0o755)
-        return cmd
+    def _cfg_with_provider(self, tmp_path, **kwargs):
+        defaults = dict(workspace_provider="conductor", workspace_db=str(tmp_path / "fake.db"))
+        defaults.update(kwargs)
+        return _cfg(tmp_path, **defaults)
 
-    def test_workspace_id_uses_id_and_session_flags(self, tmp_path):
+    def test_workspace_id_activates_identity_directly(self, tmp_path):
         from heyvox.herald.orchestrator import _switch_workspace
-        switch_cmd = self._switch_cmd(tmp_path)
-        cfg = _cfg(tmp_path, workspace_switch_cmd=str(switch_cmd))
-        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
             _switch_workspace(
                 "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456",
             )
-        argv = mock_run.call_args[0][0]
-        assert argv == [str(switch_cmd), "--id", "ws-uuid-123", "--session", "sess-uuid-456", "--force"]
+        mock_provider.resolve_by_name.assert_not_called()
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.workspace_id == "ws-uuid-123"
+        assert identity.session_id == "sess-uuid-456"
 
-    def test_workspace_id_without_session_id_omits_session_flag(self, tmp_path):
+    def test_workspace_id_without_session_id_leaves_session_none(self, tmp_path):
         from heyvox.herald.orchestrator import _switch_workspace
-        switch_cmd = self._switch_cmd(tmp_path)
-        cfg = _cfg(tmp_path, workspace_switch_cmd=str(switch_cmd))
-        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
             _switch_workspace("seattle", cfg, workspace_id="ws-uuid-123")
-        argv = mock_run.call_args[0][0]
-        assert argv == [str(switch_cmd), "--id", "ws-uuid-123", "--force"]
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.workspace_id == "ws-uuid-123"
+        assert identity.session_id is None
 
-    def test_no_workspace_id_falls_back_to_positional_label(self, tmp_path):
-        """No workspace_id resolved upstream (DB locked, no match, ...) — same
-        positional call as before DEF-237. session_id alone is not enough
-        since conductor-switch-workspace only honours --session when --id
-        is also given."""
+    def test_no_workspace_id_falls_back_to_resolve_by_name(self, tmp_path):
+        """No workspace_id resolved upstream (DB locked, no match, ...) —
+        resolve the identity by display name via the provider instead."""
+        from heyvox.adapters.base import WorkspaceIdentity
         from heyvox.herald.orchestrator import _switch_workspace
-        switch_cmd = self._switch_cmd(tmp_path)
-        cfg = _cfg(tmp_path, workspace_switch_cmd=str(switch_cmd))
-        with patch("heyvox.herald.orchestrator.subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = WorkspaceIdentity(
+            workspace_id="resolved-uuid", session_id=None,
+        )
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
             _switch_workspace("seattle", cfg, session_id="sess-uuid-456")
-        argv = mock_run.call_args[0][0]
-        assert argv == [str(switch_cmd), "seattle", "--force"]
+        mock_provider.resolve_by_name.assert_called_once_with("seattle", unittest.mock.ANY)
+        identity = mock_provider.activate.call_args[0][0]
+        assert identity.workspace_id == "resolved-uuid"
+
+    def test_no_workspace_id_and_unresolvable_name_skips_activate(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        cfg = self._cfg_with_provider(tmp_path)
+        mock_provider = unittest.mock.Mock()
+        mock_provider.resolve_by_name.return_value = None
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider):
+            _switch_workspace("seattle", cfg)
+        mock_provider.activate.assert_not_called()
 
     def test_run_switch_countdown_forwards_workspace_id_and_session_id(self, tmp_path):
         """_run_switch_countdown's own workspace_id/session_id kwargs ride
@@ -1000,9 +991,8 @@ class TestSwitchWorkspaceIdSession:
         from heyvox.herald.orchestrator import _run_switch_countdown
         # Same generous margins as TestRunSwitchCountdown._cfg_fast below —
         # a tighter window here previously flaked on a loaded CI runner.
-        cfg = _cfg(
-            tmp_path, workspace_switch_cmd=str(self._switch_cmd(tmp_path)),
-            workspace_app_name="Conductor",
+        cfg = self._cfg_with_provider(
+            tmp_path, workspace_app_name="Conductor",
             switch_countdown_secs=0.5, poll_interval=0.02,
         )
         stop_event = threading.Event()
@@ -1015,7 +1005,7 @@ class TestSwitchWorkspaceIdSession:
                 workspace_id="ws-uuid-123", session_id="sess-uuid-456",
             )
         mock_switch.assert_called_once_with(
-            "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456", force=True,
+            "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456",
         )
 
 
@@ -1028,7 +1018,8 @@ class TestRunSwitchCountdown:
         # here previously flaked on a loaded CI runner (thread-scheduling
         # jitter ate the slack between the cancel-write and the deadline).
         defaults = dict(
-            workspace_switch_cmd=str(tmp_path / "switch.sh"),
+            workspace_provider="conductor",
+            workspace_db=str(tmp_path / "fake.db"),
             workspace_app_name="Conductor",
             switch_countdown_secs=0.5,
             poll_interval=0.02,
@@ -1050,7 +1041,7 @@ class TestRunSwitchCountdown:
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
         mock_switch.assert_called_once_with(
-            "some-workspace", cfg, workspace_id="", session_id="", force=True,
+            "some-workspace", cfg, workspace_id="", session_id="",
         )
         assert mock_alert.called
         assert not cfg.pending_switch_file.exists()
@@ -1097,7 +1088,7 @@ class TestRunSwitchCountdown:
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
         mock_switch.assert_called_once_with(
-            "some-workspace", cfg, workspace_id="", session_id="", force=True,
+            "some-workspace", cfg, workspace_id="", session_id="",
         )
 
     @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)

@@ -33,8 +33,6 @@ class FakeAppProfile:
     has_workspace_detection: bool = True
     workspace_provider: str = "conductor"
     workspace_db: str = "~/fake-conductor.db"
-    workspace_list_query: str = ""
-    workspace_switch_cmd: str = ""
 
 
 @dataclass

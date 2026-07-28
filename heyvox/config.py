@@ -290,8 +290,8 @@ class AppProfileConfig(BaseModel):
             enter_count: 1
             is_electron: true
             has_workspace_detection: true
+            workspace_provider: conductor
             workspace_db: ~/Library/Application Support/com.conductor.app/conductor.db
-            workspace_switch_cmd: ~/.local/bin/conductor-switch-workspace
           - name: Cursor
             focus_shortcut: l
             enter_count: 1
@@ -332,18 +332,6 @@ class AppProfileConfig(BaseModel):
     # Path to the app's SQLite DB for workspace name resolution.
     # Only used when has_workspace_detection is True.
     workspace_db: str = ""
-
-    # Path to CLI tool that switches the app to a named workspace/tab.
-    # Only used when has_workspace_detection is True.
-    workspace_switch_cmd: str = ""
-
-    # SQL query to map a branch name to a workspace display name.
-    # Placeholder {branch} is replaced at runtime.
-    # Only used when has_workspace_detection is True.
-    workspace_branch_query: str = ""
-
-    # SQL query to list all workspace directory_name values.
-    workspace_list_query: str = ""
 
     # Whether this app supports post-paste AXValue verification (Plan 15-05).
     # Off for Terminal/iTerm2 (TTY content readback isn't via AX). Default True.
@@ -398,14 +386,6 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "has_workspace_detection": True,
         "workspace_provider": "conductor",
         "workspace_db": "~/Library/Application Support/com.conductor.app/conductor.db",
-        "workspace_switch_cmd": "~/.local/bin/conductor-switch-workspace",
-        "workspace_branch_query": (
-            "SELECT directory_name FROM workspaces "
-            "WHERE branch = '{branch}' AND state = 'ready'"
-        ),
-        "workspace_list_query": (
-            "SELECT directory_name, branch FROM workspaces WHERE state = 'ready'"
-        ),
         "has_session_detection": True,
         "ax_settle_before_verify": 0.15,
     },

@@ -261,9 +261,9 @@ def _cmd_orchestrator() -> int:
     """Start orchestrator daemon (blocking).
 
     Delegates to heyvox.herald.start_orchestrator so the app-profile config
-    (workspace_app_name, workspace_switch_cmd) is loaded. DEF-068 regressed when
-    this instantiated HeraldOrchestrator() with defaults, disabling workspace
-    switching for every TTS event.
+    (workspace_app_name, workspace_provider, workspace_db) is loaded. DEF-068
+    regressed when this instantiated HeraldOrchestrator() with defaults,
+    disabling workspace switching for every TTS event.
     """
     # Own process group so kokoro-daemon restarts don't kill us
     try:

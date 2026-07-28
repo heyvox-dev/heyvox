@@ -506,32 +506,38 @@ def test_def053_hud_dbg_skips_audio_level():
 
 
 def test_def054_activate_app_poll_verifies_pid():
-    """_activate_app must poll frontmost PID after activating and retry on
+    """activate_pid() must poll frontmost PID after activating and retry on
     mismatch. On Electron bundles (Conductor, VS Code, Slack, Cursor) the
     activate call is advisory — WindowServer can keep a sibling helper PID
     as the key window. A single activate + sleep, without a poll-verify
     loop, produced paste landing in the wrong window within the same bundle.
+
+    Lives in heyvox/input/activation.py (extracted from target.py's
+    _activate_app so heyvox.adapters.conductor's WorkspaceProvider.activate()
+    can reuse the same poll-loop) — target.py's _activate_app is now a thin
+    delegating wrapper, so this scans the actual implementation.
     """
-    target_py = os.path.join(
+    activation_py = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
-        "heyvox", "input", "target.py",
+        "heyvox", "input", "activation.py",
     )
-    src = open(target_py).read()
-    # Pull out the body of _activate_app so sibling functions don't satisfy
-    # the assertion accidentally.
+    src = open(activation_py).read()
+    # Pull out the body of activate_pid so sibling functions don't satisfy
+    # the assertion accidentally. `|\Z` handles activate_pid currently being
+    # the last function in the file (no trailing dedented line to anchor on).
     m = re.search(
-        r"def _activate_app\([^)]*\)[^:]*:\s*(.*?)(?=\n(?:def |class |[^\s]))",
+        r"def activate_pid\([^)]*\)[^:]*:\s*(.*?)(?=\n(?:def |class |[^\s])|\Z)",
         src,
         re.DOTALL,
     )
-    assert m, "DEF-054: could not locate _activate_app body in target.py"
+    assert m, "DEF-054: could not locate activate_pid body in heyvox/input/activation.py"
     body = m.group(1)
     assert "frontmostApplication" in body and "processIdentifier" in body, (
-        "DEF-054: _activate_app must read frontmostApplication().processIdentifier() "
+        "DEF-054: activate_pid must read frontmostApplication().processIdentifier() "
         "to verify the target PID actually became frontmost."
     )
     assert "for" in body and "range" in body and "activateWithOptions_" in body, (
-        "DEF-054: _activate_app must loop with periodic re-activation — a single "
+        "DEF-054: activate_pid must loop with periodic re-activation — a single "
         "activateWithOptions_ call is advisory only on Electron bundles."
     )
 

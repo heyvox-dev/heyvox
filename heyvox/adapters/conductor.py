@@ -16,15 +16,19 @@ on without a crash.
 """
 
 import os
+import re
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 DEFAULT_DB_PATH = os.path.expanduser(
     "~/Library/Application Support/com.conductor.app/conductor.db"
 )
+
+CONDUCTOR_BUNDLE_ID = "com.conductor.app"
 
 
 def _log(msg: str) -> None:
@@ -129,6 +133,31 @@ def get_active_workspace_and_session(
 # heyvox.adapters.get_workspace_provider)
 # ---------------------------------------------------------------------------
 
+def _get_app_and_window(pid: int):
+    """AXUIElementCreateApplication + AXFocusedWindow -> AXMainWindow ->
+    AXWindows[0] fallback chain. Returns (ax_app, window_or_None).
+
+    Factored out of detect_visible_branch so activate()'s row-enumeration
+    doesn't duplicate this a second time in this file.
+    """
+    from ApplicationServices import (
+        AXUIElementCreateApplication,
+        AXUIElementCopyAttributeValue,
+    )
+    ax_app = AXUIElementCreateApplication(pid)
+    win = None
+    for attr in ("AXFocusedWindow", "AXMainWindow"):
+        err, w = AXUIElementCopyAttributeValue(ax_app, attr, None)
+        if err == 0 and w is not None:
+            win = w
+            break
+    if win is None:
+        err, windows = AXUIElementCopyAttributeValue(ax_app, "AXWindows", None)
+        if err == 0 and windows and len(windows) > 0:
+            win = windows[0]
+    return ax_app, win
+
+
 def detect_visible_branch(pid: int) -> str:
     """Walk Conductor's AX tree to find the branch name shown in the right panel.
 
@@ -145,22 +174,8 @@ def detect_visible_branch(pid: int) -> str:
     belongs with the sole owner of Conductor coupling.
     """
     try:
-        from ApplicationServices import (
-            AXUIElementCreateApplication,
-            AXUIElementCopyAttributeValue,
-        )
-        ax = AXUIElementCreateApplication(pid)
-        # Try AXFocusedWindow first, then AXMainWindow, then first of AXWindows.
-        win = None
-        for attr in ("AXFocusedWindow", "AXMainWindow"):
-            err, w = AXUIElementCopyAttributeValue(ax, attr, None)
-            if err == 0 and w is not None:
-                win = w
-                break
-        if win is None:
-            err, windows = AXUIElementCopyAttributeValue(ax, "AXWindows", None)
-            if err == 0 and windows and len(windows) > 0:
-                win = windows[0]
+        from ApplicationServices import AXUIElementCopyAttributeValue
+        _ax, win = _get_app_and_window(pid)
         if win is None:
             return ""
 
@@ -197,6 +212,354 @@ def detect_visible_branch(pid: int) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# activate() — Hammerspoon-free workspace switching (replaces
+# ~/.local/bin/conductor-switch-workspace's switchWorkspaceByName). Ported
+# from that Lua function, live-verified against the real sidebar before
+# writing this: workspace rows are AXStaticText labels parented by an
+# AXLink; AXPress on that AXLink parent switches the workspace directly (no
+# mouse-coordinate math, so it can't misfire into the wrong window/monitor
+# the way a synthesized click theoretically could). A coordinate-based click
+# is kept as a fallback for the (unobserved) case AXPress isn't supported on
+# some element.
+# ---------------------------------------------------------------------------
+
+
+def _find_conductor_pid() -> Optional[int]:
+    """Locate a running Conductor process by bundle ID."""
+    import AppKit
+    apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(
+        CONDUCTOR_BUNDLE_ID
+    )
+    if not apps:
+        return None
+    return apps[0].processIdentifier()
+
+
+def _read_pos_size(elem):
+    """Return ((x, y), (w, h)) from AXPosition/AXSize, or (None, None).
+
+    AXUIElementCopyAttributeValue returns an opaque AXValueRef for
+    point/size-typed attributes; AXValueGetValue(value, type, None) unwraps
+    it to (ok: bool, CGPoint|CGSize). Confirmed live against a real Conductor
+    window before this was written.
+    """
+    from ApplicationServices import (
+        AXUIElementCopyAttributeValue, AXValueGetValue,
+        kAXValueCGPointType, kAXValueCGSizeType,
+    )
+    err_p, pos_val = AXUIElementCopyAttributeValue(elem, "AXPosition", None)
+    err_s, size_val = AXUIElementCopyAttributeValue(elem, "AXSize", None)
+    if err_p != 0 or pos_val is None or err_s != 0 or size_val is None:
+        return None, None
+    try:
+        ok_p, pt = AXValueGetValue(pos_val, kAXValueCGPointType, None)
+        ok_s, sz = AXValueGetValue(size_val, kAXValueCGSizeType, None)
+        if not ok_p or not ok_s:
+            return None, None
+        return (pt.x, pt.y), (sz.width, sz.height)
+    except Exception:
+        return None, None
+
+
+@dataclass(frozen=True)
+class SidebarRow:
+    label: str
+    elem: Any             # the AXStaticText element
+    link_parent: Any      # its AXLink parent (the AXPress/click target)
+    pos: Optional[tuple]  # (x, y) absolute screen coords, or None
+    size: Optional[tuple]  # (w, h), or None
+
+
+_SIDEBAR_MAX_REL_X = 300  # relative to the WINDOW's own left edge, not an
+                          # absolute screen-x band — the Lua script's
+                          # `pos.x < 300` is absolute and silently collects
+                          # zero rows once the window's own x-origin isn't
+                          # near 0 (a second monitor, a non-maximized
+                          # window). Filtering on the offset from the
+                          # window's own live AXPosition instead is correct
+                          # regardless of where the window actually sits.
+_MAX_WALK_DEPTH = 8
+_MAX_WALK_NODES = 400
+
+
+def _enumerate_sidebar_rows(win, win_pos: tuple) -> list:
+    """Walk the window's AX tree; return workspace-row candidates.
+
+    A row is any non-empty AXStaticText leaf, parented by an AXLink, within
+    _SIDEBAR_MAX_REL_X of the window's own x. Depth/node-capped like
+    detect_visible_branch. Matches on parent role rather than a hardcoded
+    pixel range because pinned and grouped sidebar sections render workspace
+    names at different indents — live-verified: pinned rows sit at x=60,
+    grouped rows at x=74, both parented by AXLink; section headers/nav items
+    are parented by AXGroup instead.
+    """
+    from ApplicationServices import AXUIElementCopyAttributeValue
+    rows: list = []
+    win_x = win_pos[0] if win_pos else 0.0
+    visited = [0]
+
+    def _walk(elem, depth: int = 0) -> None:
+        if depth > _MAX_WALK_DEPTH or visited[0] > _MAX_WALK_NODES:
+            return
+        visited[0] += 1
+        err_r, role = AXUIElementCopyAttributeValue(elem, "AXRole", None)
+        role_str = str(role) if err_r == 0 and role else ""
+        if role_str == "AXStaticText":
+            err_v, val = AXUIElementCopyAttributeValue(elem, "AXValue", None)
+            text = str(val).strip() if err_v == 0 and val else ""
+            if text:
+                pos, size = _read_pos_size(elem)
+                if pos is not None and (pos[0] - win_x) < _SIDEBAR_MAX_REL_X:
+                    err_p, parent = AXUIElementCopyAttributeValue(elem, "AXParent", None)
+                    parent_role = ""
+                    if err_p == 0 and parent is not None:
+                        err_pr, pr = AXUIElementCopyAttributeValue(parent, "AXRole", None)
+                        parent_role = str(pr) if err_pr == 0 and pr else ""
+                    if parent_role == "AXLink":
+                        rows.append(SidebarRow(text, elem, parent, pos, size))
+        err_c, children = AXUIElementCopyAttributeValue(elem, "AXChildren", None)
+        if err_c == 0 and children:
+            for c in children:
+                _walk(c, depth + 1)
+
+    _walk(win)
+    return rows
+
+
+_MIDDLE_DOT_RUN = re.compile(r"\s*·\s*")
+_WS_RUN = re.compile(r"\s+")
+
+
+def _normalize_text(s: str) -> str:
+    s = _MIDDLE_DOT_RUN.sub(" ", s)
+    s = _WS_RUN.sub(" ", s).strip()
+    return s.lower()
+
+
+def _match_row(rows: list, labels: list):
+    """4-tier match (exact -> contains -> normalized -> word-match), tried
+    per candidate label in priority order — mirrors the Lua findMatch, now
+    over multiple label candidates since a workspace can plausibly render as
+    its user-set name, PR title, or branch."""
+    for label in labels:
+        if not label:
+            continue
+        label_lower = label.lower()
+        label_norm = _normalize_text(label)
+        for row in rows:
+            if row.label.lower() == label_lower:
+                return row
+        for row in rows:
+            if label_lower in row.label.lower():
+                return row
+        for row in rows:
+            row_norm = _normalize_text(row.label)
+            if row_norm == label_norm or label_norm in row_norm:
+                return row
+        words = label_norm.split()
+        if words:
+            for row in rows:
+                row_norm = _normalize_text(row.label)
+                if all(w in row_norm for w in words):
+                    return row
+    return None
+
+
+_MAX_ROW_SEARCH_ATTEMPTS = 4
+_ROW_SEARCH_RETRY_DELAY = 0.3
+
+
+def _find_matching_row(win, win_pos: tuple, labels: list):
+    """Bounded retry — the AX bridge may not have the tree populated on the
+    very first query right after activating the app."""
+    for attempt in range(1, _MAX_ROW_SEARCH_ATTEMPTS + 1):
+        rows = _enumerate_sidebar_rows(win, win_pos)
+        match = _match_row(rows, labels)
+        if match is not None:
+            return match
+        if not rows and attempt < _MAX_ROW_SEARCH_ATTEMPTS:
+            time.sleep(_ROW_SEARCH_RETRY_DELAY)
+            continue
+        return None
+    return None
+
+
+def _try_ax_press(elem) -> bool:
+    """Precheck via AXUIElementCopyActionNames (read-only, fires nothing)
+    before ever calling PerformAction, so "not supported" and "supported but
+    failed" are distinguishable."""
+    try:
+        from ApplicationServices import AXUIElementCopyActionNames, AXUIElementPerformAction
+        err, actions = AXUIElementCopyActionNames(elem, None)
+        if err != 0 or not actions or "AXPress" not in list(actions):
+            return False
+        return AXUIElementPerformAction(elem, "AXPress") == 0
+    except Exception as e:
+        _log(f"_try_ax_press: exception: {e}")
+        return False
+
+
+def _synthesize_click(x: float, y: float) -> bool:
+    """Fallback: absolute-screen-coordinate click via CGEvent. x, y MUST come
+    from a freshly-read element AXPosition/AXSize — never a hardcoded or
+    assumed window origin."""
+    try:
+        import Quartz
+        down = Quartz.CGEventCreateMouseEvent(
+            None, Quartz.kCGEventLeftMouseDown, (x, y), Quartz.kCGMouseButtonLeft
+        )
+        up = Quartz.CGEventCreateMouseEvent(
+            None, Quartz.kCGEventLeftMouseUp, (x, y), Quartz.kCGMouseButtonLeft
+        )
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+        return True
+    except Exception as e:
+        _log(f"_synthesize_click: exception: {e}")
+        return False
+
+
+def _dispatch_activation(row: SidebarRow, mechanism: str) -> bool:
+    if mechanism == "ax_press":
+        return _try_ax_press(row.link_parent) or _try_ax_press(row.elem)
+    if mechanism == "click":
+        if row.pos is None or row.size is None:
+            return False
+        cx, cy = row.pos[0] + row.size[0] / 2, row.pos[1] + row.size[1] / 2
+        return _synthesize_click(cx, cy)
+    return False
+
+
+def _profile_db_path(profile) -> Optional[str]:
+    workspace_db = getattr(profile, "workspace_db", "") if profile else ""
+    return os.path.expanduser(workspace_db) if workspace_db else None
+
+
+def _labels_for_workspace_id(workspace_id: str, db_path: Optional[str] = None) -> list:
+    """Ordered candidate display strings Conductor might render in its
+    sidebar for this workspace_id, most-authoritative first: workspace_name
+    (only when user-set) > pr_title > branch. Empty list on any error."""
+    path = db_path if db_path is not None else DEFAULT_DB_PATH
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        row = conn.execute(
+            "SELECT workspace_name, user_set_workspace_name, pr_title, branch "
+            "FROM workspaces WHERE id = ?1 AND state != 'archived' LIMIT 1",
+            (workspace_id,),
+        ).fetchone()
+    except (sqlite3.Error, OSError) as e:
+        _log(f"_labels_for_workspace_id failed: {e}")
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except (sqlite3.Error, OSError):
+                pass
+    if row is None:
+        return []
+    ws_name, user_set, pr_title, branch = row
+    labels = []
+    if user_set == 1 and ws_name:
+        labels.append(ws_name)
+    if pr_title:
+        labels.append(pr_title)
+    if branch:
+        labels.append(branch)
+    return labels
+
+
+def _set_active_session(workspace_id: str, session_id: str, db_path: Optional[str] = None) -> bool:
+    """UPDATE workspaces.active_session_id. Read-write (unlike the read-only
+    lookups elsewhere in this file) — mirrors the bash script's own
+    unconditional sqlite UPDATE. Swallows errors to False (WAL contention
+    with a live Conductor process is expected, not a bug, same philosophy as
+    get_active_workspace_and_session's read-only queries)."""
+    path = db_path if db_path is not None else DEFAULT_DB_PATH
+    conn = None
+    try:
+        conn = sqlite3.connect(path, timeout=2)
+        conn.execute(
+            "UPDATE workspaces SET active_session_id = ? WHERE id = ?",
+            (session_id, workspace_id),
+        )
+        conn.commit()
+        return True
+    except (sqlite3.Error, OSError) as e:
+        _log(f"_set_active_session failed: {e}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except (sqlite3.Error, OSError):
+                pass
+
+
+def activate_workspace(identity, profile, *, pid: Optional[int] = None) -> bool:
+    """Make `identity` the visibly active Conductor workspace (+session).
+
+    Verifies success via read-back (detect_context/resolve) before returning
+    True — mirrors the DEF-192 paste pattern's "don't assume success" rule.
+    Never raises.
+    """
+    provider = ConductorWorkspaceProvider()
+    db_path = _profile_db_path(profile)
+
+    resolved_pid = pid if pid is not None else _find_conductor_pid()
+    if resolved_pid is None:
+        _log("activate: Conductor not running")
+        return False
+
+    # Session write is unconditional and happens before the already-on-target
+    # check: the bash script's equivalent skipped this write whenever
+    # workspace_id already matched, so a same-workspace/different-session
+    # request never got primed. Fixing that ordering is a small correctness
+    # improvement that falls out of writing this fresh.
+    if identity.session_id:
+        _set_active_session(identity.workspace_id, identity.session_id, db_path)
+
+    current_ctx = provider.detect_context(resolved_pid)
+    if current_ctx:
+        current_identity = provider.resolve(current_ctx, profile)
+        if current_identity is not None and current_identity.workspace_id == identity.workspace_id:
+            _log(f"activate: already on target {identity.workspace_id!r} — skip AX switch")
+            return True
+
+    labels = _labels_for_workspace_id(identity.workspace_id, db_path)
+    if not labels:
+        _log(f"activate: no label found for workspace_id={identity.workspace_id!r}")
+        return False
+
+    _ax_app, win = _get_app_and_window(resolved_pid)
+    if win is None:
+        _log("activate: no window")
+        return False
+    win_pos, _win_size = _read_pos_size(win)
+    if win_pos is None:
+        win_pos = (0.0, 0.0)  # degrade to absolute-x filtering rather than crash
+
+    match = _find_matching_row(win, win_pos, labels)
+    if match is None:
+        _log(f"activate: no matching row for labels={labels!r}")
+        return False
+
+    settle = getattr(profile, "activate_settle_secs", 0.3) if profile else 0.3
+    for mechanism in ("ax_press", "click"):
+        if not _dispatch_activation(match, mechanism):
+            continue
+        time.sleep(settle)
+        new_ctx = provider.detect_context(resolved_pid)
+        new_identity = provider.resolve(new_ctx, profile) if new_ctx else None
+        if new_identity is not None and new_identity.workspace_id == identity.workspace_id:
+            _log(f"activate: verified via {mechanism}")
+            return True
+        _log(f"activate: {mechanism} dispatched but verify failed — trying next mechanism")
+    return False
+
+
 class ConductorWorkspaceProvider:
     """WorkspaceProvider for Conductor (see heyvox.adapters.base).
 
@@ -222,3 +585,19 @@ class ConductorWorkspaceProvider:
             workspace_id=identity.workspace_id,
             session_id=identity.session_id,
         )
+
+    def resolve_by_name(self, name, profile):
+        from heyvox.adapters.base import WorkspaceIdentity
+        db_path = _profile_db_path(profile)
+        identity = get_active_workspace_and_session(
+            directory_name=name, branch=None, db_path=db_path,
+        )
+        if identity is None:
+            return None
+        return WorkspaceIdentity(
+            workspace_id=identity.workspace_id,
+            session_id=identity.session_id,
+        )
+
+    def activate(self, identity, profile, *, pid: Optional[int] = None) -> bool:
+        return activate_workspace(identity, profile, pid=pid)

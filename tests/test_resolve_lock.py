@@ -53,7 +53,7 @@ class FakeProfile:
     enter_count: int = 1
     settle_delay: float = 0.0  # 0 so tests don't actually sleep
     is_electron: bool = False
-    workspace_switch_cmd: str = ""
+    workspace_provider: str = ""
     workspace_db: str = "/tmp/fake.db"
     has_session_detection: bool = False
     supports_ax_verify: bool = True
@@ -319,13 +319,11 @@ def test_no_focus_shortcut_gives_multi_field_no_shortcut(monkeypatch):
 def test_yank_back_uses_id_flag(monkeypatch):
     from heyvox.input.target import _yank_back_app_and_workspace
 
-    captured_argv = []
-
-    def _fake_run(argv, *a, **kw):
-        captured_argv.append(argv)
-        return MagicMock(returncode=0)
-
-    monkeypatch.setattr("heyvox.input.target.subprocess.run", _fake_run)
+    mock_provider = MagicMock()
+    mock_provider.activate.return_value = True
+    monkeypatch.setattr(
+        "heyvox.adapters.get_workspace_provider", lambda name: mock_provider
+    )
 
     mock_appkit = MagicMock()
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
@@ -333,33 +331,28 @@ def test_yank_back_uses_id_flag(monkeypatch):
     lock = _make_lock(
         workspace_id="ws-uuid-1", session_id=None
     )
-    profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
+    profile = FakeProfile(workspace_provider="conductor")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
         _yank_back_app_and_workspace(lock, profile, config=None)
 
-    switch_calls = [
-        a for a in captured_argv if a and a[0] == "/usr/local/bin/test-switch"
-    ]
-    assert len(switch_calls) == 1
-    argv = switch_calls[0]
-    assert "--id" in argv
-    assert "ws-uuid-1" in argv
-    assert "--force" in argv
-    assert "--session" not in argv
+    mock_provider.activate.assert_called_once()
+    identity, called_profile = mock_provider.activate.call_args[0]
+    assert called_profile is profile
+    assert identity.workspace_id == "ws-uuid-1"
+    assert identity.session_id is None
+    assert mock_provider.activate.call_args.kwargs["pid"] == lock.app_pid
 
 
 def test_session_id_triggers_session_flag(monkeypatch):
-    """B4 + iter-3 W-fix: resolver appends --session unconditionally when
-    lock.session_id is set. Asserts argv (runtime) not source text."""
+    """B4 + iter-3 W-fix: activation carries session_id unconditionally when
+    lock.session_id is set."""
     from heyvox.input.target import _yank_back_app_and_workspace
 
-    captured_argv = []
-
-    def _fake_run(argv, *args, **kwargs):
-        captured_argv.append(argv)
-        return MagicMock(returncode=0, stderr=b"")
-
-    monkeypatch.setattr("heyvox.input.target.subprocess.run", _fake_run)
+    mock_provider = MagicMock()
+    mock_provider.activate.return_value = True
+    monkeypatch.setattr(
+        "heyvox.adapters.get_workspace_provider", lambda name: mock_provider
+    )
     mock_appkit = MagicMock()
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
 
@@ -367,31 +360,24 @@ def test_session_id_triggers_session_flag(monkeypatch):
         workspace_id="ws-uuid-1",
         session_id="sess-uuid-7",
     )
-    profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
+    profile = FakeProfile(workspace_provider="conductor")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
         _yank_back_app_and_workspace(lock, profile, config=None)
 
-    switch_calls = [
-        a for a in captured_argv if a and a[0] == "/usr/local/bin/test-switch"
-    ]
-    assert len(switch_calls) == 1
-    argv = switch_calls[0]
-    assert "--id" in argv and "ws-uuid-1" in argv
-    assert "--session" in argv
-    session_idx = argv.index("--session")
-    assert (
-        argv[session_idx + 1] == "sess-uuid-7"
-    ), f"--session UUID mismatch: argv[{session_idx+1}] = {argv[session_idx+1]!r}"
+    mock_provider.activate.assert_called_once()
+    identity = mock_provider.activate.call_args[0][0]
+    assert identity.workspace_id == "ws-uuid-1"
+    assert identity.session_id == "sess-uuid-7"
 
 
 def test_no_session_id_omits_session_flag(monkeypatch):
-    """When lock.session_id is None, --session is NOT appended."""
+    """When lock.session_id is None, the activated identity carries no session."""
     from heyvox.input.target import _yank_back_app_and_workspace
 
-    captured_argv = []
+    mock_provider = MagicMock()
+    mock_provider.activate.return_value = True
     monkeypatch.setattr(
-        "heyvox.input.target.subprocess.run",
-        lambda argv, *a, **kw: captured_argv.append(argv) or MagicMock(returncode=0),
+        "heyvox.adapters.get_workspace_provider", lambda name: mock_provider
     )
     mock_appkit = MagicMock()
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
@@ -399,38 +385,31 @@ def test_no_session_id_omits_session_flag(monkeypatch):
     lock = _make_lock(
         workspace_id="ws-uuid-1", session_id=None
     )
-    profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
+    profile = FakeProfile(workspace_provider="conductor")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
         _yank_back_app_and_workspace(lock, profile, config=None)
 
-    switch_calls = [
-        a for a in captured_argv if a and a[0] == "/usr/local/bin/test-switch"
-    ]
-    assert len(switch_calls) == 1
-    assert "--session" not in switch_calls[0]
+    mock_provider.activate.assert_called_once()
+    identity = mock_provider.activate.call_args[0][0]
+    assert identity.session_id is None
 
 
 def test_yank_back_noop_when_no_workspace_id(monkeypatch):
     from heyvox.input.target import _yank_back_app_and_workspace
 
-    captured_argv = []
+    mock_provider = MagicMock()
     monkeypatch.setattr(
-        "heyvox.input.target.subprocess.run",
-        lambda argv, *a, **kw: captured_argv.append(argv)
-        or MagicMock(returncode=0),
+        "heyvox.adapters.get_workspace_provider", lambda name: mock_provider
     )
     mock_appkit = MagicMock()
     mock_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.return_value = []
 
     lock = _make_lock(workspace_id=None)
-    profile = FakeProfile(workspace_switch_cmd="/usr/local/bin/test-switch")
+    profile = FakeProfile(workspace_provider="conductor")
     with patch.dict("sys.modules", {"AppKit": mock_appkit}):
         _yank_back_app_and_workspace(lock, profile, config=None)
 
-    switch_calls = [
-        a for a in captured_argv if a and a[0] == "/usr/local/bin/test-switch"
-    ]
-    assert switch_calls == []
+    mock_provider.activate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
