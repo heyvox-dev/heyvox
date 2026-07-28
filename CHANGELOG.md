@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-07-28
+
 ### Fixed
 
 - The TTS-triggered workspace-switch working-directory fallback (DEF-244)
