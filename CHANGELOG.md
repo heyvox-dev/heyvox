@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-28
+
 ### Fixed
 
 - TTS-triggered workspace switching now also matches a workspace by its
@@ -13,6 +15,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory codename — Conductor exports either form depending on the
   workspace, and the codename-only match silently failed to switch for any
   workspace where it exported the display name instead (DEF-242).
+- The Bluetooth pop-suppression mute no longer fires for USB/wired
+  microphones — it was muting system output on every retry of a
+  persistently failing USB mic, indefinitely, because the mute step wasn't
+  checking device transport (DEF-243).
 - TTS-triggered workspace switching now falls back to matching by working
   directory when the workspace name it was given doesn't match anything at
   all — covers workspaces where Conductor's exported name is neither the
