@@ -61,8 +61,14 @@ def get_active_workspace_and_session(
     """Look up the active Conductor workspace + session by directory or branch.
 
     Args:
-        directory_name: Workspace directory basename (e.g. "seattle"). If None,
-            matches any directory.
+        directory_name: Workspace directory basename (e.g. "seattle"), OR a
+            case-insensitive match against the workspace's display name with
+            spaces normalized to hyphens (e.g. "invoice-match-mcp" for a
+            workspace named "Invoice Match-mcp"). Conductor's own exported env
+            (CONDUCTOR_WORKSPACE_NAME/HEYVOX_WORKSPACE) has been observed to
+            carry either form depending on the workspace (DEF-242, confirmed
+            live on 2 of 3 sampled workspaces) — name-based callers can't
+            assume which one they'll get. If None, matches any directory.
         branch: Git branch name (e.g. "main"). If None, matches any branch.
         db_path: Override for the sqlite DB path. Defaults to DEFAULT_DB_PATH.
             Callers driven by `AppProfileConfig.workspace_db` (D-23) pass that
@@ -90,7 +96,11 @@ def get_active_workspace_and_session(
             """
             SELECT id, active_session_id, branch, directory_name
             FROM workspaces
-            WHERE (directory_name = ?1 OR ?1 IS NULL)
+            WHERE (
+                    directory_name = ?1
+                    OR LOWER(REPLACE(workspace_name, ' ', '-')) = LOWER(?1)
+                    OR ?1 IS NULL
+                  )
               AND (branch = ?2 OR ?2 IS NULL)
               AND state = 'ready'
             LIMIT 1

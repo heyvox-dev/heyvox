@@ -40,7 +40,11 @@ from heyvox.adapters.conductor import (
 
 
 def _build_fixture_db(path: str, rows: list[tuple]) -> None:
-    """rows = [(id, directory_name, branch, active_session_id, state), ...]"""
+    """rows = [(id, directory_name, branch, active_session_id, state[, workspace_name]), ...]
+
+    workspace_name is optional (defaults to NULL) so existing 5-tuple callers
+    are unaffected — only DEF-242's workspace_name-slug tests need to pass it.
+    """
     conn = sqlite3.connect(path)
     conn.execute(
         """
@@ -49,14 +53,17 @@ def _build_fixture_db(path: str, rows: list[tuple]) -> None:
             directory_name TEXT,
             branch TEXT,
             active_session_id TEXT,
-            state TEXT
+            state TEXT,
+            workspace_name TEXT
         )
         """
     )
+    normalized = [row if len(row) == 6 else (*row, None) for row in rows]
     conn.executemany(
-        "INSERT INTO workspaces (id, directory_name, branch, active_session_id, state) "
-        "VALUES (?,?,?,?,?)",
-        rows,
+        "INSERT INTO workspaces "
+        "(id, directory_name, branch, active_session_id, state, workspace_name) "
+        "VALUES (?,?,?,?,?,?)",
+        normalized,
     )
     conn.commit()
     conn.close()
@@ -97,6 +104,35 @@ def test_lookup_by_directory_name_returns_identity(tmp_path):
         directory_name="atlantis", db_path=db_path
     )
     assert missing is None
+
+
+def test_lookup_by_workspace_name_slug_returns_identity(tmp_path):
+    """DEF-242: Conductor's exported workspace-name env var has been observed
+    to carry the display name (space-to-hyphen, lowercased) rather than the
+    internal directory_name/codename — the lookup must accept either."""
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(
+        db_path,
+        [
+            (
+                "ws-dakar", "dakar", "geminicap/rfi110-replay-refresh",
+                "sess-d", "ready", "Invoice Match-mcp",
+            ),
+        ],
+    )
+
+    result = get_active_workspace_and_session(
+        directory_name="invoice-match-mcp", db_path=db_path
+    )
+    assert result is not None
+    assert result.workspace_id == "ws-dakar"
+
+    # Exact directory_name match still takes precedence / still works.
+    result_by_codename = get_active_workspace_and_session(
+        directory_name="dakar", db_path=db_path
+    )
+    assert result_by_codename is not None
+    assert result_by_codename.workspace_id == "ws-dakar"
 
 
 def test_lookup_with_no_filters_returns_first_ready_row(tmp_path):
@@ -914,6 +950,25 @@ def test_provider_resolve_by_name_no_match_returns_none(tmp_path):
     profile = SimpleNamespace(workspace_db=db_path)
     provider = ConductorWorkspaceProvider()
     assert provider.resolve_by_name("atlantis", profile) is None
+
+
+def test_provider_resolve_by_name_matches_workspace_name_slug(tmp_path):
+    """DEF-242 — same fix, exercised through the provider entry point that
+    orchestrator.py._switch_workspace actually calls."""
+    db_path = str(tmp_path / "c.db")
+    _build_fixture_db(
+        db_path,
+        [(
+            "ws-vienna", "vienna", "personal/todo-tracker",
+            "sess-v", "ready", "Personal Admin",
+        )],
+    )
+
+    profile = SimpleNamespace(workspace_db=db_path)
+    provider = ConductorWorkspaceProvider()
+    identity = provider.resolve_by_name("personal-admin", profile)
+
+    assert identity == WorkspaceIdentity(workspace_id="ws-vienna", session_id="sess-v")
 
 
 def test_provider_activate_delegates_to_activate_workspace():

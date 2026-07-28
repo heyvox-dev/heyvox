@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- TTS-triggered workspace switching now also matches a workspace by its
+  display name (case-insensitive, spaces as hyphens), not only its internal
+  directory codename — Conductor exports either form depending on the
+  workspace, and the codename-only match silently failed to switch for any
+  workspace where it exported the display name instead (DEF-242).
+
 ## [1.2.0] - 2026-07-28
 
 **If you installed an earlier version, re-run `heyvox setup`.** Voice output did
