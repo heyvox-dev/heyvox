@@ -10,6 +10,7 @@ from heyvox.audio.mic import (
     find_best_mic,
     is_device_cooled_down,
 )
+from heyvox.constants import is_excluded_device_name
 
 
 def test_device_manager_import():
@@ -157,6 +158,52 @@ class TestFindBestMic:
         pa.get_default_input_device_info.side_effect = IOError("No devices")
         result = find_best_mic(pa, mic_priority=["anything"])
         assert result is None
+
+    def test_excluded_device_never_selected_even_with_signal(self, monkeypatch):
+        """DEF-239: an excluded device is skipped even though it passes the level probe."""
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
+        devices = [
+            {"name": "BlackHole 2ch", "maxInputChannels": 2},
+            {"name": "MacBook Pro Microphone", "maxInputChannels": 1},
+        ]
+        pa = _mock_pa(devices)
+        result = find_best_mic(
+            pa,
+            mic_priority=["BlackHole 2ch", "MacBook Pro Microphone"],
+            excluded_devices=["BlackHole"],
+        )
+        # BlackHole would normally win (rank 0, real signal per _mock_pa) but is excluded.
+        assert result == 1
+
+    def test_excluded_system_default_returns_none(self, monkeypatch):
+        """DEF-239: refuses to fall back to an excluded system-default device."""
+        monkeypatch.setattr("heyvox.audio.mic.get_dead_input_device_names", lambda: set())
+        pa = _mock_pa([])
+        pa.get_default_input_device_info.return_value = {
+            "index": 0, "name": "Microsoft Teams Audio",
+        }
+        result = find_best_mic(pa, mic_priority=["anything"], excluded_devices=["Microsoft Teams"])
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestExcludedDeviceName
+# ---------------------------------------------------------------------------
+
+class TestExcludedDeviceName:
+    """Unit tests for the shared is_excluded_device_name() helper."""
+
+    def test_matches_case_insensitive_substring(self):
+        assert is_excluded_device_name("BlackHole 2ch", ["blackhole"]) is True
+        assert is_excluded_device_name("microsoft teams audio", ["Microsoft Teams"]) is True
+
+    def test_no_match(self):
+        assert is_excluded_device_name("MacBook Pro Microphone", ["BlackHole", "Microsoft Teams"]) is False
+
+    def test_empty_or_none_inputs(self):
+        assert is_excluded_device_name("", ["BlackHole"]) is False
+        assert is_excluded_device_name("BlackHole 2ch", None) is False
+        assert is_excluded_device_name("BlackHole 2ch", []) is False
 
 
 # ---------------------------------------------------------------------------

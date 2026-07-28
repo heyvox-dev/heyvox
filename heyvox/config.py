@@ -708,6 +708,13 @@ class HeyvoxConfig(BaseModel):
 
     mic_priority: list[str] = ["MacBook Pro Microphone"]
 
+    # Device name substrings that must never be auto-selected as mic input or
+    # offered as a speaker output choice. Virtual/loopback devices (BlackHole,
+    # Microsoft Teams' virtual audio driver) can carry real signal — so a
+    # level probe alone won't reject them — but they're not a real
+    # microphone/speaker a user would ever want auto-selected.
+    excluded_devices: list[str] = ["BlackHole", "Microsoft Teams"]
+
     # Path to cues directory — empty = auto-detect from package location
     cues_dir: str = ""
 

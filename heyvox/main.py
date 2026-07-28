@@ -323,18 +323,19 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
     if not missed:
         return
 
-    _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown)
+    _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown, config.excluded_devices)
 
 
-def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown) -> None:
+def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown, excluded_devices=None) -> None:
     """Guarded DEF-104 restart for a named cache-miss candidate.
 
     Shared by the periodic ``_maybe_restart_for_hotplug`` scan and the manual
     HUD-menu path (DeviceManager's ``pop_hotplug_restart_request``): both end
     up with a device that is live in CoreAudio but invisible to PortAudio's
     process-wide cache, and both must pass the same guards — never restart for
-    Bluetooth (DEF-147) and never loop on a device that stays invisible even
-    after a restart (marker cooldown).
+    Bluetooth (DEF-147), never restart for an excluded virtual device
+    (DEF-239), and never loop on a device that stays invisible even after a
+    restart (marker cooldown).
     """
     # DEF-147: never self-restart for a Bluetooth mic. A BT-HFP device is
     # chronically "live in CoreAudio but absent from PortAudio" as it flaps
@@ -354,6 +355,20 @@ def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown) -> None
             return
     except Exception as e:
         log(f"[hotplug] BT-transport check failed (proceeding): {e}")
+
+    # DEF-239: never self-restart to chase an excluded virtual/loopback device
+    # (BlackHole, Microsoft Teams' virtual audio driver). get_default_input_device_name()
+    # feeds detect_missed_hotplug's fallback candidate from the live macOS
+    # default input, which Teams sets to its own virtual device during a call —
+    # previously that made HeyVox actually switch to it (confirmed via training
+    # clip evidence, see DEFECT-LOG).
+    from heyvox.constants import is_excluded_device_name
+    if is_excluded_device_name(missed, excluded_devices):
+        log(
+            f"MIC_HOTPLUG_MISSED: '{missed}' is an excluded device — "
+            f"NOT self-restarting (DEF-239)"
+        )
+        return
 
     marker = _read_hotplug_marker()
     if marker is not None:
@@ -1598,6 +1613,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 _restart_for_hotplug_candidate(
                     _manual_hotplug_missed, log, hud_send, ctx,
                     cooldown=_HOTPLUG_RESTART_COOLDOWN,
+                    excluded_devices=config.excluded_devices,
                 )
 
             # After scan, update silence_threshold if device changed.
