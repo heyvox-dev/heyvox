@@ -589,20 +589,16 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
     """Unconditional app + workspace + session yank-back (SPEC R6).
 
     Activates the bundle via NSRunningApplication. When the lock carries a
-    workspace_id and the profile declares a workspace_switch_cmd, invokes
-    that command as `<cmd> --id ... [--session ...] --force` (B4) — for
-    Conductor this is the conductor-switch-workspace script shipped in its
-    default profile.
+    workspace_id and the profile has a registered workspace_provider,
+    delegates workspace+session activation to provider.activate() — which
+    includes its own already-on-target short-circuit (formerly duplicated
+    here ad-hoc, see DEF-095) and read-back verification, so every caller of
+    activate() gets both for free.
 
-    Session flag appended UNCONDITIONALLY when `session_id` is set — the
-    switch command's state update is expected to be idempotent, so there is
-    no need for a current-state comparison (which would require another
-    resolve, inviting the LIMIT-1 landmine from iteration-2).
-
-    B3-resolved: the Conductor switch script does not check RECORDING_FLAG
-    (verified Task 0); resolve_lock also runs post-stop so the flag is
-    cleared by then. The DEF-070 orchestrator guard is for Herald-driven
-    switches DURING recording and is NOT touched here.
+    B3-resolved: Conductor's workspace-switch path does not check
+    RECORDING_FLAG (verified Task 0); resolve_lock also runs post-stop so the
+    flag is cleared by then. The DEF-070 orchestrator guard is for
+    Herald-driven switches DURING recording and is NOT touched here.
 
     W10 (Fact 4): focus_app is intentionally NOT called. NSRunningApplication
     activation already handles app focus; focus_app would add a redundant
@@ -635,60 +631,21 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
         _activate_app(lock.app_pid, lock.app_name or "")
 
     if lock.workspace_id and profile is not None:
-        switch_cmd = getattr(profile, "workspace_switch_cmd", "")
-        if switch_cmd:
-            # DEF-095: Skip the switch command entirely when the app is
-            # already showing the target workspace. Conductor's script's
-            # `--force` flag bypasses its idle-gate, so it always dispatches
-            # a Hammerspoon left-click on the workspace sidebar entry — even
-            # when that entry is already selected. The click races against
-            # the chat input's focus state and absorbs the auto-Enter that
-            # app_fast_paste fires immediately after, leaving the dictation
-            # in the input field unsent. Detecting "already on target" via
-            # the provider (context walk + resolve) costs ~50–150 ms and
-            # replaces a ~500–1000 ms script invocation, so the skip path
-            # is also faster.
-            already_on_target = False
-            provider = _workspace_provider_for(profile)
-            if provider is not None:
-                try:
-                    current_ctx = provider.detect_context(lock.app_pid)
-                    if current_ctx:
-                        current_identity = provider.resolve(current_ctx, profile)
-                        if (
-                            current_identity is not None
-                            and current_identity.workspace_id
-                            == lock.workspace_id
-                        ):
-                            already_on_target = True
-                            _log(
-                                f"yank: already on target workspace "
-                                f"(ctx={current_ctx!r}, "
-                                f"ws={lock.workspace_id!r}) — "
-                                f"skipping switch to avoid focus race"
-                            )
-                except Exception as e:
-                    _log(f"yank: current-workspace probe failed: {e}")
-
-            if not already_on_target:
-                argv = [
-                    os.path.expanduser(switch_cmd),
-                    "--id", lock.workspace_id,
-                ]
-                if lock.session_id:
-                    # Session flag appended unconditionally — switch command update is idempotent.
-                    argv.extend(["--session", lock.session_id])
-                argv.append("--force")
-                try:
-                    subprocess.run(argv, capture_output=True, timeout=3)
-                    settle = getattr(profile, "settle_delay", 0.3)
-                    _time.sleep(settle)
-                except Exception as e:
-                    _log(f"yank: workspace_switch_cmd failed: {e}")
+        provider = _workspace_provider_for(profile)
+        if provider is not None:
+            from heyvox.adapters.base import WorkspaceIdentity
+            identity = WorkspaceIdentity(
+                workspace_id=lock.workspace_id, session_id=lock.session_id
+            )
+            try:
+                ok = provider.activate(identity, profile, pid=lock.app_pid)
+                _log(f"yank: provider.activate -> {ok} (ws={lock.workspace_id!r})")
+            except Exception as e:
+                _log(f"yank: provider.activate raised {e!r}")
         else:
             _log(
-                "yank: workspace_id set but profile lacks "
-                "workspace_switch_cmd — skipping workspace switch"
+                "yank: workspace_id set but profile has no workspace_provider "
+                "— skipping workspace switch"
             )
 
 
@@ -1161,80 +1118,17 @@ def verify_paste(lock, element, transcript: str, profile) -> VerifyResult:
 def _activate_app(pid: int, app_name: str) -> bool:
     """Activate an app by PID, polling until frontmost matches or timeout.
 
-    Returns True if frontmost PID matches target after activation, else False.
-
-    For multi-PID bundles (Electron apps like Conductor, VS Code, Slack, Cursor),
-    `activateWithOptions_` is advisory at the AppKit layer — WindowServer may
-    keep a different helper PID as the key window even though the bundle has
-    been "activated". We poll frontmost PID up to 500 ms with periodic
-    re-activation to force the specific target PID to the front before the
-    caller sends keystrokes. Single-PID apps resolve on the first poll.
-
-    See DEF-054 for the failure mode this guards against.
+    Thin wrapper around heyvox.input.activation.activate_pid (extracted there
+    so heyvox.adapters.conductor can reuse the same poll-verified logic for
+    WorkspaceProvider.activate() without duplicating it — this behavior is
+    proven necessary specifically for Electron/Tauri apps like Conductor, see
+    DEF-054/061/067, not safe to reimplement independently). Kept as a
+    same-signature module-level function (rather than a bare re-export) so
+    existing `monkeypatch.setattr("heyvox.input.target._activate_app", ...)`
+    call sites in tests keep patching this exact name.
     """
-    try:
-        import AppKit
-        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        if app is None:
-            _log(f"activate: no NSRunningApplication for pid={pid}, falling back")
-        else:
-            target_bundle = None
-            try:
-                target_bundle = app.bundleIdentifier()
-            except Exception:
-                pass
-            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-            # Poll-verify: frontmost PID may lag or land on a sibling helper PID.
-            ws = AppKit.NSWorkspace.sharedWorkspace()
-            for i in range(5):
-                _time.sleep(0.1)
-                front = ws.frontmostApplication()
-                front_pid = front.processIdentifier() if front else 0
-                if front_pid == pid:
-                    if i > 0:
-                        _log(f"activate: pid={pid} confirmed frontmost after {i+1} polls")
-                    return True
-                # Same-bundle sibling handling (DEF-061/067). See original
-                # comments before this refactor for full reasoning.
-                same_bundle = False
-                if front is not None:
-                    try:
-                        front_bundle = front.bundleIdentifier()
-                        if target_bundle and front_bundle:
-                            same_bundle = front_bundle == target_bundle
-                    except Exception:
-                        pass
-                    if not same_bundle:
-                        try:
-                            front_name = front.localizedName() or ""
-                            same_bundle = (
-                                bool(front_name)
-                                and front_name.lower() == (app_name or "").lower()
-                            )
-                        except Exception:
-                            pass
-                if same_bundle:
-                    _log(
-                        f"activate: sibling helper frontmost (pid={front_pid}, "
-                        f"target={pid}) — same bundle, skipping further "
-                        f"retries (DEF-061/067)"
-                    )
-                    return False
-                if i < 4:
-                    app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-            _log(
-                f"activate: WARNING target pid={pid} but frontmost pid={front_pid} "
-                f"after 500 ms retry (likely different helper PID in same bundle)"
-            )
-            return False
-    except Exception as e:
-        _log(f"activate: NSRunningApplication path failed: {e}")
-    # No osascript fallback here (W10, Fact 4): an extra
-    # `tell application ... activate` fork costs ~50ms/paste and is
-    # redundant with the NSRunningApplication bundle-ID path already
-    # taken by _yank_back_app_and_workspace. Callers treat False as
-    # "activation best-effort failed" and continue.
-    return False
+    from heyvox.input.activation import activate_pid
+    return activate_pid(pid, app_name, log=_log)
 
 
 # Legacy _find_window_text_fields and _walk_ax_tree removed in Plan 15-05:

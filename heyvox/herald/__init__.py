@@ -34,8 +34,9 @@ def start_orchestrator() -> None:
     """
     from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
 
-    ws_switch_cmd = ""
+    ws_provider = ""
     ws_app_name = ""
+    ws_db = ""
     tts_min_volume: float | None = None
     switch_countdown_secs: float | None = None
     switch_cancel_key: str | None = None
@@ -43,9 +44,10 @@ def start_orchestrator() -> None:
         from heyvox.config import load_config
         cfg = load_config()
         for profile in cfg.app_profiles:
-            if profile.has_workspace_detection and profile.workspace_switch_cmd:
-                ws_switch_cmd = profile.workspace_switch_cmd
+            if profile.has_workspace_detection and profile.workspace_provider:
+                ws_provider = profile.workspace_provider
                 ws_app_name = profile.name
+                ws_db = profile.workspace_db
                 break
         tts_min_volume = float(cfg.tts.min_volume)
         switch_countdown_secs = float(cfg.workspace_switch.countdown_secs)
@@ -53,8 +55,9 @@ def start_orchestrator() -> None:
     except Exception:
         pass
     orch_kwargs = dict(
-        workspace_switch_cmd=ws_switch_cmd,
+        workspace_provider=ws_provider,
         workspace_app_name=ws_app_name,
+        workspace_db=ws_db,
     )
     if tts_min_volume is not None:
         orch_kwargs["tts_min_volume"] = tts_min_volume

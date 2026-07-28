@@ -34,9 +34,8 @@ class FakeAppProfile:
     settle_delay: float = 0.3
     enter_delay: float = 0.15
     has_workspace_detection: bool = True
+    workspace_provider: str = "conductor"
     workspace_db: str = ""
-    workspace_list_query: str = ""
-    workspace_switch_cmd: str = "/usr/local/bin/conductor-switch-workspace"
 
 
 @dataclass

@@ -78,8 +78,9 @@ class OrchestratorConfig:
     )
 
     # App profile config for workspace switching (loaded from HeyvoxConfig)
-    workspace_switch_cmd: str = ""  # Path to workspace switch CLI tool
+    workspace_provider: str = ""    # heyvox.adapters registry key, e.g. "conductor"
     workspace_app_name: str = ""     # App name to check if frontmost
+    workspace_db: str = ""          # Path to the app's workspace DB (passed to the provider as profile.workspace_db)
 
     # Workspace-switch countdown (replaces the former hold-queue/idle-gate —
     # see WorkspaceSwitchConfig in heyvox/config.py). Countdown window before
@@ -349,57 +350,62 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
 
 def _switch_workspace(
     workspace: str, cfg: OrchestratorConfig, *,
-    workspace_id: str = "", session_id: str = "", force: bool = True,
+    workspace_id: str = "", session_id: str = "",
 ) -> None:
     """Switch the workspace-aware app to the given workspace name.
 
-    Uses cfg.workspace_switch_cmd from the app profile. Falls back to
-    searching PATH and ~/.local/bin/ if not explicitly configured.
+    Delegates to the app's WorkspaceProvider.activate() (heyvox.adapters),
+    looked up via cfg.workspace_provider — no more shelling out to an
+    external switch script. activate() has its own already-on-target
+    short-circuit and read-back verification, so this is a thin wrapper;
+    mirrors the equivalent migration in heyvox.input.target's
+    _yank_back_app_and_workspace.
 
-    force=True (default) passes --force to the switch script, bypassing its
-    own hs.host.idleTime() gate. That gate used to be the only thing deciding
-    whether a switch was welcome; now _run_switch_countdown's visible,
-    cancelable window IS the consent, so the bash script's independent idle
-    heuristic would only add a second, invisible veto on top of an already
-    explicit one.
+    No more force/idle-gate bypass: that existed to override the old switch
+    script's own hs.host.idleTime() gate, which activate() doesn't have —
+    _run_switch_countdown's visible, cancelable window IS the consent now.
 
-    DEF-237: when workspace_id is known, switches via `--id ... --session
-    ...` instead of the positional label search — --id is looked up by
-    stable UUID (survives renames) and is what unlocks --session (the
-    script only honours --session when --id is also given). Falls back to
-    the old positional call when workspace_id resolution failed upstream
-    (no DB, locked DB, no match) — same behavior as before this fix.
+    DEF-237: when workspace_id is known, activates that identity directly
+    (stable UUID, survives renames). Falls back to provider.resolve_by_name()
+    when workspace_id resolution failed upstream (no DB, locked DB, no
+    match) — same fallback intent as before this fix.
     """
-    if not cfg.workspace_switch_cmd:
+    if not cfg.workspace_provider:
         return
-    switch_cmd = os.path.expanduser(cfg.workspace_switch_cmd)
-    if not Path(switch_cmd).exists():
-        # Try PATH
-        found = shutil.which(os.path.basename(switch_cmd))
-        if found:
-            switch_cmd = found
-        else:
-            return
-    if workspace_id:
-        argv = [switch_cmd, "--id", workspace_id]
-        if session_id:
-            argv.extend(["--session", session_id])
-    else:
-        argv = [switch_cmd, workspace]
-    argv.extend(["--force"] if force else [])
-    try:
-        r = subprocess.run(
-            argv,
-            capture_output=True, text=True, timeout=5.0,
-        )
+    from heyvox.adapters import get_workspace_provider
+    provider = get_workspace_provider(cfg.workspace_provider)
+    if provider is None:
         _herald_log(
-            f"ORCH: switching to workspace={workspace!r} workspace_id={workspace_id!r} "
-            f"session_id={session_id!r} force={force} rc={r.returncode} "
-            f"stdout={(r.stdout or '').strip()[:200]!r} stderr={(r.stderr or '').strip()[:200]!r}",
+            f"ORCH: unknown workspace_provider {cfg.workspace_provider!r} — skipping switch",
+            cfg.debug_log,
+        )
+        return
+
+    from heyvox.adapters.base import WorkspaceIdentity
+    from types import SimpleNamespace
+    profile = SimpleNamespace(workspace_db=cfg.workspace_db)
+
+    if workspace_id:
+        identity = WorkspaceIdentity(workspace_id=workspace_id, session_id=session_id or None)
+    else:
+        try:
+            identity = provider.resolve_by_name(workspace, profile)
+        except Exception as e:
+            _herald_log(f"ORCH: resolve_by_name({workspace!r}) raised {e!r}", cfg.debug_log)
+            return
+        if identity is None:
+            _herald_log(f"ORCH: resolve_by_name({workspace!r}) found no match", cfg.debug_log)
+            return
+
+    try:
+        ok = provider.activate(identity, profile)
+        _herald_log(
+            f"ORCH: provider.activate -> {ok} (workspace={workspace!r} "
+            f"workspace_id={identity.workspace_id!r} session_id={identity.session_id!r})",
             cfg.debug_log,
         )
     except Exception as e:
-        _herald_log(f"ORCH: workspace switch failed: {e}", cfg.debug_log)
+        _herald_log(f"ORCH: provider.activate raised {e!r}", cfg.debug_log)
 
 
 def _hammerspoon_running() -> bool:
@@ -514,7 +520,7 @@ def _run_switch_countdown(
 ) -> None:
     """Fire-and-forget: announce a pending switch, give cfg.switch_countdown_secs
     to cancel (Right Ctrl, or Escape/stop — see herald/cli.py::_cmd_stop), then
-    switch with force=True if uncancelled.
+    switch if uncancelled.
 
     Runs on its own daemon thread (mirrors the watchdog_thread template —
     poll loop running parallel to playback) so audio is never blocked by it;
@@ -578,7 +584,7 @@ def _run_switch_countdown(
             debug_log,
         )
         return
-    _switch_workspace(ws, cfg, workspace_id=workspace_id, session_id=session_id, force=True)
+    _switch_workspace(ws, cfg, workspace_id=workspace_id, session_id=session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1389,8 +1395,9 @@ def main() -> None:
     )
 
     # Load app profile config for workspace switching
-    ws_switch_cmd = ""
+    ws_provider = ""
     ws_app_name = ""
+    ws_db = ""
     tts_min_volume: float | None = None
     switch_countdown_secs: float | None = None
     switch_cancel_key: str | None = None
@@ -1398,9 +1405,10 @@ def main() -> None:
         from heyvox.config import load_config
         heyvox_cfg = load_config()
         for profile in heyvox_cfg.app_profiles:
-            if profile.has_workspace_detection and profile.workspace_switch_cmd:
-                ws_switch_cmd = profile.workspace_switch_cmd
+            if profile.has_workspace_detection and profile.workspace_provider:
+                ws_provider = profile.workspace_provider
                 ws_app_name = profile.name
+                ws_db = profile.workspace_db
                 break
         tts_min_volume = float(heyvox_cfg.tts.min_volume)
         switch_countdown_secs = float(heyvox_cfg.workspace_switch.countdown_secs)
@@ -1412,8 +1420,9 @@ def main() -> None:
         queue_dir=Path(args.queue_dir),
         duck_enabled=not args.no_duck,
         media_pause=not args.no_media_pause,
-        workspace_switch_cmd=ws_switch_cmd,
+        workspace_provider=ws_provider,
         workspace_app_name=ws_app_name,
+        workspace_db=ws_db,
     )
     if tts_min_volume is not None:
         cfg_kwargs["tts_min_volume"] = tts_min_volume

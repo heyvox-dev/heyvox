@@ -47,7 +47,6 @@ class FakeProfile:
     enter_count: int = 1
     settle_delay: float = 0.0
     is_electron: bool = False
-    workspace_switch_cmd: str = ""
     workspace_db: str = ""
     has_session_detection: bool = False
     supports_ax_verify: bool = True
