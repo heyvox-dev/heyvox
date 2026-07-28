@@ -299,6 +299,20 @@ TELEMETRY_COUNTER_SNAPSHOT = f"{TELEMETRY_DIR}/counter-snapshot.json"
 
 
 # ---------------------------------------------------------------------------
+# Device exclusion — virtual/loopback devices that must never be
+# auto-selected as a real microphone or speaker (see excluded_devices in
+# HeyvoxConfig).
+# ---------------------------------------------------------------------------
+
+def is_excluded_device_name(name: str, excluded: list[str] | None) -> bool:
+    """True if ``name`` matches any excluded-device substring (case-insensitive)."""
+    if not name or not excluded:
+        return False
+    n = name.lower()
+    return any(e.lower() in n for e in excluded)
+
+
+# ---------------------------------------------------------------------------
 # IPC lifecycle helpers
 # ---------------------------------------------------------------------------
 

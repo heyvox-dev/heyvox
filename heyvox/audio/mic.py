@@ -16,7 +16,7 @@ from typing import Callable
 import numpy as np
 import pyaudio
 
-from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE
+from heyvox.constants import DEFAULT_SAMPLE_RATE, DEFAULT_CHUNK_SIZE, is_excluded_device_name
 from heyvox.audio._coreaudio import (
     _AudioObjectPropertyAddress,
     _enumerate_coreaudio_inputs,
@@ -591,7 +591,7 @@ def probe_device_level(
                 pass
 
 
-def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sample_rate: int = DEFAULT_SAMPLE_RATE, chunk_size: int = DEFAULT_CHUNK_SIZE, require_audio: bool = False) -> int | None:
+def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sample_rate: int = DEFAULT_SAMPLE_RATE, chunk_size: int = DEFAULT_CHUNK_SIZE, require_audio: bool = False, excluded_devices: list[str] | None = None) -> int | None:
     """Find the best working microphone based on priority list.
 
     Tests each candidate device by actually reading audio frames and checking for
@@ -606,6 +606,10 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         chunk_size: Frames per buffer for the test stream.
         require_audio: If True, reject devices producing zero audio.
             Used during dead-mic recovery to avoid re-selecting a silent device.
+        excluded_devices: Device name substrings that must never be selected
+            (virtual/loopback devices like BlackHole or Microsoft Teams'
+            virtual audio driver). Checked case-insensitively against every
+            candidate, including the final system-default fallback.
 
     Returns:
         Device index (int) or None if no input device is available.
@@ -626,6 +630,9 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
         # Skip devices that CoreAudio reports as not alive
         if d['name'].lower() in dead_names:
             _log(f"  [{i}] {d['name']}: skipped (not alive per CoreAudio)")
+            continue
+        if is_excluded_device_name(d['name'], excluded_devices):
+            _log(f"  [{i}] {d['name']}: skipped (excluded device)")
             continue
         matched = False
         for prio_name in mic_priority:
@@ -740,6 +747,9 @@ def find_best_mic(pa: pyaudio.PyAudio, mic_priority: list[str] | None = None, sa
     try:
         default_info = pa.get_default_input_device_info()
         default_name = default_info.get('name', '')
+        if default_name and is_excluded_device_name(default_name, excluded_devices):
+            _log(f"System default '{default_name}' is an excluded device — refusing to use it")
+            return None
         if default_name and require_audio and not is_builtin_mic(default_name):
             # When require_audio is set (recovery path), respect cooldown —
             # caller will retry or fall back to a second find_best_mic() without it.

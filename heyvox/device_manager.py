@@ -130,6 +130,7 @@ class DeviceManager(BtHfpMixin):
         behavior in main.py.
         """
         mic_priority = self.config.mic_priority if self.config else None
+        excluded_devices = self.config.excluded_devices if self.config else None
         sample_rate = self.config.audio.sample_rate if self.config else 16000
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
@@ -140,6 +141,7 @@ class DeviceManager(BtHfpMixin):
             mic_priority=mic_priority,
             sample_rate=sample_rate,
             chunk_size=chunk_size,
+            excluded_devices=excluded_devices,
         )
         if self.dev_index is None:
             self._log("FATAL: No microphone available, exiting")
@@ -383,6 +385,7 @@ class DeviceManager(BtHfpMixin):
             True if recovery succeeded, False if no mic could be found.
         """
         mic_priority = self.config.mic_priority if self.config else None
+        excluded_devices = self.config.excluded_devices if self.config else None
         sample_rate = self.config.audio.sample_rate if self.config else 16000
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
@@ -488,6 +491,7 @@ class DeviceManager(BtHfpMixin):
             sample_rate=sample_rate,
             chunk_size=chunk_size,
             require_audio=True,
+            excluded_devices=excluded_devices,
         )
         _was_last_resort = False
         if dev_index is None:
@@ -496,6 +500,7 @@ class DeviceManager(BtHfpMixin):
                 mic_priority=mic_priority,
                 sample_rate=sample_rate,
                 chunk_size=chunk_size,
+                excluded_devices=excluded_devices,
             )
             _was_last_resort = dev_index is not None  # Got it from non-require_audio fallback
         if dev_index is None:
@@ -678,6 +683,7 @@ class DeviceManager(BtHfpMixin):
             True if recovery succeeded, False if no mic could be found.
         """
         mic_priority = self.config.mic_priority if self.config else None
+        excluded_devices = self.config.excluded_devices if self.config else None
         sample_rate = self.config.audio.sample_rate if self.config else 16000
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
@@ -710,6 +716,7 @@ class DeviceManager(BtHfpMixin):
             sample_rate=sample_rate,
             chunk_size=chunk_size,
             require_audio=True,
+            excluded_devices=excluded_devices,
         )
         if dev_index is None:
             self._log("No mic found, retrying in 2s...")
@@ -750,6 +757,7 @@ class DeviceManager(BtHfpMixin):
         mic_priority: list[str] | None,
         sample_rate: int,
         chunk_size: int,
+        excluded_devices: list[str] | None = None,
     ) -> bool:
         """Try to switch to a higher-priority mic. Handles Bluetooth A2DP→HFP.
 
@@ -779,7 +787,7 @@ class DeviceManager(BtHfpMixin):
             return False
 
         # Input device exists — proceed with actual switch
-        return self._do_mic_switch(target_name, mic_priority, sample_rate, chunk_size)
+        return self._do_mic_switch(target_name, mic_priority, sample_rate, chunk_size, excluded_devices)
 
     def _do_mic_switch(
         self,
@@ -787,6 +795,7 @@ class DeviceManager(BtHfpMixin):
         mic_priority: list[str] | None,
         sample_rate: int,
         chunk_size: int,
+        excluded_devices: list[str] | None = None,
     ) -> bool:
         """Actually switch to a new mic via find_best_mic. Returns True on success."""
         old_headset_mode = self.headset_mode
@@ -802,6 +811,7 @@ class DeviceManager(BtHfpMixin):
                 sample_rate=sample_rate,
                 chunk_size=chunk_size,
                 require_audio=True,
+                excluded_devices=excluded_devices,
             )
             candidate_name = (
                 _probe_pa.get_device_info_by_index(candidate_index)['name']
@@ -836,6 +846,7 @@ class DeviceManager(BtHfpMixin):
             sample_rate=sample_rate,
             chunk_size=chunk_size,
             require_audio=True,
+            excluded_devices=excluded_devices,
         )
         if dev_index is not None:
             self.dev_index = dev_index
@@ -951,11 +962,12 @@ class DeviceManager(BtHfpMixin):
         self._last_device_scan = now
 
         mic_priority = self.config.mic_priority if self.config else None
+        excluded_devices = self.config.excluded_devices if self.config else None
         sample_rate = self.config.audio.sample_rate if self.config else 16000
         chunk_size = self.config.audio.chunk_size if self.config else 1280
 
         # Check pending BT HFP wait (non-blocking, returns early if nothing pending)
-        if self._continue_bt_hfp_wait(mic_priority, sample_rate, chunk_size):
+        if self._continue_bt_hfp_wait(mic_priority, sample_rate, chunk_size, excluded_devices):
             return  # Switch completed this cycle
 
         try:
@@ -1011,6 +1023,7 @@ class DeviceManager(BtHfpMixin):
             if better_available:
                 better_available = self._try_switch_to_better_mic(
                     matching[0], current_names, mic_priority, sample_rate, chunk_size,
+                    excluded_devices,
                 )
 
             # Check for manual mic switch request from HUD menu
