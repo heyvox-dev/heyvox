@@ -145,7 +145,8 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 - [ ] Pause/resume recording (Escape pauses, second press resumes) — cancel works, pause/resume state machine not built
 - [ ] Evaluate Cohere Transcribe as alternative STT (v2)
 - [ ] TTS server on Mac Mini (v2) — no remote TTS code yet
-- [ ] Evaluate ripping out the Bluetooth mic-selection machinery entirely (A2DP→HFP wait/trigger, BT gain-boost, BT cooldown tiers in device_manager.py/mic.py/bt.py) now that a single pinned USB/wired default + built-in fallback is the model (2026-07-16) — currently left in place (dormant, not on the selection path) rather than deleted; revisit once the simplified model has run for a while
+- [ ] Evaluate ripping out the Bluetooth mic-selection machinery entirely (A2DP→HFP wait/trigger, BT gain-boost, BT cooldown tiers in device_manager.py/mic.py/bt.py) now that a single pinned USB/wired default + built-in fallback is the model (2026-07-16) — currently left in place (dormant, not on the selection path) rather than deleted; revisit once the simplified model has run for a while. Reconsidered 2026-07-28 after DEF-243 (transport-blind BT pop-suppression mute) surfaced in this same code — still deferred; wants a dedicated session, not a reactive tack-on to a bug fix.
+- [ ] Diagnose the G435 CoreAudio-level fault seen 2026-07-28 during DEF-243 (`AudioUnit Invalid Property Value -10851`, `Stream closed -9988` on every manual pin attempt) — self-resolved without a fix, root cause unknown, confirmed NOT the known stale-PortAudio-handle bug (DEF-153). Revisit if it recurs.
 
 ## Done (previously pending)
 - [x] Generic app switching / de-hardcoded Conductor (2026-07-23) — WorkspaceProvider protocol + registry, generic TargetLock workspace_id/session_id, per-app ax_value_paste flag; Herald was already profile-driven
