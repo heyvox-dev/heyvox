@@ -90,6 +90,21 @@ class TestIsMuted(unittest.TestCase):
     def test_muted_by_system(self, _):
         assert tts.is_muted() is True
 
+    @patch("heyvox.audio.tts._is_system_muted", return_value=True)
+    def test_check_system_false_ignores_system_mute(self, mock_system):
+        assert tts.is_muted(check_system=False) is False
+        mock_system.assert_not_called()
+
+    @patch("heyvox.audio.tts._is_system_muted", return_value=False)
+    def test_check_system_false_still_honors_memory_flag(self, _):
+        tts._muted = True
+        assert tts.is_muted(check_system=False) is True
+
+    @patch("heyvox.audio.tts._is_system_muted", return_value=False)
+    def test_check_system_false_still_honors_herald_flag(self, _):
+        open(HERALD_MUTE_FLAG, "w").close()
+        assert tts.is_muted(check_system=False) is True
+
 
 class TestSetMuted(unittest.TestCase):
     """set_muted() should sync in-memory + file flags."""

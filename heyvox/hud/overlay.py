@@ -601,7 +601,7 @@ def _apply_state(
                 # Muted: keep SF Symbol mic.slash with red palette — clearer
                 # affordance than tinting the brand glyph.
                 _mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                    "mic.slash", "Microphone muted",
+                    "mic.slash", "Wake word muted",
                 )
                 _cfg = NSImageSymbolConfiguration.configurationWithPaletteColors_([
                     NSColor.systemRedColor(),
@@ -944,7 +944,7 @@ def _make_menu_action_class():
                     pass
                 mic_symbol = "mic.slash" if mic_muted else "mic"
                 mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                    mic_symbol, "Microphone muted" if mic_muted else "Microphone",
+                    mic_symbol, "Wake word muted" if mic_muted else "Microphone",
                 )
                 if mic_muted:
                     # Red slash, dimmed mic body
@@ -1409,11 +1409,11 @@ def _build_transcript_menu(handler):
         _att.setImage_(_mic_img)
         _icon_str = NSAttributedString.attributedStringWithAttachment_(_att)
         _text_attrs = NSDictionary.dictionaryWithObject_forKey_(_font, NSFontAttributeName)
-        _text_str = NSAttributedString.alloc().initWithString_attributes_(" Mic: Muted", _text_attrs)
+        _text_str = NSAttributedString.alloc().initWithString_attributes_(" Mic: Wake Word Muted", _text_attrs)
         _full = NSMutableAttributedString.alloc().init()
         _full.appendAttributedString_(_icon_str)
         _full.appendAttributedString_(_text_str)
-        mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Mic: Muted", None, "")
+        mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Mic: Wake Word Muted", None, "")
         mic_parent.setAttributedTitle_(_full)
     else:
         mic_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -1463,12 +1463,13 @@ def _build_transcript_menu(handler):
         _styled(_no_mic)
         mic_sub.addItem_(_no_mic)
 
-    # Mic mute toggle at bottom of mic submenu
+    # Wake-word mute toggle at bottom of mic submenu (pauses wake-word
+    # detection only — push-to-talk is a separate path, unaffected)
     from heyvox.constants import MIC_MUTE_FLAG as _MIC_MUTE_FLAG
     _is_mic_muted = os.path.exists(_MIC_MUTE_FLAG)
     mic_sub.addItem_(NSMenuItem.separatorItem())
     _mic_mute_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Mute Microphone", "toggleMicMute:", "",
+        "Mute Wake Word", "toggleMicMute:", "",
     )
     _mic_mute_item.setTarget_(handler)
     _mic_mute_item.setEnabled_(True)

@@ -5,6 +5,7 @@ import time
 import wave
 from unittest.mock import patch
 
+import pytest
 import soundfile
 
 from heyvox.audio.cues import get_cues_dir, audio_cue, is_suppressed
@@ -55,6 +56,13 @@ class TestAudioCue:
     def setup_method(self):
         # Prevent cached entries from one test leaking into the next.
         cues_module._cue_cache.clear()
+
+    @pytest.fixture(autouse=True)
+    def _default_not_muted(self):
+        # Isolate from real is_muted() state (tts._muted global, HERALD_MUTE_FLAG
+        # file) so these tests are deterministic; muted-path tests override this.
+        with patch("heyvox.audio.tts.is_muted", return_value=False):
+            yield
 
     @patch("sounddevice.play")
     @patch("heyvox.audio.cues.subprocess.run")
@@ -150,6 +158,27 @@ class TestAudioCue:
         call_args = mock_popen.call_args
         assert call_args[0][0][0] == "afplay"
         assert str(cue_file) in call_args[0][0][1]
+
+    @patch("heyvox.audio.tts.is_muted", return_value=True)
+    @patch("sounddevice.play")
+    @patch("heyvox.audio.cues.subprocess.Popen")
+    def test_noop_when_muted(self, mock_popen, mock_play, mock_muted, tmp_path):
+        """DEF-233: cues must respect the same mute state Herald TTS does."""
+        cue_file = tmp_path / "listening.aiff"
+        _write_valid_cue_wav(str(cue_file))
+
+        audio_cue("listening", str(tmp_path))
+
+        mock_play.assert_not_called()
+        mock_popen.assert_not_called()
+
+    @patch("heyvox.audio.tts.is_muted")
+    def test_mute_check_skips_system_mute(self, mock_muted, tmp_path):
+        """The wake-word cue path must not pay for the osascript system-mute
+        check (WW_LATENCY-critical) — only the fast in-memory/file flags."""
+        mock_muted.return_value = True
+        audio_cue("listening", str(tmp_path))
+        mock_muted.assert_called_once_with(check_system=False)
 
 
 class TestIsSuppressed:

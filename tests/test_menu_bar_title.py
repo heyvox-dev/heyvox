@@ -90,7 +90,7 @@ class TestFormatMenuBarTitle:
             state="idle", friendly_mic="Built-in", is_mic_muted=True,
         )
         assert out["mute_icon"] is True
-        assert "(muted)" in out["tooltip"]
+        assert "(wake word muted)" in out["tooltip"]
 
     def test_empty_mic_shows_none_in_tooltip(self):
         out = format_menu_bar_title(state="idle", friendly_mic="")

@@ -95,7 +95,7 @@ def format_menu_bar_title(
     if is_mic_muted:
         return {
             "title": suffix.strip(),
-            "tooltip": f"{tooltip} (muted)",
+            "tooltip": f"{tooltip} (wake word muted)",
             "use_brand_icon": False,
             "mute_icon": True,
         }

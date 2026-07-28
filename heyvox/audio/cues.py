@@ -201,6 +201,9 @@ def audio_cue(
     Sets _cue_suppress_until to prevent the wake word detector from
     triggering on the cue audio bleeding back through the microphone.
 
+    No-ops if output is muted (DEF-233) — mirrors the mute check Herald
+    TTS already applies, so cue sounds don't play when speech doesn't.
+
     Args:
         name: Cue name without extension (e.g. "listening", "ok", "paused").
         cues_dir: Directory containing .aiff files. Defaults to package cues/.
@@ -212,6 +215,10 @@ def audio_cue(
             Keyword-only, default 0.0.
     """
     global _cue_suppress_until
+
+    from heyvox.audio.tts import is_muted
+    if is_muted(check_system=False):
+        return
 
     if cues_dir is None:
         cues_dir = get_cues_dir()

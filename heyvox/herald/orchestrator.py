@@ -572,7 +572,7 @@ def _run_switch_countdown(
         return
     if stop_event.is_set():
         return
-    if Path(RECORDING_FLAG).exists() or not _workspace_app_is_frontmost(cfg):
+    if cfg.recording_flag.exists() or not _workspace_app_is_frontmost(cfg):
         _herald_log(
             f"ORCH: switch to {ws!r} skipped at expiry (recording or app not frontmost)",
             debug_log,
@@ -982,7 +982,7 @@ def _play_wav(
                 # forced Hammerspoon sidebar click steals focus mid-paste, so
                 # `keystroke return` lands on a sidebar item instead of the chat
                 # text field and the message never submits.
-                if Path(RECORDING_FLAG).exists():
+                if cfg.recording_flag.exists():
                     _herald_log(
                         f"ORCH: skipping workspace switch to {ws!r} "
                         f"(HeyVox recording/injecting)",
