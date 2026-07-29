@@ -42,6 +42,34 @@ _PROCESSING_TIMER = None
 
 _MENUBAR_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "menubar.png")
 
+# Stable, workspace-independent copy of the brand icon (DEF-250). heyvox runs
+# as an editable pip install, so _MENUBAR_ICON_PATH above resolves through
+# whatever Conductor workspace was on disk when this long-running daemon
+# last imported the module — Conductor workspaces get archived/renamed
+# independently of the daemon (which only restarts on crash, not on
+# workspace switch), so reading the icon straight from that path means it
+# silently degrades to the SF Symbol "mic" the moment the workspace goes
+# away underneath it. Read from this stable copy instead.
+_STABLE_HUD_DIR = os.path.join(os.path.expanduser("~"), ".config", "heyvox", "hud")
+_STABLE_MENUBAR_ICON_PATH = os.path.join(_STABLE_HUD_DIR, "menubar.png")
+
+
+def _ensure_stable_menubar_icon():
+    """Refresh the stable brand-icon copy from the package (DEF-250).
+
+    Called once per overlay process start, while _MENUBAR_ICON_PATH is
+    guaranteed valid (this process just imported it from there). Best-effort:
+    if this fails, image loads just fall back to the SF Symbol as before.
+    """
+    import shutil
+
+    try:
+        if os.path.exists(_MENUBAR_ICON_PATH):
+            os.makedirs(_STABLE_HUD_DIR, exist_ok=True)
+            shutil.copy2(_MENUBAR_ICON_PATH, _STABLE_MENUBAR_ICON_PATH)
+    except OSError:
+        pass
+
 # Mic-level menu bar meter — small volume-reactive bars next to the red dot
 # while listening, so there's a "is it hearing me" signal even when the
 # floating pill is hidden (hud_menu_bar_only mode).
@@ -60,12 +88,13 @@ def _brand_menubar_image():
     """Load the HeyVox brand glyph (bubble + caret + sparkle) as a macOS
     template image — black silhouette tinted by the system to match the
     menu bar appearance (white on dark, black on light). Source SVG is
-    rendered to PNG at build/install time via rsvg-convert.
+    rendered to PNG at build/install time via rsvg-convert. Read from the
+    stable copy (DEF-250), not the package path — see _STABLE_MENUBAR_ICON_PATH.
     """
     from AppKit import NSImage
     from Foundation import NSSize
 
-    img = NSImage.alloc().initWithContentsOfFile_(_MENUBAR_ICON_PATH)
+    img = NSImage.alloc().initWithContentsOfFile_(_STABLE_MENUBAR_ICON_PATH)
     if img is None:
         return NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "mic", "Microphone",
@@ -135,7 +164,8 @@ def _brand_hud_image(size=11):
 
     The menu bar image is a template (black silhouette tinted by macOS); inside
     a NSTextAttachment the template doesn't auto-tint, so we composite a
-    pre-tinted copy via SourceIn over white.
+    pre-tinted copy via SourceIn over white. Read from the stable copy
+    (DEF-250), not the package path — see _STABLE_MENUBAR_ICON_PATH.
     """
     from AppKit import (
         NSImage, NSColor,
@@ -144,7 +174,7 @@ def _brand_hud_image(size=11):
     )
     from Foundation import NSSize, NSMakeRect
 
-    src = NSImage.alloc().initWithContentsOfFile_(_MENUBAR_ICON_PATH)
+    src = NSImage.alloc().initWithContentsOfFile_(_STABLE_MENUBAR_ICON_PATH)
     if src is None:
         return None
     target = NSImage.alloc().initWithSize_(NSSize(size, size))
@@ -2020,6 +2050,10 @@ def main(menu_bar_only: bool = False):
 
     global _MENU_BAR_ONLY
     _MENU_BAR_ONLY = menu_bar_only
+
+    # DEF-250: refresh the stable brand-icon copy now, while the package path
+    # is guaranteed valid for this freshly-started process.
+    _ensure_stable_menubar_icon()
 
     # ---- Application setup ----
     app = NSApplication.sharedApplication()
