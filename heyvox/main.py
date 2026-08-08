@@ -2071,8 +2071,33 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 #      peaks of real "Hey Vox" — DEF-043 phoneme flares stay <0.85)
                 #   3) Sliding window: 2 hits in last 4 frames (~320 ms) —
                 #      tolerates peak→dip→peak that path 1 loses.
+                # DEF-254: path 1 also drives START-word detection (_is_rec is
+                # False there, and fast/window/ultra are stop-only), so it
+                # can't be unconditionally gated the way DEF-117/118 gated
+                # fast/window — that would silently kill wake-from-idle.
+                # `not _is_rec or _recent_silence` leaves start untouched and
+                # requires a recent pause only for the stop-word case.
+                #
+                # Why this was needed: DEF-117 (2026-05-26) and DEF-118
+                # (2026-05-28) gated fast/window on `_recent_silence` after
+                # mid-sentence phoneme bursts falsely stopped recordings —
+                # reasoning at the time that consec's "sustained hits" made
+                # it "naturally more resistant to single-burst FPs" (DEF-117
+                # commit message). DEF-099 (2026-04-28, three days BEFORE
+                # DEF-117) had already dropped active_frames_required for
+                # stop from 3 to 2, so "2 consecutive hits" and window's "2
+                # hits in the last 4 frames" became the same event whenever
+                # the hits are adjacent — consec silently re-opened exactly
+                # the hole DEF-117/118 closed, ungated. Live 2026-08-08 log
+                # confirmed it: 4/6 STOP_PATH events fired via
+                # path=consec/pre_silence=False, each immediately preceded
+                # by a NEAR_MISS_WINDOW_BLOCKED line for the SAME frame —
+                # window correctly vetoed it, consec overrode it. Two had
+                # visibly truncated transcripts (mid-word cutoff; one at
+                # last_silent=never, i.e. no pause anywhere in the recording).
                 _consec_trigger = (
                     _consecutive_hits.get(ww_name, 0) >= active_frames_required
+                    and (not _is_rec or _recent_silence)
                 )
                 # DEF-117: fast-path stop-wake also requires a recent silent
                 # frame (the natural "...sentence end. [pause] Hey Vox"

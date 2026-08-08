@@ -2376,3 +2376,53 @@ def test_def221_orphan_gate_serializes_next_transcription():
         deadline = _t.monotonic() + 2.0
         while not _stt._orphan_done.is_set() and _t.monotonic() < deadline:
             _t.sleep(0.02)
+
+
+# ---------------------------------------------------------------------------
+# DEF-254: consec-path stop-wake requires pre-silence gate too
+#
+# DEF-117 (2026-05-26) and DEF-118 (2026-05-28) gated fast-path and
+# window-path stop-wake on _recent_silence after mid-sentence phoneme bursts
+# caused false stops, explicitly reasoning the consec path was "naturally
+# more resistant" and leaving it ungated. DEF-099 (2026-04-28, before either)
+# had already dropped the stop frame requirement 3->2, making "2 consecutive
+# hits" and window's "2 hits in the last 4 frames" the same event whenever
+# the hits are adjacent -- consec silently bypassed both gates. Confirmed
+# live 2026-08-08: 4/6 STOP_PATH events fired via path=consec/pre_silence=
+# False, each immediately preceded by a NEAR_MISS_WINDOW_BLOCKED line for
+# the same frame, two with visibly truncated transcripts.
+# ---------------------------------------------------------------------------
+
+
+def test_def254_consec_stop_requires_recent_silence():
+    """The _consec_trigger predicate must require _recent_silence while
+    recording, mirroring the DEF-117/118 gate on fast/window."""
+    src = _read_main_src()
+    m = re.search(r"_consec_trigger\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _consec_trigger assignment in main.py"
+    block = m.group(1)
+    assert "_recent_silence" in block, (
+        "_consec_trigger predicate must require _recent_silence during "
+        "recording (DEF-254). Otherwise two consecutive high-score phoneme "
+        "bursts in continuous speech (no preceding pause) trigger a false "
+        "stop via the consec path, bypassing the DEF-117/118 gates on the "
+        "other two paths entirely."
+    )
+
+
+def test_def254_consec_start_path_not_gated_by_silence():
+    """_recent_silence is unconditionally False when not recording (it's
+    defined as `_is_rec and ...`), and _consec_trigger is the ONLY trigger
+    path for START-word detection (fast/window/ultra all require _is_rec).
+    The DEF-254 gate must short-circuit past _recent_silence when not
+    recording, or wake-from-idle breaks entirely."""
+    src = _read_main_src()
+    m = re.search(r"_consec_trigger\s*=\s*\(([\s\S]+?)\n\s*\)", src)
+    assert m is not None, "Could not find _consec_trigger assignment in main.py"
+    block = m.group(1)
+    assert "not _is_rec" in block, (
+        "_consec_trigger must include `not _is_rec or _recent_silence` (not "
+        "just a bare `_recent_silence` term) -- _recent_silence is always "
+        "False while idle and would silently disable start-word detection "
+        "if it weren't short-circuited first."
+    )
