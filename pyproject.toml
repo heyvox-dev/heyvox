@@ -29,7 +29,7 @@ dependencies = [
     # and DEF-222's ruff pin) — an unbounded floor is a bet that a third
     # party never ships a breaking release, which broke CI the same day for
     # mcp. 0.x packages are capped at <1.0, matching this file's own existing
-    # anthropic>=0.84,<1 convention, not a stricter per-minor 0.x reading.
+    # anthropic>=0.84,<2 convention, not a stricter per-minor 0.x reading.
     "openwakeword>=0.6.0,<1.0",
     "pyaudio>=0.2.14,<1.0",
     "numpy>=1.24.0,<3.0",
@@ -48,9 +48,9 @@ dependencies = [
     # false green. Paste still worked via the osascript fallback, which is why
     # this went unnoticed for four releases.
     "pyobjc-framework-ApplicationServices>=10.0,<13.0",
-    "mcp>=1.0,<2.0",
-    "psutil>=5.9,<6.0",
-    "rich>=13.0,<15.0",
+    "mcp>=1.0,<3.0",
+    "psutil>=5.9,<8.0",
+    "rich>=13.0,<16.0",
     # Core, not TTS-only: huggingface_hub downloads every model (wake word,
     # STT, TTS) + backs revision pinning; sounddevice is the primary cue
     # playback path (afplay is a fallback). CI installs [dev,chrome] without
@@ -80,7 +80,7 @@ aec = [
     "livekit>=1.0.0,<2.0",
 ]
 learn-vocab = [
-    "anthropic>=0.84,<1",
+    "anthropic>=0.84,<2",
 ]
 dev = [
     # DEF-247: floor-only (or entirely unpinned) dev deps are the same risk
@@ -94,7 +94,7 @@ dev = [
     # activate new default rules and turn CI red on a version-bump-only
     # commit, mid-release. Bump deliberately, running the new version
     # locally first.
-    "ruff==0.15.2",
+    "ruff==0.16.4",
 ]
 
 [project.scripts]
