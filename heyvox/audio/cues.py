@@ -12,6 +12,12 @@ import threading
 import time
 
 
+def _log(msg: str) -> None:
+    """Minimal log helper — avoids circular import with heyvox.main."""
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
 def _reap_async(proc: subprocess.Popen) -> None:
     """Reap a fire-and-forget child (afplay) without blocking the caller.
 
@@ -215,7 +221,10 @@ def _play_via_sounddevice(cue_file: str) -> bool:
         import sounddevice
         sounddevice.play(data, samplerate, device=device_index)
         return True
-    except Exception:
+    except Exception as e:
+        # DEF-251: this used to be a silent False — indistinguishable from
+        # "cue file missing" or "muted" by the time anyone went looking.
+        _log(f"[cue] sounddevice playback failed, falling back to afplay: {e}")
         return False
 
 
@@ -247,8 +256,14 @@ def audio_cue(
     """
     global _cue_suppress_until
 
+    # DEF-251: every early-return below used to be silent — "muted", "file
+    # missing", and "played fine" were indistinguishable from the outside.
+    # Only the WW-triggered listening cue had any diagnostic (the t1>0
+    # WW_LATENCY print further down), and even that only proved dispatch was
+    # reached, not that sound actually came out. Every path now logs.
     from heyvox.audio.tts import is_muted
     if is_muted(check_system=False):
+        _log(f"[cue] {name}: skipped (output muted)")
         return
 
     if cues_dir is None:
@@ -256,6 +271,7 @@ def audio_cue(
 
     cue_file = os.path.join(cues_dir, f"{name}.aiff")
     if not os.path.exists(cue_file):
+        _log(f"[cue] {name}: skipped (file not found: {cue_file})")
         return
 
     # [WW_LATENCY] t2: dispatch timestamp, captured after file-existence check but
@@ -265,9 +281,8 @@ def audio_cue(
         t2 = time.perf_counter()
         feedback_ms = (t2 - t1) * 1000
         total_ms = detect_ms + feedback_ms
-        print(
-            f"[WW_LATENCY] feedback={feedback_ms:.0f}ms total={total_ms:.0f}ms cue={name}",
-            flush=True,
+        _log(
+            f"[WW_LATENCY] feedback={feedback_ms:.0f}ms total={total_ms:.0f}ms cue={name}"
         )
 
     # Estimate cue duration for suppression window (safe default for short files)
@@ -283,16 +298,20 @@ def audio_cue(
     try:
         from heyvox.audio.keepalive import play_cue_via_stream
         if play_cue_via_stream(name, cue_file):
+            _log(f"[cue] {name}: played via keepalive stream")
             return
-    except Exception:
-        pass
+    except Exception as e:
+        _log(f"[cue] {name}: keepalive dispatch raised, falling back: {e}")
 
     # DEF-257: afplay is the default. In-daemon sounddevice playback ran its
     # callback under the daemon's GIL load and against a PortAudio device list
     # that goes stale; cues were cut off ("List", "Send") and once landed on the
     # wrong device. A separate afplay process follows the macOS default output.
     # HEYVOX_CUES_SOUNDDEVICE=1 restores the in-process path for A/B testing.
-    if not (os.environ.get("HEYVOX_CUES_SOUNDDEVICE") == "1" and _play_via_sounddevice(cue_file)):
+    if os.environ.get("HEYVOX_CUES_SOUNDDEVICE") == "1" and _play_via_sounddevice(cue_file):
+        _log(f"[cue] {name}: played via sounddevice")
+    else:
+        _log(f"[cue] {name}: playing via afplay")
         proc = subprocess.Popen(
             ["afplay", cue_file],
             stdout=subprocess.DEVNULL,
