@@ -31,6 +31,15 @@ if TYPE_CHECKING:
 # This is the global fallback when no per-mic profile applies.
 _MIN_AUDIO_DBFS = -48.0
 
+# DEF-255: a recording below the mean gate is still admitted to STT when its speech level
+# (p95 of 20 ms frame RMS) reaches _MIN_SPEECH_DBFS and it lasts >= _QUIET_ADMIT_MIN_SECS.
+_MIN_SPEECH_DBFS = -48.0
+_QUIET_ADMIT_MIN_SECS = 3.0
+# DEF-255: text from a quiet-admitted recording needs this many words, else it is dropped.
+_QUIET_ADMIT_MIN_WORDS = 4
+# DEF-255: a dropped recording at least this long is a lost dictation: banner on the first one.
+_QUIET_BANNER_MIN_SECS = 3.0
+
 
 def _resolve_min_audio_dbfs(config) -> float:
     """Return the energy-gate dBFS floor for the currently active mic.
@@ -76,6 +85,31 @@ def _audio_rms(chunks: list, sample_rate: int) -> float:
         return -96.0
     # Convert to dBFS (assuming 16-bit int range mapped to float)
     return 20 * np.log10(rms / 32768.0)
+
+
+def _speech_level_db(chunks: list, sample_rate: int) -> float:
+    """95th percentile of 20 ms frame RMS in dBFS: the speech level, unaffected by pauses (DEF-255)."""
+    if not chunks or sample_rate <= 0:
+        return -96.0
+    audio = np.concatenate(chunks).astype(np.float32)
+    frame = max(1, int(sample_rate * 0.02))
+    n_frames = len(audio) // frame
+    if n_frames == 0:
+        return -96.0
+    rms = np.sqrt(np.mean(audio[: n_frames * frame].reshape(n_frames, frame) ** 2, axis=1))
+    p95 = float(np.percentile(rms, 95))
+    if p95 < 1e-10:
+        return -96.0
+    return float(20 * np.log10(p95 / 32768.0))
+
+
+def _admit_quiet_recording(raw_speech_db: float | None, duration: float) -> bool:
+    """True when a below-gate recording still has speech-level energy and is long enough to be a dictation (DEF-255)."""
+    return (
+        raw_speech_db is not None
+        and raw_speech_db >= _MIN_SPEECH_DBFS
+        and duration >= _QUIET_ADMIT_MIN_SECS
+    )
 
 
 def _save_debug_audio(
@@ -591,6 +625,7 @@ class RecordingStateMachine:
                 # Compute energy on raw audio BEFORE trimming (wake word is loud,
                 # removing it would make the remaining audio seem quieter)
                 raw_rms_db = _audio_rms(recorded_chunks, self.config.audio.sample_rate)
+                raw_speech_db = _speech_level_db(recorded_chunks, self.config.audio.sample_rate)
 
                 # Save raw audio BEFORE any trimming (for debug analysis).
                 # DEF-081: capture the path so the garbled-filter branch can
@@ -598,6 +633,7 @@ class RecordingStateMachine:
                 _last_raw_wav = _save_debug_audio("raw", recorded_chunks, self.config.audio.sample_rate, {
                     "ptt": ptt_snapshot,
                     "raw_rms_dbfs": round(raw_rms_db, 1),
+                    "raw_speech_p95_dbfs": round(raw_speech_db, 1),
                 }, log_fn=self._log)
 
                 # DEF-155/156: snapshot the UN-trimmed tail for training
@@ -702,7 +738,8 @@ class RecordingStateMachine:
                             "stop_time": _stop_t0, "stop_reason": reason,
                             "raw_tail": _raw_tail,
                             "observed_stop_score": _observed_stop_score,
-                            "raw_wav_path": _last_raw_wav},
+                            "raw_wav_path": _last_raw_wav,
+                            "raw_speech_db": raw_speech_db},
                     daemon=True,
                 ).start()
         except Exception as e:
@@ -735,6 +772,34 @@ class RecordingStateMachine:
         self._hud_send({"type": "state", "state": "idle"})
         self._log("Recording cancelled.")
 
+    def _surface_quiet_banner(self, raw_rms_db: float, duration: float, *, force: bool = False) -> None:
+        """Show the "Mic too quiet" HUD banner for a recording dropped for its level (DEF-101, DEF-255)."""
+        # A long dropped recording is a lost dictation, not a wake-word false positive: no streak needed.
+        if not (force or duration >= _QUIET_BANNER_MIN_SECS or self._quiet_streak >= 2):
+            return
+        try:
+            from heyvox.hud.surface import HUDSurface
+            from heyvox.constants import MIC_WARN_TTL_SECS
+            _mic_name = ""
+            try:
+                from heyvox.constants import ACTIVE_MIC_FILE
+                with open(ACTIVE_MIC_FILE) as _f:
+                    _mic_name = _f.read().strip().split("\n")[0][:40]
+            except OSError:
+                pass
+            _warn = (
+                f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
+                + (f" — {_mic_name}" if _mic_name else "")
+            )
+            HUDSurface.banner(
+                level="warn",
+                source="recording-quiet",
+                text=_warn,
+                ttl_secs=MIC_WARN_TTL_SECS,
+            )
+        except Exception:
+            pass
+
     def _send_local(
         self,
         duration: float,
@@ -748,6 +813,7 @@ class RecordingStateMachine:
         raw_tail: list | None = None,
         observed_stop_score: float = 0.0,
         raw_wav_path: str | None = None,
+        raw_speech_db: float | None = None,
     ) -> None:
         """Transcribe locally and inject text into target app."""
         import subprocess as _subprocess
@@ -766,38 +832,16 @@ class RecordingStateMachine:
             # Uses raw_rms_db computed BEFORE wake word trim (wake word is the loudest part).
             # DEF-101: per-mic threshold from config.mic_profiles[<mic>].min_audio_dbfs.
             min_dbfs = _resolve_min_audio_dbfs(self.config)
-            if raw_rms_db < min_dbfs:
+            # DEF-255: below the mean gate but speech-level energy present -> still transcribe.
+            _quiet_admit = raw_rms_db < min_dbfs and _admit_quiet_recording(raw_speech_db, duration)
+            _speech_tag = f" speech_p95={raw_speech_db:.1f} dBFS" if raw_speech_db is not None else ""
+            if raw_rms_db < min_dbfs and not _quiet_admit:
                 self._quiet_streak += 1
                 self._log(
                     f"Recording too quiet ({raw_rms_db:.1f} dBFS < {min_dbfs} dBFS), skipping STT"
-                    f" [streak={self._quiet_streak}]"
+                    f" [streak={self._quiet_streak}]{_speech_tag}"
                 )
-                # DEF-101: surface silent-skip via HUDSurface banner — but only
-                # after 2 consecutive quiet recordings so a single wake-word false
-                # positive (background noise briefly triggers the model) doesn't
-                # show a misleading "mic too quiet" warning to the user.
-                if self._quiet_streak >= 2:
-                    try:
-                        from heyvox.hud.surface import HUDSurface
-                        from heyvox.constants import MIC_WARN_TTL_SECS
-                        _mic_name = ""
-                        try:
-                            from heyvox.constants import ACTIVE_MIC_FILE
-                            _mic_name = open(ACTIVE_MIC_FILE).read().strip().split("\n")[0][:40]
-                        except OSError:
-                            pass
-                        _warn = (
-                            f"Mic too quiet ({raw_rms_db:.0f} dBFS)"
-                            + (f" — {_mic_name}" if _mic_name else "")
-                        )
-                        HUDSurface.banner(
-                            level="warn",
-                            source="recording-quiet",
-                            text=_warn,
-                            ttl_secs=MIC_WARN_TTL_SECS,
-                        )
-                    except Exception:
-                        pass
+                self._surface_quiet_banner(raw_rms_db, duration)
                 # Training: wake fired but mic captured only noise → FP.
                 if self.training_collector:
                     self.training_collector.save_fp(
@@ -814,7 +858,10 @@ class RecordingStateMachine:
             if stop_time:
                 self._log(f"[TIMING] stop→STT start: {_t_stt_start - stop_time:.2f}s")
             self._quiet_streak = 0
-            self._log(f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing...")
+            self._log(
+                f"Recording was {duration:.1f}s ({raw_rms_db:.1f} dBFS), transcribing..."
+                f"{_speech_tag}{' quiet-admit' if _quiet_admit else ''}"
+            )
             try:
                 print(f"[recording] Transcribing {duration:.1f}s audio...", file=sys.stderr)
             except (BrokenPipeError, OSError):
@@ -1072,6 +1119,16 @@ class RecordingStateMachine:
 
             # Free audio chunks -- not garbled, no on-demand recovery needed.
             audio_chunks.clear()
+
+            # DEF-255: a quiet-admitted recording only keeps text long enough to be a dictation.
+            if _quiet_admit and text and len(text.split()) < _QUIET_ADMIT_MIN_WORDS:
+                self._log(
+                    f"FILTER (quiet-admit): discarding short text from a quiet recording "
+                    f"({raw_rms_db:.1f} dBFS): {text[:80]!r}"
+                )
+                self._surface_quiet_banner(raw_rms_db, duration, force=True)
+                audio_cue("paused", get_cues_dir(self.config.cues_dir))
+                return
 
             self._hud_send({"type": "transcript", "text": text})
 

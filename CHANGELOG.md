@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Dictations recorded at a low microphone level are no longer dropped
+  silently (DEF-255). A recording whose mean level falls below the energy
+  gate is now transcribed anyway when its speech level (95th percentile of
+  20 ms frames) still reaches -48 dBFS and it lasts at least 3 s, and a
+  dropped recording of 3 s or more shows the "Mic too quiet" banner on the
+  first occurrence instead of only after two in a row. The per-recording
+  log line now includes `speech_p95=`.
+
 ## [1.2.2] - 2026-07-28
 
 ### Fixed
