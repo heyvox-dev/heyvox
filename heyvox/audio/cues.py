@@ -68,6 +68,36 @@ def get_cues_dir(config_cues_dir: str = "") -> str:
     return resolved
 
 
+_last_refresh: float = 0.0
+_refresh_lock = threading.Lock()
+_REFRESH_MIN_GAP_SECS = 2.0
+
+
+def _refresh_sounddevice_device_list(sounddevice) -> None:
+    """Re-enumerate PortAudio's device list before resolving the cue output.
+
+    DEF-257: sounddevice's device list is frozen at first use, so after device
+    churn (Bluetooth profile switches, hotplug) the name->index match ran
+    against a stale list and the cue went to the wrong device (measured: the
+    daemon's cues played on MacBook Pro Speakers while the default output was
+    the Jabra, a fresh process routed correctly). The CoreAudio output ID can't
+    be the trigger: it did not change across the switch. The refresh costs
+    ~7 ms; the minimum gap keeps back-to-back cues from tearing down a stream
+    that is still playing.
+    """
+    global _last_refresh
+    with _refresh_lock:
+        now = time.monotonic()
+        if now - _last_refresh < _REFRESH_MIN_GAP_SECS:
+            return
+        _last_refresh = now
+        try:
+            sounddevice._terminate()
+            sounddevice._initialize()
+        except Exception:
+            pass
+
+
 def _resolve_sounddevice_output_index():
     """Match the CoreAudio-verified default output device to its sounddevice
     index, by name + output capability.
@@ -82,6 +112,7 @@ def _resolve_sounddevice_output_index():
     try:
         from heyvox.audio.output import get_default_output_name
         import sounddevice
+        _refresh_sounddevice_device_list(sounddevice)
         name = get_default_output_name()
         if not name:
             return None
@@ -256,7 +287,12 @@ def audio_cue(
     except Exception:
         pass
 
-    if not _play_via_sounddevice(cue_file):
+    # DEF-257: afplay is the default. In-daemon sounddevice playback ran its
+    # callback under the daemon's GIL load and against a PortAudio device list
+    # that goes stale; cues were cut off ("List", "Send") and once landed on the
+    # wrong device. A separate afplay process follows the macOS default output.
+    # HEYVOX_CUES_SOUNDDEVICE=1 restores the in-process path for A/B testing.
+    if not (os.environ.get("HEYVOX_CUES_SOUNDDEVICE") == "1" and _play_via_sounddevice(cue_file)):
         proc = subprocess.Popen(
             ["afplay", cue_file],
             stdout=subprocess.DEVNULL,

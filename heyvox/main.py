@@ -27,6 +27,7 @@ from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
     RECORDING_FLAG,
     HOTPLUG_RESTART_MARKER,
+    MIC_SWITCH_REQUEST_FILE,
     PA_STORM_RESTART_MARKER,
     WATCHDOG_STARTUP_DEADLINE_SECS,
     WATCHDOG_STALE_KILL_SECS,
@@ -326,7 +327,9 @@ def _maybe_restart_for_hotplug(devices, config, log, hud_send, ctx, cooldown):
     _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown, config.excluded_devices)
 
 
-def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown, excluded_devices=None) -> None:
+def _restart_for_hotplug_candidate(
+    missed, log, hud_send, ctx, cooldown, excluded_devices=None, allow_bluetooth=False,
+) -> None:
     """Guarded DEF-104 restart for a named cache-miss candidate.
 
     Shared by the periodic ``_maybe_restart_for_hotplug`` scan and the manual
@@ -344,10 +347,13 @@ def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown, exclude
     # G435 over BT died repeatedly until HeyVox was stopped). BT has its own
     # A2DP->HFP path (_bt_trigger_hfp_switch) and never needs a process restart;
     # DEF-104 is strictly for USB devices the PortAudio cache missed.
+    # DEF-256: the one exception is an explicit user pin (allow_bluetooth) whose
+    # HFP wait already exhausted with the input live in CoreAudio; the marker
+    # cooldown below still limits it to one restart per window.
     try:
         from heyvox.audio.bt import get_bluetooth_input_device_names
         bt_names = get_bluetooth_input_device_names()
-        if any(missed.lower() in n for n in bt_names):
+        if not allow_bluetooth and any(missed.lower() in n for n in bt_names):
             log(
                 f"MIC_HOTPLUG_MISSED: '{missed}' is a Bluetooth device — "
                 f"NOT self-restarting (DEF-147; BT has its own A2DP->HFP path)"
@@ -390,6 +396,14 @@ def _restart_for_hotplug_candidate(missed, log, hud_send, ctx, cooldown, exclude
     except Exception:
         pass
     _write_hotplug_marker(missed)
+    if allow_bluetooth:
+        # DEF-256: the new process starts on mic_priority, which may not list
+        # this device; re-issue the user's pin through the menu request file.
+        try:
+            with open(MIC_SWITCH_REQUEST_FILE, "w") as f:
+                f.write(missed)
+        except OSError:
+            pass
     time.sleep(0.3)
     _release_singleton()
     try:
@@ -1614,6 +1628,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     _manual_hotplug_missed, log, hud_send, ctx,
                     cooldown=_HOTPLUG_RESTART_COOLDOWN,
                     excluded_devices=config.excluded_devices,
+                    allow_bluetooth=devices.hotplug_restart_allow_bt,
                 )
 
             # After scan, update silence_threshold if device changed.
