@@ -3,7 +3,7 @@
 import os
 import time
 import wave
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import soundfile
@@ -56,6 +56,12 @@ class TestAudioCue:
     def setup_method(self):
         # Prevent cached entries from one test leaking into the next.
         cues_module._cue_cache.clear()
+
+    @pytest.fixture(autouse=True)
+    def _sounddevice_path(self, monkeypatch):
+        # DEF-257: afplay is the default player; these tests cover the opt-in
+        # in-process sounddevice path.
+        monkeypatch.setenv("HEYVOX_CUES_SOUNDDEVICE", "1")
 
     @pytest.fixture(autouse=True)
     def _default_not_muted(self):
@@ -195,3 +201,35 @@ class TestIsSuppressed:
     def test_not_suppressed_after_window(self):
         cues_module._cue_suppress_until = time.time() - 1.0
         assert is_suppressed() is False
+
+
+class TestDef257DeviceListRefresh:
+    """DEF-257: the cue output index must be resolved against a fresh PortAudio list."""
+
+    def test_refresh_reinitialises_and_respects_min_gap(self):
+        from heyvox.audio import cues
+        sd = MagicMock()
+        cues._last_refresh = 0.0
+        cues._refresh_sounddevice_device_list(sd)
+        assert sd._terminate.call_count == 1 and sd._initialize.call_count == 1
+        cues._refresh_sounddevice_device_list(sd)  # inside the gap: no second teardown
+        assert sd._terminate.call_count == 1
+
+    def test_refresh_failure_is_swallowed(self):
+        from heyvox.audio import cues
+        sd = MagicMock()
+        sd._terminate.side_effect = RuntimeError("boom")
+        cues._last_refresh = 0.0
+        cues._refresh_sounddevice_device_list(sd)
+
+
+def test_def257_default_cue_player_is_afplay(monkeypatch, tmp_path):
+    monkeypatch.delenv("HEYVOX_CUES_SOUNDDEVICE", raising=False)
+    cue = tmp_path / "listening.aiff"
+    cue.write_bytes(b"x")
+    with patch("heyvox.audio.cues._play_via_sounddevice") as sd_play, \
+         patch("heyvox.audio.cues.subprocess.Popen") as popen, \
+         patch("heyvox.audio.keepalive.play_cue_via_stream", return_value=False):
+        cues_module.audio_cue("listening", str(tmp_path))
+    sd_play.assert_not_called()
+    assert popen.call_args[0][0][0] == "afplay"
