@@ -111,6 +111,7 @@ class DeviceManager(BtHfpMixin):
         # see. scan() sets this; the main loop pops it and runs the guarded
         # hotplug self-restart (only a process restart refreshes the cache).
         self._hotplug_restart_request: str | None = None
+        self._hotplug_restart_allow_bt = False
 
         # Health check state
         self._last_health_check: float = time.time()
@@ -244,9 +245,20 @@ class DeviceManager(BtHfpMixin):
     # Manual hotplug restart request (DEF-104)
     # -------------------------------------------------------------------------
 
-    def _request_hotplug_restart(self, device_name: str) -> None:
-        """Flag a manual mic pick as a DEF-104 cache miss for the main loop."""
+    def _request_hotplug_restart(self, device_name: str, allow_bluetooth: bool = False) -> None:
+        """Flag a manual mic pick as a DEF-104 cache miss for the main loop.
+
+        ``allow_bluetooth`` (DEF-256) lifts the DEF-147 Bluetooth exclusion for
+        this one request: only set after an explicit user pin whose HFP wait
+        already ran out while CoreAudio lists the device as a live input.
+        """
         self._hotplug_restart_request = device_name
+        self._hotplug_restart_allow_bt = allow_bluetooth
+
+    @property
+    def hotplug_restart_allow_bt(self) -> bool:
+        """Whether the request just popped may bypass the DEF-147 BT guard."""
+        return self._hotplug_restart_allow_bt
 
     def pop_hotplug_restart_request(self) -> str | None:
         """Return and clear the pending manual cache-miss restart request."""

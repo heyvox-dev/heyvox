@@ -229,6 +229,21 @@ class BtHfpMixin:
                 f"{self._BT_HFP_MAX_ATTEMPTS} attempts + cache flush "
                 f"— keeping current mic"
             )
+            # DEF-256: HFP is up (CoreAudio lists a live BT input) yet PortAudio's
+            # process-wide cache never sees it — the in-process reinit cannot
+            # clear that, only a restart can. Explicit user pin only; the
+            # marker cooldown in main.py bounds it to one restart per window.
+            try:
+                if pin_mode and any(
+                    target.lower() in n for n in get_bluetooth_input_device_names()
+                ):
+                    self._log(
+                        f"[DEF-256] '{target}' has a live CoreAudio input but is "
+                        f"missing from PortAudio's cache — requesting guarded restart"
+                    )
+                    self._request_hotplug_restart(target, allow_bluetooth=True)
+            except Exception as e:
+                self._log(f"[DEF-256] live-input check failed: {e}")
             return False
 
         self._log(
