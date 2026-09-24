@@ -1,6 +1,5 @@
 """DEF-256: explicit BT pin that exhausts its HFP wait while CoreAudio shows a
 live input (PortAudio cache blind) may bypass the DEF-147 restart guard once."""
-import sys
 import threading
 import types
 
@@ -40,7 +39,7 @@ def _call(**kw):
 def test_bt_blocked_by_default(env):
     logs = _call()
     assert env.execs == []
-    assert any("DEF-147" in l for l in logs)
+    assert any("DEF-147" in line for line in logs)
     assert not env.req.exists()
 
 
@@ -54,7 +53,7 @@ def test_bt_pin_restart_still_bound_by_cooldown(env):
     _call(allow_bluetooth=True)
     logs = _call(allow_bluetooth=True)
     assert len(env.execs) == 1
-    assert any("not looping" in l for l in logs)
+    assert any("not looping" in line for line in logs)
 
 
 def test_hfp_exhaustion_requests_bt_restart_only_for_pin(monkeypatch):
