@@ -315,38 +315,41 @@ class HeraldWorker:
         self._cwd = os.getcwd()
 
         # Workspace name resolution order:
-        #   1. HEYVOX_WORKSPACE env (generic, what heyvox setup will ship)
-        #   2. CONDUCTOR_WORKSPACE_NAME (deprecated legacy fallback)
-        #   3. DEF-111: cwd-based detection via the workspace DB —
-        #      Conductor does NOT export workspace env vars into the
-        #      Claude Code hook environment, so the hook-spawned worker
-        #      has to derive the workspace from the current directory.
-        #      Without this fallback, the workspace announcement and the
-        #      .workspace sidecar both silently no-op for hook-driven TTS.
-        # self._cwd itself also rides along in the sidecar regardless of
-        # which branch resolves _workspace (DEF-244): the env var is not
-        # always trustworthy even when non-empty (observed carrying a value
-        # matching neither the directory codename nor the display-name slug),
-        # so the orchestrator gets cwd as an independent fallback signal.
-        env_ws = (
-            os.environ.get("HEYVOX_WORKSPACE", "")
-            or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
-        )
-        if env_ws:
-            self._workspace: str = env_ws
-            log.info("workspace resolved via env: %r (cwd=%r)", env_ws, self._cwd)
-        else:
-            try:
-                from heyvox.herald.workspace_label import detect_workspace_from_cwd
-                self._workspace = detect_workspace_from_cwd()
-                log.info(
-                    "workspace cwd-detect: cwd=%r → %r",
-                    self._cwd,
-                    self._workspace,
-                )
-            except Exception as e:
-                log.warning("workspace cwd-detect raised (%s) — sidecar disabled (cwd=%r)", e, self._cwd)
-                self._workspace = ""
+        #   1. DEF-111/cwd-detect: cwd-based detection via the workspace DB.
+        #      Always fresh — a live rename takes effect on the very next
+        #      TTS call, no session restart needed.
+        #   2. HEYVOX_WORKSPACE / CONDUCTOR_WORKSPACE_NAME env fallback,
+        #      used only when cwd-detect finds nothing (e.g. Conductor
+        #      doesn't inject workspace env vars into every hook context —
+        #      the original reason DEF-111 added the cwd path at all).
+        #
+        # cwd-detect used to be the fallback and env the first choice, but
+        # that direction is actively harmful: Conductor sets
+        # CONDUCTOR_WORKSPACE_NAME once at session start as a snapshot of
+        # the then-current name/slug and never refreshes it for a running
+        # session. Renaming the workspace later (the whole point of
+        # workspace_name being drift-proof, see claude-conductor-setup's
+        # CLAUDE.md "Conductor Workspace Names") left TTS announcing the
+        # stale pre-rename name/slug forever, since env_ws unconditionally
+        # won. Confirmed live 2026-09-27 via herald-debug.log: a workspace
+        # renamed away from "Whatsapp Gruppen Zusammenfassen" kept
+        # announcing exactly that slug, because CONDUCTOR_WORKSPACE_NAME
+        # was still set to the pre-rename value in that session's env.
+        try:
+            from heyvox.herald.workspace_label import detect_workspace_from_cwd
+            self._workspace: str = detect_workspace_from_cwd()
+            log.info("workspace cwd-detect: cwd=%r → %r", self._cwd, self._workspace)
+        except Exception as e:
+            log.warning("workspace cwd-detect raised (%s) (cwd=%r)", e, self._cwd)
+            self._workspace = ""
+        if not self._workspace:
+            env_ws = (
+                os.environ.get("HEYVOX_WORKSPACE", "")
+                or os.environ.get("CONDUCTOR_WORKSPACE_NAME", "")
+            )
+            if env_ws:
+                self._workspace = env_ws
+                log.info("workspace resolved via env fallback: %r (cwd=%r)", env_ws, self._cwd)
 
         # DEF-237: the Conductor session actually speaking right now.
         # Conductor sets this in every session's env; nothing consumed it
