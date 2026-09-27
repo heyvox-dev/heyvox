@@ -433,6 +433,21 @@ class TestWorkspaceLabelPrepend:
              patch("heyvox.herald.workspace_label.resolve_workspace_id", return_value=""):
             return HeraldWorker()
 
+    def test_cwd_detect_wins_over_stale_env_var(self):
+        """DEF-244/2026-09-27: CONDUCTOR_WORKSPACE_NAME is a session-start
+        snapshot Conductor never refreshes; a later rename must still be
+        heard on the very next call via the live cwd-based DB lookup."""
+        from heyvox.herald.worker import HeraldWorker
+        with patch.dict(
+            os.environ,
+            {"HEYVOX_WORKSPACE": "", "CONDUCTOR_WORKSPACE_NAME": "whatsapp-gruppen-zusammenfassen"},
+            clear=False,
+        ), \
+             patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value="zagreb"), \
+             patch("heyvox.herald.workspace_label.resolve_workspace_id", return_value=""):
+            w = HeraldWorker()
+        assert w._workspace == "zagreb"
+
     def test_no_workspace_returns_speech_unchanged(self):
         w = self._worker_with_ws("")
         assert w._maybe_prepend_workspace_label("hello") == "hello"
