@@ -31,6 +31,8 @@ def _cfg(
     announce_workspace: bool = True,
     workspace_labels: dict[str, str] | None = None,
     announce_min_chars: int = 0,
+    announce_project: bool = True,
+    project_labels: dict[str, str] | None = None,
 ) -> HeyvoxConfig:
     """Build a minimal HeyvoxConfig with the TTS knobs we care about."""
     return HeyvoxConfig(
@@ -38,6 +40,8 @@ def _cfg(
             announce_workspace=announce_workspace,
             workspace_labels=workspace_labels or {},
             announce_min_chars=announce_min_chars,
+            announce_project=announce_project,
+            project_labels=project_labels or {},
         )
     )
 
@@ -63,7 +67,7 @@ class TestResolutionOrder:
         # If the DB-path resolver is ever called, raise — config must short-circuit.
         monkeypatch.setattr(
             workspace_label,
-            "_sidebar_label_from_db",
+            "_sidebar_row_from_db",
             lambda *a, **k: pytest.fail("DB lookup should be skipped"),
         )
         assert get_workspace_label("seattle", cfg=cfg) == "ShortName"
@@ -75,8 +79,8 @@ class TestResolutionOrder:
         )
         monkeypatch.setattr(
             workspace_label,
-            "_sidebar_label_from_db",
-            lambda name, db: "Voice Resume Wip",
+            "_sidebar_row_from_db",
+            lambda name, db: ("Voice Resume Wip", ""),
         )
         assert get_workspace_label("seattle", cfg=cfg) == "Voice Resume Wip"
 
@@ -84,7 +88,7 @@ class TestResolutionOrder:
         cfg = _cfg()
         # No DB, no override → raw name.
         monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda c: "")
-        assert get_workspace_label("vox-v2/seattle", cfg=cfg) == "vox-v2/seattle"
+        assert get_workspace_label("vox-v2/seattle", cfg=cfg) == "vox-v2, seattle"
 
 
 class TestNormalisation:
@@ -95,8 +99,8 @@ class TestNormalisation:
         )
         monkeypatch.setattr(
             workspace_label,
-            "_sidebar_label_from_db",
-            lambda name, db: "Personal · Source · Spell",
+            "_sidebar_row_from_db",
+            lambda name, db: ("Personal · Source · Spell", ""),
         )
         # Conductor's U+00B7 separator becomes ", " so Kokoro doesn't say "middle dot".
         assert (
@@ -112,6 +116,64 @@ class TestNormalisation:
     def test_config_override_also_normalised(self, monkeypatch):
         cfg = _cfg(workspace_labels={"x": "Alpha · Beta"})
         assert get_workspace_label("x", cfg=cfg) == "Alpha, Beta"
+
+
+class TestSpeechCleanup:
+    """Slash and issue numbers must not be voiced ("slash", "hash three...")."""
+
+    def test_slash_becomes_comma(self, monkeypatch):
+        cfg = _cfg(workspace_labels={"x": "IAESTE/Teconomy"})
+        assert get_workspace_label("x", cfg=cfg) == "IAESTE, Teconomy"
+
+    def test_issue_number_dropped(self, monkeypatch):
+        cfg = _cfg(workspace_labels={"x": "Plausibilität von Trackerdaten #312"})
+        assert get_workspace_label("x", cfg=cfg) == "Plausibilität von Trackerdaten"
+
+
+class TestProjectPrefix:
+    SEP = workspace_label._DB_FIELD_SEP
+
+    def _db(self, monkeypatch, name, repo):
+        monkeypatch.setattr(workspace_label, "_get_workspace_db_path", lambda cfg: "/fake.db")
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                args=cmd, returncode=0,
+                stdout=f"{name}{self.SEP}1{self.SEP}drifted{self.SEP}{repo}\n", stderr="",
+            ),
+        )
+
+    def test_project_prepended(self, monkeypatch):
+        self._db(monkeypatch, "Plausibilität von Trackerdaten #312", "ai-project-assistant")
+        assert (
+            get_workspace_label("taipei", cfg=_cfg())
+            == "AI Project Assistant, Plausibilität von Trackerdaten"
+        )
+
+    def test_main_workspace_not_doubled(self, monkeypatch):
+        self._db(monkeypatch, "AI Project Assistant", "ai-project-assistant")
+        assert get_workspace_label("olympia-v1", cfg=_cfg()) == "AI Project Assistant"
+
+    def test_shared_word_skips_prefix(self, monkeypatch):
+        self._db(monkeypatch, "Claude Setup", "claude-conductor-setup")
+        assert get_workspace_label("manama", cfg=_cfg()) == "Claude Setup"
+
+    def test_disabled_by_config(self, monkeypatch):
+        self._db(monkeypatch, "Entwicklungsserver", "ai-project-assistant")
+        assert get_workspace_label("missoula", cfg=_cfg(announce_project=False)) == "Entwicklungsserver"
+
+    def test_project_label_override_and_suppress(self, monkeypatch):
+        self._db(monkeypatch, "Entwicklungsserver", "ai-project-assistant")
+        cfg = _cfg(project_labels={"ai-project-assistant": "Assistant"})
+        assert get_workspace_label("missoula", cfg=cfg) == "Assistant, Entwicklungsserver"
+        cfg = _cfg(project_labels={"ai-project-assistant": ""})
+        assert get_workspace_label("missoula", cfg=cfg) == "Entwicklungsserver"
+
+    def test_override_labels_get_no_prefix(self, monkeypatch):
+        self._db(monkeypatch, "x", "ai-project-assistant")
+        cfg = _cfg(workspace_labels={"missoula": "Dev server"})
+        assert get_workspace_label("missoula", cfg=cfg) == "Dev server"
 
 
 class TestDBResolution:

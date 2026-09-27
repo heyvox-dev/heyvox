@@ -199,6 +199,13 @@ class TTSConfig(BaseModel):
     #     geminicap-billing-2026-q2: "billing"
     workspace_labels: dict[str, str] = {}
 
+    # Prepend the project ("AI Project Assistant, Plausibility check") to
+    # DB-derived labels; skipped when the label already shares a word with
+    # it. project_labels maps a repo name to a custom spoken project name
+    # ("" = never prepend for that repo), e.g. {"personal-todos": ""}.
+    announce_project: bool = True
+    project_labels: dict[str, str] = {}
+
     # DEPRECATED: Path to external TTS control script (Phase 1 bridge).
     # No longer used by the native TTS engine. Kept for backward compatibility.
     script_path: str | None = None

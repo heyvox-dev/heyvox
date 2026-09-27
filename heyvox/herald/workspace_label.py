@@ -15,7 +15,10 @@ Resolution order for a given workspace ``directory_name``:
        ``user_set_workspace_name=1`` (Conductor's drift-proof rename
        field), else ``pr_title`` (which Conductor overwrites with a
        Conventional-Commit string on every PR merge — only used when
-       nothing better is set)
+       nothing better is set). The repo's display name is prepended
+       ("<Project>, <Topic>") unless the label already shares a word with
+       it or ``tts.announce_project`` is off; ``tts.project_labels`` maps
+       a repo name to a custom spoken name ("" = never prepend).
     4. The raw ``directory_name`` as last-resort fallback
 
 Returns ``""`` when ``workspace_name`` is empty or announcing is disabled,
@@ -27,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -79,8 +83,8 @@ def _get_workspace_db_path(cfg: "HeyvoxConfig | None") -> str:
 _DB_FIELD_SEP = "␟"
 
 
-def _sidebar_label_from_db(workspace_name: str, db_path: str) -> str:
-    """Fetch the sidebar-equivalent label for ``workspace_name`` from the DB.
+def _sidebar_row_from_db(workspace_name: str, db_path: str) -> tuple[str, str]:
+    """Fetch ``(sidebar label, repo name)`` for ``workspace_name`` from the DB.
 
     Mirrors Conductor's own sidebar resolution (see claude-conductor-setup's
     CLAUDE.md "Workspace Naming" section): ``workspace_name`` wins when the
@@ -88,11 +92,11 @@ def _sidebar_label_from_db(workspace_name: str, db_path: str) -> str:
     the rename tooling there — otherwise falls back to ``pr_title``, which
     Conductor overwrites with a Conventional-Commit string on every PR merge.
 
-    Returns "" if the DB is missing, sqlite errors, or the row has neither
-    field set. Caller falls back to the raw workspace_name in that case.
+    Returns ``("", "")`` if the DB is missing, sqlite errors, or the row has
+    neither field set. Caller falls back to the raw workspace_name then.
     """
     if not db_path or not workspace_name:
-        return ""
+        return "", ""
     # Escape single quotes (workspace names with ' would break the literal).
     safe_name = workspace_name.replace("'", "''")
     sep = _DB_FIELD_SEP
@@ -103,7 +107,9 @@ def _sidebar_label_from_db(workspace_name: str, db_path: str) -> str:
                 db_path,
                 f"SELECT COALESCE(workspace_name,'') || '{sep}' || "
                 f"COALESCE(user_set_workspace_name,0) || '{sep}' || "
-                f"COALESCE(pr_title,'') FROM workspaces "
+                f"COALESCE(pr_title,'') || '{sep}' || "
+                f"COALESCE((SELECT name FROM repos WHERE repos.id = "
+                f"workspaces.repository_id),'') FROM workspaces "
                 f"WHERE directory_name='{safe_name}' LIMIT 1",
             ],
             capture_output=True,
@@ -112,18 +118,25 @@ def _sidebar_label_from_db(workspace_name: str, db_path: str) -> str:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         log.debug("workspace_label: sqlite3 lookup failed: %s", e)
-        return ""
+        return "", ""
     row = (r.stdout or "").rstrip("\n")
     if not row:
-        return ""
+        return "", ""
     parts = row.split(sep)
-    if len(parts) != 3:
+    if len(parts) == 3:  # tolerate a row without the repo column
+        parts.append("")
+    if len(parts) != 4:
         log.debug("workspace_label: unexpected sqlite3 output shape: %r", row)
-        return ""
-    ws_name, user_set, pr_title = parts
+        return "", ""
+    ws_name, user_set, pr_title, repo = parts
     if user_set == "1" and ws_name:
-        return ws_name
-    return pr_title
+        return ws_name, repo
+    return pr_title, repo
+
+
+def _sidebar_label_from_db(workspace_name: str, db_path: str) -> str:
+    """Sidebar-equivalent label only (see ``_sidebar_row_from_db``)."""
+    return _sidebar_row_from_db(workspace_name, db_path)[0]
 
 
 def detect_workspace_from_cwd(
@@ -190,12 +203,52 @@ def detect_workspace_from_cwd(
     return os.path.basename(cwd.rstrip("/")) or ""
 
 
+_HASH_NUMBER = re.compile(r"\s*#\d+\b")
+_SLASH = re.compile(r"\s*/\s*")
+
+# Repo-name words that are not plain title case when spoken.
+_PROJECT_WORDS = {"ai": "AI", "mcp": "MCP", "crm": "CRM", "ngrid": "nGrid", "sepa": "SEPA", "un": "UN"}
+
+
 def _normalize_for_speech(label: str) -> str:
     """Make a DB label sound natural when spoken.
 
-    Currently just replaces Conductor's middle-dot separator with ", ".
+    Kokoro voices "/" as "slash" and "#312" as "hash three one two", and
+    the issue number carries nothing for a listener. So: the middle-dot
+    separator and "/" become ", ", and " #NNN" is dropped.
     """
-    return label.replace(_MIDDLE_DOT, ", ")
+    label = label.replace(_MIDDLE_DOT, ", ")
+    label = _HASH_NUMBER.sub("", label)
+    label = _SLASH.sub(", ", label)
+    label = re.sub(r"\s+", " ", label)
+    return label.strip(" ,")
+
+
+def _project_display(repo: str, cfg: "HeyvoxConfig") -> str:
+    """Spoken project name for a repo: config override, else title-cased repo."""
+    overrides = getattr(cfg.tts, "project_labels", {}) or {}
+    if repo in overrides:
+        return str(overrides[repo]).strip()
+    words = [w for w in re.split(r"[-_\s]+", repo) if w]
+    return " ".join(_PROJECT_WORDS.get(w.lower(), w.capitalize()) for w in words)
+
+
+def _with_project(label: str, repo: str, cfg: "HeyvoxConfig") -> str:
+    """Prepend the project ("<Project>, <Topic>") unless redundant.
+
+    Skipped when announcing projects is off, the repo is unknown, or the
+    label shares a word with the project name (main workspace "AI Project
+    Assistant", "Claude Setup" in claude-conductor-setup, ...).
+    """
+    if not repo or not getattr(cfg.tts, "announce_project", True):
+        return label
+    project = _project_display(repo, cfg)
+    if not project:
+        return label
+    words = lambda t: {w.lower() for w in re.findall(r"\w+", t)}
+    if words(project) & words(label):
+        return label
+    return f"{project}, {label}"
 
 
 def get_workspace_label(
@@ -245,9 +298,9 @@ def get_workspace_label(
     #    Conductor's own resolution (workspace_name when user-set, else
     #    pr_title).
     db_path = _get_workspace_db_path(cfg)
-    sidebar_label = _sidebar_label_from_db(workspace_name, db_path)
+    sidebar_label, repo = _sidebar_row_from_db(workspace_name, db_path)
     if sidebar_label:
-        return _normalize_for_speech(sidebar_label)
+        return _with_project(_normalize_for_speech(sidebar_label), repo, cfg)
 
     # 4. Last resort: the raw directory_name
     return _normalize_for_speech(workspace_name)
