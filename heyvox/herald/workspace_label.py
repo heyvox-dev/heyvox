@@ -233,6 +233,10 @@ def _project_display(repo: str, cfg: "HeyvoxConfig") -> str:
     return " ".join(_PROJECT_WORDS.get(w.lower(), w.capitalize()) for w in words)
 
 
+def _words(text: str) -> set[str]:
+    return {w.lower() for w in re.findall(r"\w+", text)}
+
+
 def _with_project(label: str, repo: str, cfg: "HeyvoxConfig") -> str:
     """Prepend the project ("<Project>, <Topic>") unless redundant.
 
@@ -245,8 +249,7 @@ def _with_project(label: str, repo: str, cfg: "HeyvoxConfig") -> str:
     project = _project_display(repo, cfg)
     if not project:
         return label
-    words = lambda t: {w.lower() for w in re.findall(r"\w+", t)}
-    if words(project) & words(label):
+    if _words(project) & _words(label):
         return label
     return f"{project}, {label}"
 
