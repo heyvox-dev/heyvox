@@ -249,6 +249,42 @@ def detect_language(text: str) -> tuple[str, str | None]:
     return "en-us", None
 
 
+GERMAN_SPEECH_NOTICE = "The spoken summary was written in German, so it is not read aloud."
+
+_GERMAN_FUNCTION_WORDS = frozenset(
+    "der die das und ist nicht ich du wir sie es ein eine einen mit für auf "
+    "zu den dem des von im ist sind bin hat habe haben kein keine noch auch "
+    "aber oder wenn dass nur schon jetzt hier wie".split()
+)
+_ENGLISH_FUNCTION_WORDS = frozenset(
+    "the and is are not i you we they it a an with for on to of in that this "
+    "was were be have has but or if only already now here how what".split()
+)
+
+
+def _is_predominantly_german(text: str) -> bool:
+    """True if German function words outnumber English ones.
+
+    detect_language() flags any umlaut as German, which also catches English
+    text that merely mentions a German name. This tells the two apart.
+    """
+    words = re.findall(r"[a-zäöüß]+", text.lower())
+    de = sum(w in _GERMAN_FUNCTION_WORDS for w in words)
+    en = sum(w in _ENGLISH_FUNCTION_WORDS for w in words)
+    return de > en
+
+
+_TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+
+
+def _is_temp_cwd(cwd: str) -> bool:
+    """True if cwd lies in a system temp directory."""
+    if not cwd:
+        return False
+    real = os.path.realpath(cwd)
+    return any(real == root or real.startswith(root + "/") for root in _TEMP_ROOTS)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator auto-start
 # ---------------------------------------------------------------------------
@@ -376,6 +412,15 @@ class HeraldWorker:
 
         Returns True on success or intentional skip, False on generation failure.
         """
+        # Throwaway sessions (agents testing `claude -p` in /tmp) inherit the
+        # global Stop hook; their replies are not addressed to the user.
+        if _is_temp_cwd(self._cwd):
+            log.info(
+                "WORKER: temp-dir session — not speaking (hook=%s cwd=%r)",
+                hook_type, self._cwd,
+            )
+            return True
+
         # Extract <tts>...</tts> blocks (multiline, last match wins)
         texts = self._extract_tts_blocks(raw_text)
         if not texts:
@@ -455,7 +500,19 @@ class HeraldWorker:
         # demote to the fallback (first allowlist entry or en-us) so we
         # never silently pull an unwanted engine (e.g. Qwen3 for German).
         allowed = _allowed_languages()
-        if allowed is not None and lang not in allowed:
+        if allowed is not None and "de" not in allowed and _is_predominantly_german(speech):
+            # A German sentence read by an English voice is unintelligible.
+            # Replace it with a short English notice so the user still hears
+            # that the session finished. Checked independently of
+            # detect_language(), which misses German without umlauts.
+            log.info(
+                "TTS German text replaced by notice (allowlist=%s): %r",
+                sorted(allowed), speech[:80],
+            )
+            speech = GERMAN_SPEECH_NOTICE
+            mood = "neutral"
+            lang, lang_voice = next(iter(allowed), "en-us"), None
+        elif allowed is not None and lang not in allowed:
             demoted = next(iter(allowed), "en-us")
             log.info("TTS lang demoted: %s → %s (allowlist=%s)", lang, demoted, sorted(allowed))
             lang, lang_voice = demoted, None

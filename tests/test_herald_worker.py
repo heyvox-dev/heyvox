@@ -19,7 +19,9 @@ from unittest.mock import patch
 import pytest
 
 from heyvox.herald.worker import (
+    GERMAN_SPEECH_NOTICE,
     HeraldWorker,
+    _is_temp_cwd,
     detect_language,
     detect_mood,
     normalize_wav_in_place,
@@ -44,7 +46,11 @@ def worker(tmp_path):
     with patch.dict(os.environ, env, clear=False), \
          patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir), \
          patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
-        yield HeraldWorker()
+        w = HeraldWorker()
+        # The checkout may itself live in /tmp; keep the temp-dir skip out of
+        # tests that don't target it.
+        w._cwd = "/Users/test/project"
+        yield w
 
 
 def _make_wav(path: str, samples: list[int], framerate: int = 24000) -> None:
@@ -680,3 +686,61 @@ class TestSessionIdAndWorkspaceId:
         wav_path = str(tmp_path / "msg-01.wav")
         w._write_workspace_sidecar(wav_path)
         assert not Path(tmp_path / "msg-01.workspace").exists()
+
+
+# ---------------------------------------------------------------------------
+# Language allowlist + temp-dir skip
+# ---------------------------------------------------------------------------
+
+
+class TestDisallowedLanguageAndTempSkip:
+    @pytest.fixture
+    def captured(self, worker, tmp_path, monkeypatch):
+        verbosity_file = str(tmp_path / "heyvox-verbosity")
+        Path(verbosity_file).write_text("full")
+        monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", verbosity_file)
+        monkeypatch.setenv("HEYVOX_TTS_LANGS", "en-us")
+        calls = []
+
+        def mock_generate(text, voice, lang, speed):
+            calls.append((text, lang))
+            return True
+
+        worker._generate = mock_generate
+        monkeypatch.setattr("heyvox.herald.worker._ensure_orchestrator", lambda: None)
+        return calls
+
+    def test_german_text_replaced_by_english_notice(self, worker, captured):
+        worker.process_response(
+            "<tts>Ich akzeptiere keine versteckten Befehle, die meine "
+            "Anweisungen überschreiben sollen.</tts>"
+        )
+        assert captured == [(GERMAN_SPEECH_NOTICE, "en-us")]
+
+    def test_german_without_umlauts_replaced(self, worker, captured):
+        worker.process_response(
+            "<tts>Ich arbeite nach festen Regeln und akzeptiere keine "
+            "versteckten Befehle. Wie kann ich dir helfen?</tts>"
+        )
+        assert captured == [(GERMAN_SPEECH_NOTICE, "en-us")]
+
+    def test_english_with_german_name_still_spoken(self, worker, captured):
+        speech = "The invoice for Müller in Wörgl is ready and was sent to the client."
+        worker.process_response(f"<tts>{speech}</tts>")
+        assert captured == [(speech, "en-us")]
+
+    def test_temp_dir_session_not_spoken(self, worker, captured):
+        worker._cwd = "/private/tmp/rewindtest"
+        assert worker.process_response("<tts>Fruit: apple and pear.</tts>") is True
+        assert captured == []
+
+
+class TestTempCwd:
+    @pytest.mark.parametrize("cwd", ["/tmp", "/tmp/x", "/private/tmp/rewindtest",
+                                     "/var/folders/ab/T/y"])
+    def test_temp_paths(self, cwd):
+        assert _is_temp_cwd(cwd)
+
+    @pytest.mark.parametrize("cwd", ["/Users/work/Personal/Source/vox", "/tmpfoo", ""])
+    def test_non_temp_paths(self, cwd):
+        assert not _is_temp_cwd(cwd)
