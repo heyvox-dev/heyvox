@@ -43,14 +43,15 @@ def test_start_orchestrator_threads_matching_profile_fields():
 
 
 def test_start_orchestrator_no_matching_profile_leaves_fields_empty():
-    """Both built-in profile names are overridden with non-matching versions
-    here — otherwise HeyvoxConfig's merge_default_profiles validator would
-    silently append the built-in Conductor profile (which DOES have
+    """The built-in workspace-managing profiles (Conductor, Orca) are
+    overridden with non-matching versions here — otherwise HeyvoxConfig's
+    merge_default_profiles validator would silently append them (they DO have
     workspace detection) and satisfy the loop despite the test's intent."""
     from heyvox.herald import start_orchestrator
 
     profiles = [
         AppProfileConfig(name="Conductor"),  # override: no workspace detection
+        AppProfileConfig(name="Orca"),       # override: no workspace detection
         AppProfileConfig(name="Cursor"),
     ]
     cfg = _cfg_with_profiles(*profiles)
@@ -65,6 +66,35 @@ def test_start_orchestrator_no_matching_profile_leaves_fields_empty():
     assert kwargs["workspace_provider"] == ""
     assert kwargs["workspace_app_name"] == ""
     assert kwargs["workspace_db"] == ""
+
+
+def test_start_orchestrator_threads_all_workspace_apps():
+    """Conductor + Orca configured together: the first profile stays the
+    default, every provider is available to sidecars that name it."""
+    from heyvox.herald import start_orchestrator
+
+    cfg = _cfg_with_profiles(
+        AppProfileConfig(
+            name="Conductor", has_workspace_detection=True,
+            workspace_provider="conductor", workspace_db="/tmp/fake.db",
+        ),
+        AppProfileConfig(
+            name="Orca", has_workspace_detection=True, workspace_provider="orca",
+        ),
+    )
+
+    with patch("heyvox.config.load_config", return_value=cfg), \
+         patch("heyvox.herald.orchestrator.HeraldOrchestrator") as MockOrch, \
+         patch("heyvox.herald.orchestrator.OrchestratorConfig") as MockOrchCfg:
+        MockOrch.return_value = MagicMock()
+        start_orchestrator()
+
+    _args, kwargs = MockOrchCfg.call_args
+    assert kwargs["workspace_provider"] == "conductor"
+    assert kwargs["workspace_apps"] == {
+        "conductor": {"app_name": "Conductor", "db": "/tmp/fake.db"},
+        "orca": {"app_name": "Orca", "db": ""},
+    }
 
 
 def test_start_orchestrator_survives_load_config_failure():

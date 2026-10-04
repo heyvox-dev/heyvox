@@ -371,13 +371,34 @@ class HeraldWorker:
         # renamed away from "Whatsapp Gruppen Zusammenfassen" kept
         # announcing exactly that slug, because CONDUCTOR_WORKSPACE_NAME
         # was still set to the pre-rename value in that session's env.
+        #
+        # Providers that can describe a cwd themselves (Orca: its CLI knows
+        # the worktree and its sidebar name) are asked first and bring their
+        # own workspace_id, so the Conductor-DB steps below are skipped for
+        # them. Conductor sessions fall through unchanged.
+        self._ws_info = None
         try:
-            from heyvox.herald.workspace_label import detect_workspace_from_cwd
-            self._workspace: str = detect_workspace_from_cwd()
-            log.info("workspace cwd-detect: cwd=%r → %r", self._cwd, self._workspace)
+            from heyvox.herald.workspace_label import identify_workspace
+            self._ws_info = identify_workspace(self._cwd)
         except Exception as e:
-            log.warning("workspace cwd-detect raised (%s) (cwd=%r)", e, self._cwd)
-            self._workspace = ""
+            log.warning("workspace identify raised (%s) (cwd=%r)", e, self._cwd)
+        self._provider = ""
+        self._workspace: str = ""
+        if self._ws_info is not None:
+            self._workspace = self._ws_info.name
+            self._provider = self._ws_info.provider
+            log.info(
+                "workspace via %s provider: cwd=%r → %r (id=%r)",
+                self._provider, self._cwd, self._workspace, self._ws_info.workspace_id,
+            )
+        else:
+            try:
+                from heyvox.herald.workspace_label import detect_workspace_from_cwd
+                self._workspace = detect_workspace_from_cwd()
+                log.info("workspace cwd-detect: cwd=%r → %r", self._cwd, self._workspace)
+            except Exception as e:
+                log.warning("workspace cwd-detect raised (%s) (cwd=%r)", e, self._cwd)
+                self._workspace = ""
         if not self._workspace:
             env_ws = (
                 os.environ.get("HEYVOX_WORKSPACE", "")
@@ -396,7 +417,10 @@ class HeraldWorker:
         # worker instance.
         self._session_id = os.environ.get("CONDUCTOR_SESSION_ID", "")
         self._workspace_id = ""
-        if self._workspace:
+        if self._ws_info is not None:
+            self._workspace_id = self._ws_info.workspace_id
+            self._session_id = ""  # Conductor's session id means nothing to another provider
+        elif self._workspace:
             try:
                 from heyvox.herald.workspace_label import resolve_workspace_id
                 self._workspace_id = resolve_workspace_id(self._workspace)
@@ -653,7 +677,7 @@ class HeraldWorker:
             return speech
         try:
             from heyvox.herald.workspace_label import get_workspace_label
-            label = get_workspace_label(self._workspace, cfg=cfg)
+            label = get_workspace_label(self._workspace, cfg=cfg, info=self._ws_info)
         except Exception as e:
             log.warning("workspace_label: lookup failed (%s)", e)
             return speech
@@ -1363,6 +1387,7 @@ class HeraldWorker:
         from heyvox.herald.workspace_label import write_switch_sidecar
         write_switch_sidecar(
             wav_path, self._workspace, self._workspace_id, self._session_id, self._cwd,
+            self._provider,
         )
 
     # ------------------------------------------------------------------

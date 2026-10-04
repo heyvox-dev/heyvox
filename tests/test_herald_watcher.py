@@ -58,7 +58,7 @@ class TestSendToKokoroSidecar:
         identity = read_switch_sidecar((queue_dir / sidecar_files[0]).read_text())
         assert identity == {
             "workspace": "seattle", "workspace_id": "ws-uuid-123", "session_id": "sess-uuid-456",
-            "cwd": "",
+            "cwd": "", "provider": "",
         }
 
     def test_no_workspace_skips_workspace_id_resolution(self, tmp_path, monkeypatch):
@@ -112,7 +112,7 @@ class TestSendToKokoroSidecar:
             identity = read_switch_sidecar((queue_dir / name).read_text())
             assert identity == {
                 "workspace": "seattle", "workspace_id": "ws-uuid-123", "session_id": "sess-uuid-456",
-                "cwd": "",
+                "cwd": "", "provider": "",
             }
 
 

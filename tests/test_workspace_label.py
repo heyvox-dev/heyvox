@@ -436,6 +436,7 @@ class TestSwitchSidecar:
             "workspace_id": "ws-uuid-123",
             "session_id": "sess-uuid-456",
             "cwd": "/ws/vox-v2/seattle",
+            "provider": "",
         }
 
     def test_write_skips_when_workspace_empty(self, tmp_path):
@@ -448,24 +449,24 @@ class TestSwitchSidecar:
         workspace_label.write_switch_sidecar(str(wav), "seattle")
         identity = workspace_label.read_switch_sidecar((tmp_path / "msg-01.workspace").read_text())
         assert identity == {
-            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "",
+            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "", "provider": "",
         }
 
     def test_read_legacy_plain_string_sidecar(self):
         """Sidecars written by a pre-DEF-237 worker/watcher still switch the workspace."""
         assert workspace_label.read_switch_sidecar("seattle") == {
-            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "",
+            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "", "provider": "",
         }
 
     def test_read_handles_malformed_json_as_plain_label(self):
         # Starts with "{" but isn't valid JSON — must not raise or return empty.
         assert workspace_label.read_switch_sidecar("{not json") == {
-            "workspace": "{not json", "workspace_id": "", "session_id": "", "cwd": "",
+            "workspace": "{not json", "workspace_id": "", "session_id": "", "cwd": "", "provider": "",
         }
 
     def test_read_strips_whitespace(self):
         assert workspace_label.read_switch_sidecar("  seattle\n") == {
-            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "",
+            "workspace": "seattle", "workspace_id": "", "session_id": "", "cwd": "", "provider": "",
         }
 
     def test_read_pre_def243_json_sidecar_defaults_cwd_to_empty(self):
@@ -475,5 +476,28 @@ class TestSwitchSidecar:
             '{"workspace": "seattle", "workspace_id": "ws-1", "session_id": "sess-1"}'
         )
         assert workspace_label.read_switch_sidecar(pre_def243_json) == {
-            "workspace": "seattle", "workspace_id": "ws-1", "session_id": "sess-1", "cwd": "",
+            "workspace": "seattle", "workspace_id": "ws-1", "session_id": "sess-1", "cwd": "", "provider": "",
         }
+
+
+class TestSwitchSidecarProvider:
+    """The sidecar names the provider that issued workspace_id (Orca + Conductor
+    configured side by side); old sidecars without the key read as ""."""
+
+    def test_roundtrip_with_provider(self, tmp_path):
+        from heyvox.herald.workspace_label import read_switch_sidecar, write_switch_sidecar
+        wav = str(tmp_path / "1-01.wav")
+        write_switch_sidecar(wav, "HeyVox", "wid", "", "/cwd", "orca")
+        data = read_switch_sidecar((tmp_path / "1-01.workspace").read_text())
+        assert data["provider"] == "orca" and data["workspace_id"] == "wid"
+
+    def test_default_provider_is_empty(self, tmp_path):
+        from heyvox.herald.workspace_label import read_switch_sidecar, write_switch_sidecar
+        wav = str(tmp_path / "2-01.wav")
+        write_switch_sidecar(wav, "seattle", "wid")
+        assert read_switch_sidecar((tmp_path / "2-01.workspace").read_text())["provider"] == ""
+
+    def test_legacy_sidecar_formats_have_empty_provider(self):
+        from heyvox.herald.workspace_label import read_switch_sidecar
+        assert read_switch_sidecar("seattle")["provider"] == ""
+        assert read_switch_sidecar('{"workspace": "a", "workspace_id": "b"}')["provider"] == ""

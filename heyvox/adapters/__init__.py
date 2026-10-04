@@ -21,4 +21,7 @@ def get_workspace_provider(name: str) -> Optional[object]:
     if name == "conductor":
         from heyvox.adapters.conductor import ConductorWorkspaceProvider
         return ConductorWorkspaceProvider()
+    if name == "orca":
+        from heyvox.adapters.orca import OrcaWorkspaceProvider
+        return OrcaWorkspaceProvider()
     return None

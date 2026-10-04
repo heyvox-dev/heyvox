@@ -10,7 +10,10 @@ Resolution order for a given workspace ``directory_name``:
        launchd hooks that already know the friendly name)
     2. ``config.tts.workspace_labels[directory_name]`` (per-workspace short
        name, persisted in config.yaml — the "programmatic" knob)
-    3. The workspace-aware app's SQLite DB, mirroring what it renders in
+    3. A provider-described workspace (``info``, e.g. Orca's sidebar name —
+       see ``identify_workspace``): name as the app's sidebar shows it, with
+       the project prepended by the same rules as below
+    4. The workspace-aware app's SQLite DB, mirroring what it renders in
        its own sidebar: ``workspace_name`` when the row has
        ``user_set_workspace_name=1`` (Conductor's drift-proof rename
        field), else ``pr_title`` (which Conductor overwrites with a
@@ -19,7 +22,7 @@ Resolution order for a given workspace ``directory_name``:
        ("<Project>, <Topic>") unless the label already shares a word with
        it or ``tts.announce_project`` is off; ``tts.project_labels`` maps
        a repo name to a custom spoken name ("" = never prepend).
-    4. The raw ``directory_name`` as last-resort fallback
+    5. The raw ``directory_name`` as last-resort fallback
 
 Returns ``""`` when ``workspace_name`` is empty or announcing is disabled,
 so callers can do ``if label:`` to gate prepending.
@@ -35,6 +38,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
+    from heyvox.adapters.base import WorkspaceInfo
     from heyvox.config import HeyvoxConfig
 
 log = logging.getLogger(__name__)
@@ -237,6 +241,15 @@ def _words(text: str) -> set[str]:
     return {w.lower() for w in re.findall(r"\w+", text)}
 
 
+def _prepend_project(label: str, project: str, cfg: "HeyvoxConfig") -> str:
+    """Prepend an already-spoken project name unless redundant."""
+    if not project or not getattr(cfg.tts, "announce_project", True):
+        return label
+    if _words(project) & _words(label):
+        return label
+    return f"{project}, {label}"
+
+
 def _with_project(label: str, repo: str, cfg: "HeyvoxConfig") -> str:
     """Prepend the project ("<Project>, <Topic>") unless redundant.
 
@@ -244,19 +257,55 @@ def _with_project(label: str, repo: str, cfg: "HeyvoxConfig") -> str:
     label shares a word with the project name (main workspace "AI Project
     Assistant", "Claude Setup" in claude-conductor-setup, ...).
     """
-    if not repo or not getattr(cfg.tts, "announce_project", True):
+    if not repo:
         return label
-    project = _project_display(repo, cfg)
-    if not project:
-        return label
-    if _words(project) & _words(label):
-        return label
-    return f"{project}, {label}"
+    return _prepend_project(label, _project_display(repo, cfg), cfg)
+
+
+def identify_workspace(
+    cwd: str | None = None,
+    cfg: "HeyvoxConfig | None" = None,
+) -> "WorkspaceInfo | None":
+    """Ask each configured WorkspaceProvider that can describe a cwd.
+
+    Providers opt in by defining ``describe_cwd(cwd, profile)`` (Conductor
+    does not — its DB-based flow above stays as is). First hit wins, in
+    app-profile order. Returns None when nothing claims the cwd.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    if not cwd:
+        return None
+    if cfg is None:
+        try:
+            from heyvox.config import load_config
+            cfg = load_config()
+        except Exception:
+            return None
+    from heyvox.adapters import get_workspace_provider
+    seen: set[str] = set()
+    for profile in cfg.app_profiles:
+        name = getattr(profile, "workspace_provider", "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        describe = getattr(get_workspace_provider(name), "describe_cwd", None)
+        if describe is None:
+            continue
+        try:
+            info = describe(cwd, profile)
+        except Exception as e:
+            log.debug("workspace_label: %s.describe_cwd failed: %s", name, e)
+            continue
+        if info is not None:
+            return info
+    return None
 
 
 def get_workspace_label(
     workspace_name: str,
     cfg: "HeyvoxConfig | None" = None,
+    info: "WorkspaceInfo | None" = None,
 ) -> str:
     """Resolve the spoken label for a workspace.
 
@@ -269,6 +318,8 @@ def get_workspace_label(
             sidecar value Herald writes next to each TTS WAV).
         cfg: Optional pre-loaded config — pass it when you've already
             loaded one this call to avoid a re-read.
+        info: Provider-described workspace from ``identify_workspace``;
+            when given it replaces the Conductor DB lookup (step 4).
     """
     if not workspace_name:
         return ""
@@ -297,7 +348,15 @@ def get_workspace_label(
     if custom:
         return _normalize_for_speech(custom)
 
-    # 3. Sidebar-equivalent label from the workspace-aware app's DB — mirrors
+    # 3. Provider-described workspace: the app's own sidebar name + project
+    if info is not None and info.name:
+        project_overrides = getattr(cfg.tts, "project_labels", {}) or {}
+        project = info.project
+        if project in project_overrides:
+            project = str(project_overrides[project]).strip()
+        return _prepend_project(_normalize_for_speech(info.name), project, cfg)
+
+    # 4. Sidebar-equivalent label from the workspace-aware app's DB — mirrors
     #    Conductor's own resolution (workspace_name when user-set, else
     #    pr_title).
     db_path = _get_workspace_db_path(cfg)
@@ -305,7 +364,7 @@ def get_workspace_label(
     if sidebar_label:
         return _with_project(_normalize_for_speech(sidebar_label), repo, cfg)
 
-    # 4. Last resort: the raw directory_name
+    # 5. Last resort: the raw directory_name
     return _normalize_for_speech(workspace_name)
 
 
@@ -343,6 +402,7 @@ def resolve_workspace_id(directory_name: str, cfg: "HeyvoxConfig | None" = None)
 
 def write_switch_sidecar(
     wav_path: str, workspace: str, workspace_id: str = "", session_id: str = "", cwd: str = "",
+    provider: str = "",
 ) -> None:
     """Write the .workspace sidecar that tells the orchestrator what to switch to.
 
@@ -357,6 +417,11 @@ def write_switch_sidecar(
     orchestrator: when `workspace` doesn't match anything by name, cwd can
     still identify the workspace via its DB `workspace_path` — independent of
     whatever string the caller's own name-resolution produced.
+
+    provider names the WorkspaceProvider that produced workspace_id (""
+    = the orchestrator's default provider, the pre-multi-provider behaviour).
+    Needed once several apps (Conductor, Orca) are configured at the same
+    time: the id is only meaningful to the provider that issued it.
     """
     if not workspace:
         return
@@ -366,7 +431,7 @@ def write_switch_sidecar(
             json.dump(
                 {
                     "workspace": workspace, "workspace_id": workspace_id,
-                    "session_id": session_id, "cwd": cwd,
+                    "session_id": session_id, "cwd": cwd, "provider": provider,
                 },
                 f,
             )
@@ -381,7 +446,8 @@ def read_switch_sidecar(text: str) -> dict:
     string as a plain label — the format every sidecar used before DEF-237,
     so any sidecar an old worker.py/watcher.py process left in flight across
     a deploy still switches the workspace (just without --session/--cwd).
-    `cwd` defaults to "" for sidecars written before DEF-244 added it.
+    `cwd` defaults to "" for sidecars written before DEF-244 added it, `provider`
+    likewise for sidecars written before the Orca provider.
     """
     text = text.strip()
     if text.startswith("{"):
@@ -392,7 +458,8 @@ def read_switch_sidecar(text: str) -> dict:
                 "workspace_id": data.get("workspace_id", ""),
                 "session_id": data.get("session_id", ""),
                 "cwd": data.get("cwd", ""),
+                "provider": data.get("provider", ""),
             }
         except (json.JSONDecodeError, AttributeError):
             pass
-    return {"workspace": text, "workspace_id": "", "session_id": "", "cwd": ""}
+    return {"workspace": text, "workspace_id": "", "session_id": "", "cwd": "", "provider": ""}
