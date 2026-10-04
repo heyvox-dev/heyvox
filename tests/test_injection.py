@@ -593,3 +593,60 @@ class TestLogSurvivesRotation:
         assert log_file.exists(), "log() must recreate the file at the live path"
         assert "after rotation" in log_file.read_text()
         assert "after rotation" not in rotated.read_text()
+
+
+class TestAXPlaceholderAndAsyncCommit:
+    """DEF-259: Orca's ProseMirror composer reports its CSS placeholder as
+    AXValue when empty and applies AXValue sets asynchronously."""
+
+    PLACEHOLDER = "Send a message…\n"
+
+    def _ax(self, commit_after_reads: int):
+        """Fake field: a set lands only after N further AXValue reads."""
+        state = {"val": self.PLACEHOLDER, "pending": None, "reads": 0, "sets": []}
+
+        def _copy(el, attr, _):
+            if attr == "AXFocusedUIElement":
+                return (0, object())
+            if attr == "AXValue":
+                if state["pending"] is not None:
+                    state["reads"] += 1
+                    if state["reads"] > commit_after_reads:
+                        v = state["pending"]
+                        state["val"] = self.PLACEHOLDER if v == "" else v
+                        state["pending"] = None
+                return (0, state["val"])
+            return (0, None)
+
+        def _set(el, attr, val):
+            if attr == "AXValue":
+                state["sets"].append(val)
+                state["pending"], state["reads"] = val, 0
+            return 0
+
+        mock_ax = MagicMock()
+        mock_ax.AXUIElementCreateApplication.return_value = MagicMock()
+        mock_ax.AXUIElementCopyAttributeValue = MagicMock(side_effect=_copy)
+        mock_ax.AXUIElementSetAttributeValue = MagicMock(side_effect=_set)
+        return mock_ax, state
+
+    def _snap(self):
+        snap = _make_snap("AXTextArea")
+        snap.leaf_description = "Send a message…"
+        return snap
+
+    def test_placeholder_is_not_prepended(self):
+        mock_ax, state = self._ax(commit_after_reads=2)
+        with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
+            result = _ax_inject_text(self._snap(), "hello")
+        assert result is True  # async commit tolerated by the verify poll
+        assert state["sets"] == ["hello"]
+        assert state["val"] == "hello"
+
+    def test_failed_verify_never_writes_placeholder_back(self):
+        mock_ax, state = self._ax(commit_after_reads=10_000)  # never lands
+        with patch.dict("sys.modules", {"ApplicationServices": mock_ax}):
+            result = _ax_inject_text(self._snap(), "hello")
+        assert result is False
+        assert not any("Send a message" in v for v in state["sets"])
+        assert state["sets"][-1] == ""  # restored to the real (empty) content

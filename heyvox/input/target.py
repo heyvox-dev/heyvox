@@ -649,6 +649,38 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
             )
 
 
+def _poll_live_focus(pid: int):
+    """Return (focused_element, role) of the app's live AXFocusedUIElement.
+
+    Chromium builds its a11y tree lazily and only for the active app —
+    AXFocusedUIElement stays -25212 (no value) until AXManualAccessibility is
+    switched on (harmless no-op on native apps, same call as
+    injection._ax_set_focused_value). Electron/Tauri apps need ~150ms to settle
+    after activation and a freshly enabled Chromium tree (Orca) up to ~1s, so
+    poll. Returns (None, "") when nothing is focused within the budget.
+    """
+    from ApplicationServices import (
+        AXUIElementCreateApplication,
+        AXUIElementCopyAttributeValue,
+        AXUIElementSetAttributeValue,
+    )
+
+    ax_app = AXUIElementCreateApplication(pid)
+    AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
+    err, focused = -1, None
+    for _ in range(20):
+        _time.sleep(0.05)
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, "AXFocusedUIElement", None
+        )
+        if err == 0 and focused is not None:
+            break
+    if err != 0 or focused is None:
+        return None, ""
+    err, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
+    return focused, (str(role) if err == 0 and role else "")
+
+
 def _try_activate_and_recapture(lock) -> bool:
     """Multi-monitor fix: when the mouse-target app was not OS-frontmost at
     capture (e.g. Slack visible on monitor 2 while Chrome is system-frontmost
@@ -663,10 +695,6 @@ def _try_activate_and_recapture(lock) -> bool:
     """
     try:
         import AppKit
-        from ApplicationServices import (
-            AXUIElementCreateApplication,
-            AXUIElementCopyAttributeValue,
-        )
     except ImportError:
         return False
 
@@ -682,23 +710,14 @@ def _try_activate_and_recapture(lock) -> bool:
             return False
         # NSApplicationActivateIgnoringOtherApps = 1 << 1
         running.activateWithOptions_(1 << 1)
-        # Electron/Tauri apps need ~150ms for AX state to settle after activate
-        _time.sleep(0.15)
 
-        ax_app = AXUIElementCreateApplication(pid)
-        err, focused = AXUIElementCopyAttributeValue(
-            ax_app, "AXFocusedUIElement", None
-        )
-        if err != 0 or focused is None:
+        focused, role_str = _poll_live_focus(pid)
+        if focused is None:
             _log(
                 f"[activate-recapture] AXFocusedUIElement still empty after "
                 f"activate (app={lock.app_name})"
             )
             return False
-        err, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
-        if err != 0 or not role:
-            return False
-        role_str = str(role)
         if role_str not in _TEXT_ROLES:
             _log(
                 f"[activate-recapture] new focused role {role_str!r} is not "
@@ -716,6 +735,55 @@ def _try_activate_and_recapture(lock) -> bool:
         return True
     except Exception as e:
         _log(f"[activate-recapture] exception: {e}")
+        return False
+
+
+def _live_focus_matches_lock(lock) -> bool:
+    """Tier 1b: is the app's LIVE focused field the one captured at record start?
+
+    For deep Chromium trees the role-path (MAX_ROLE_PATH_HOPS) cannot reach the
+    leaf, so Tier 1 never applies; the tie-breakers captured with the lock
+    (AXIdentifier / AXTitle / AXDescription) are the only identity we have.
+    Match only when the lock carries at least one tie-breaker and the live
+    element has the same role and every captured tie-breaker value — an app with
+    several inputs (Orca: "Send a message…" vs "Find files") must not get the
+    transcript in the wrong one. No tie-breaker captured = cannot tell fields
+    apart = no match (stays fail-closed).
+    """
+    expected = {
+        "AXIdentifier": getattr(lock, "leaf_axid", None),
+        "AXTitle": getattr(lock, "leaf_title", None),
+        "AXDescription": getattr(lock, "leaf_description", None),
+    }
+    expected = {k: v for k, v in expected.items() if v}
+    pid = getattr(lock, "app_pid", 0)
+    if not expected or not pid or not getattr(lock, "leaf_role", ""):
+        return False
+    try:
+        focused, role_str = _poll_live_focus(pid)
+        if focused is None or role_str != lock.leaf_role:
+            _log(
+                f"[live-focus] no match: live role {role_str!r} vs lock "
+                f"{lock.leaf_role!r} (app={lock.app_name})"
+            )
+            return False
+        live_axid, live_title, live_desc = _capture_leaf_tiebreakers(focused)
+        live = {
+            "AXIdentifier": live_axid,
+            "AXTitle": live_title,
+            "AXDescription": live_desc,
+        }
+        for attr, want in expected.items():
+            if live[attr] != want:
+                _log(
+                    f"[live-focus] no match: {attr} live={live[attr]!r} vs "
+                    f"lock={want!r} (app={lock.app_name})"
+                )
+                return False
+        _log(f"[live-focus] match: {lock.leaf_role} {expected} (app={lock.app_name})")
+        return True
+    except Exception as e:
+        _log(f"[live-focus] exception: {e}")
         return False
 
 
@@ -840,6 +908,25 @@ def resolve_lock(lock, config=None) -> PasteOutcome:
         elapsed = int((_time.time() - _t0) * 1000)
         _log(
             f"[PASTE] tier_used=2 (deferred to app_fast_paste) "
+            f"reason=n/a elapsed_ms={elapsed}"
+        )
+        return PasteOutcome(
+            ok=True, element=None, tier_used=2, elapsed_ms=elapsed,
+        )
+
+    # Tier 1b: role-path unreachable (deep Chromium tree) and no focus shortcut
+    # — profiles that opt in via activate_on_mismatch can still prove the live
+    # focused field is the captured one by its tie-breakers. The caller pastes
+    # into the focused field (tier 2 flow without a shortcut).
+    if (
+        profile
+        and not profile.focus_shortcut
+        and getattr(profile, "activate_on_mismatch", False)
+        and _live_focus_matches_lock(lock)
+    ):
+        elapsed = int((_time.time() - _t0) * 1000)
+        _log(
+            f"[PASTE] tier_used=2 (live-focus match) "
             f"reason=n/a elapsed_ms={elapsed}"
         )
         return PasteOutcome(

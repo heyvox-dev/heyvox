@@ -439,6 +439,20 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "enter_delay": 0.15,
         "activate_on_mismatch": True,
     },
+    {
+        # Orca (com.stablyai.orca, Electron). No focus shortcut: it restores
+        # focus to its last composer/terminal on activation. Chromium only
+        # exposes the focused element for the ACTIVE app, so with the mouse
+        # over Orca and another app frontmost, capture sees no text field —
+        # activate_on_mismatch recovers by activating Orca and re-querying.
+        "name": "Orca",
+        "focus_shortcut": "",
+        "enter_count": 1,
+        "is_electron": True,
+        "settle_delay": 0.3,
+        "enter_delay": 0.15,
+        "activate_on_mismatch": True,
+    },
 ]
 
 
