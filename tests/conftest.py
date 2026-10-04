@@ -118,6 +118,14 @@ def isolate_flags(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_orca_session_env(monkeypatch):
+    """Tests must not talk to a real Orca: describe_cwd() (Herald worker label
+    path) is gated on ORCA_AGENT_SESSION_ID, which a session running inside
+    Orca has set. Same class of local-vs-CI coupling as the Hush socket below."""
+    monkeypatch.delenv("ORCA_AGENT_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def disable_hush_socket(monkeypatch):
     """Force injection's osascript fallback so the suite is deterministic.
 

@@ -452,6 +452,10 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         "settle_delay": 0.3,
         "enter_delay": 0.15,
         "activate_on_mismatch": True,
+        # Workspaces via the Orca CLI (heyvox.adapters.orca): voice workspace
+        # switching + spoken workspace names. No DB, no session ids.
+        "has_workspace_detection": True,
+        "workspace_provider": "orca",
     },
 ]
 

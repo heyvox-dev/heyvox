@@ -81,6 +81,11 @@ class OrchestratorConfig:
     workspace_provider: str = ""    # heyvox.adapters registry key, e.g. "conductor"
     workspace_app_name: str = ""     # App name to check if frontmost
     workspace_db: str = ""          # Path to the app's workspace DB (passed to the provider as profile.workspace_db)
+    # Every configured workspace-managing app, keyed by provider name:
+    # {"orca": {"app_name": "Orca", "db": ""}, ...}. A sidecar names the
+    # provider that issued its workspace_id; the three fields above are the
+    # default for sidecars that don't (and the first profile's own entry).
+    workspace_apps: dict = field(default_factory=dict)
 
     # Workspace-switch countdown (replaces the former hold-queue/idle-gate —
     # see WorkspaceSwitchConfig in heyvox/config.py). Countdown window before
@@ -311,14 +316,48 @@ def _user_is_active(cfg: OrchestratorConfig) -> bool:
         return False
 
 
-def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
+def workspace_apps_from_profiles(profiles) -> dict:
+    """{provider name: {"app_name", "db"}} for every workspace-managing profile.
+
+    First profile per provider wins (same rule as the single-provider default).
+    """
+    apps: dict = {}
+    for profile in profiles:
+        if profile.has_workspace_detection and profile.workspace_provider:
+            apps.setdefault(
+                profile.workspace_provider,
+                {"app_name": profile.name, "db": profile.workspace_db},
+            )
+    return apps
+
+
+def _workspace_target(cfg: OrchestratorConfig, provider: str = "") -> tuple[str, str, str]:
+    """(provider name, app name, db) a sidecar's switch should use.
+
+    A sidecar without a provider gets the config default. A sidecar naming a
+    provider that has no configured profile gets ("", "", "") — switching is
+    skipped rather than handing one app's workspace id to another app.
+    """
+    if not provider:
+        return cfg.workspace_provider, cfg.workspace_app_name, cfg.workspace_db
+    entry = cfg.workspace_apps.get(provider)
+    if entry is None:
+        if provider == cfg.workspace_provider:
+            return cfg.workspace_provider, cfg.workspace_app_name, cfg.workspace_db
+        return "", "", ""
+    return provider, entry.get("app_name", ""), entry.get("db", "")
+
+
+def _workspace_app_is_frontmost(cfg: OrchestratorConfig, app_name: str | None = None) -> bool:
     """Return True if the workspace-aware app is the frontmost application.
 
-    Uses cfg.workspace_app_name to check. Returns False if no app name configured.
+    Uses `app_name` (a provider's app, see _workspace_target) or, when not
+    given, cfg.workspace_app_name. Returns False if no app name configured.
     """
-    if not cfg.workspace_app_name:
+    app_name = cfg.workspace_app_name if app_name is None else app_name
+    if not app_name:
         return False
-    app_lower = cfg.workspace_app_name.lower()
+    app_lower = app_name.lower()
     detected = ""
     try:
         import AppKit  # type: ignore
@@ -350,7 +389,7 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig) -> bool:
 
 def _switch_workspace(
     workspace: str, cfg: OrchestratorConfig, *,
-    workspace_id: str = "", session_id: str = "", cwd: str = "",
+    workspace_id: str = "", session_id: str = "", cwd: str = "", provider_name: str = "",
 ) -> None:
     """Switch the workspace-aware app to the given workspace name.
 
@@ -389,20 +428,21 @@ def _switch_workspace(
     closes the same gap for the name/cwd-fallback paths, which previously
     silently discarded the caller's own, more specific session_id).
     """
-    if not cfg.workspace_provider:
+    provider_name, _app_name, ws_db = _workspace_target(cfg, provider_name)
+    if not provider_name:
         return
     from heyvox.adapters import get_workspace_provider
-    provider = get_workspace_provider(cfg.workspace_provider)
+    provider = get_workspace_provider(provider_name)
     if provider is None:
         _herald_log(
-            f"ORCH: unknown workspace_provider {cfg.workspace_provider!r} — skipping switch",
+            f"ORCH: unknown workspace_provider {provider_name!r} — skipping switch",
             cfg.debug_log,
         )
         return
 
     from heyvox.adapters.base import WorkspaceIdentity
     from types import SimpleNamespace
-    profile = SimpleNamespace(workspace_db=cfg.workspace_db)
+    profile = SimpleNamespace(workspace_db=ws_db)
 
     if workspace_id:
         identity = WorkspaceIdentity(workspace_id=workspace_id, session_id=session_id or None)
@@ -555,7 +595,7 @@ def _play_switch_pending_cue() -> None:
 
 def _run_switch_countdown(
     ws: str, cfg: OrchestratorConfig, debug_log: Path, stop_event: threading.Event,
-    *, workspace_id: str = "", session_id: str = "", cwd: str = "",
+    *, workspace_id: str = "", session_id: str = "", cwd: str = "", provider: str = "",
 ) -> None:
     """Fire-and-forget: announce a pending switch, give cfg.switch_countdown_secs
     to cancel (Right Ctrl, or Escape/stop — see herald/cli.py::_cmd_stop), then
@@ -618,13 +658,17 @@ def _run_switch_countdown(
         return
     if stop_event.is_set():
         return
-    if cfg.recording_flag.exists() or not _workspace_app_is_frontmost(cfg):
+    _, app_name, _ = _workspace_target(cfg, provider)
+    if cfg.recording_flag.exists() or not _workspace_app_is_frontmost(cfg, app_name):
         _herald_log(
             f"ORCH: switch to {ws!r} skipped at expiry (recording or app not frontmost)",
             debug_log,
         )
         return
-    _switch_workspace(ws, cfg, workspace_id=workspace_id, session_id=session_id, cwd=cwd)
+    _switch_workspace(
+        ws, cfg, workspace_id=workspace_id, session_id=session_id, cwd=cwd,
+        provider_name=provider,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1034,7 +1078,7 @@ def _play_wav(
                         f"(HeyVox recording/injecting)",
                         debug_log,
                     )
-                elif _workspace_app_is_frontmost(cfg):
+                elif _workspace_app_is_frontmost(cfg, _workspace_target(cfg, identity["provider"])[1]):
                     if switch_stop_event is not None:
                         switch_stop_event.set()  # supersede any in-flight countdown
                     switch_stop_event = threading.Event()
@@ -1045,6 +1089,7 @@ def _play_wav(
                             "workspace_id": identity["workspace_id"],
                             "session_id": identity["session_id"],
                             "cwd": identity["cwd"],
+                            "provider": identity["provider"],
                         },
                         daemon=True,
                     ).start()
@@ -1439,18 +1484,17 @@ def main() -> None:
     ws_provider = ""
     ws_app_name = ""
     ws_db = ""
+    ws_apps: dict = {}
     tts_min_volume: float | None = None
     switch_countdown_secs: float | None = None
     switch_cancel_key: str | None = None
     try:
         from heyvox.config import load_config
         heyvox_cfg = load_config()
-        for profile in heyvox_cfg.app_profiles:
-            if profile.has_workspace_detection and profile.workspace_provider:
-                ws_provider = profile.workspace_provider
-                ws_app_name = profile.name
-                ws_db = profile.workspace_db
-                break
+        ws_apps = workspace_apps_from_profiles(heyvox_cfg.app_profiles)
+        for ws_provider, entry in ws_apps.items():  # first = default
+            ws_app_name, ws_db = entry["app_name"], entry["db"]
+            break
         tts_min_volume = float(heyvox_cfg.tts.min_volume)
         switch_countdown_secs = float(heyvox_cfg.workspace_switch.countdown_secs)
         switch_cancel_key = heyvox_cfg.workspace_switch.cancel_key
@@ -1464,6 +1508,7 @@ def main() -> None:
         workspace_provider=ws_provider,
         workspace_app_name=ws_app_name,
         workspace_db=ws_db,
+        workspace_apps=ws_apps,
     )
     if tts_min_volume is not None:
         cfg_kwargs["tts_min_volume"] = tts_min_volume

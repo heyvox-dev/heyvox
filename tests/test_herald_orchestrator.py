@@ -1113,7 +1113,7 @@ class TestSwitchWorkspaceIdSession:
             )
         mock_switch.assert_called_once_with(
             "seattle", cfg, workspace_id="ws-uuid-123", session_id="sess-uuid-456",
-            cwd="/ws/vox-v2/seattle",
+            cwd="/ws/vox-v2/seattle", provider_name="",
         )
 
 
@@ -1149,7 +1149,7 @@ class TestRunSwitchCountdown:
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
         mock_switch.assert_called_once_with(
-            "some-workspace", cfg, workspace_id="", session_id="", cwd="",
+            "some-workspace", cfg, workspace_id="", session_id="", cwd="", provider_name="",
         )
         assert mock_alert.called
         assert not cfg.pending_switch_file.exists()
@@ -1196,7 +1196,7 @@ class TestRunSwitchCountdown:
         _run_switch_countdown("some-workspace", cfg, cfg.debug_log, stop_event)
 
         mock_switch.assert_called_once_with(
-            "some-workspace", cfg, workspace_id="", session_id="", cwd="",
+            "some-workspace", cfg, workspace_id="", session_id="", cwd="", provider_name="",
         )
 
     @patch("heyvox.herald.orchestrator._workspace_app_is_frontmost", return_value=True)
@@ -1258,3 +1258,59 @@ class TestRunSwitchCountdown:
         assert cfg.pending_switch_file.exists(), "marker should exist mid-countdown"
         t.join(timeout=1.0)
         assert not cfg.pending_switch_file.exists(), "marker should be cleared after resolution"
+
+
+class TestMultiProviderSelection:
+    """Conductor + Orca configured together: a sidecar's provider picks the
+    provider, the DB and the frontmost-app check (never another app's id)."""
+
+    def _cfg_two(self, tmp_path):
+        return _cfg(
+            tmp_path,
+            workspace_provider="conductor", workspace_app_name="Conductor",
+            workspace_db="/c.db",
+            workspace_apps={
+                "conductor": {"app_name": "Conductor", "db": "/c.db"},
+                "orca": {"app_name": "Orca", "db": ""},
+            },
+        )
+
+    def test_target_default_when_sidecar_has_no_provider(self, tmp_path):
+        from heyvox.herald.orchestrator import _workspace_target
+        assert _workspace_target(self._cfg_two(tmp_path)) == ("conductor", "Conductor", "/c.db")
+
+    def test_target_named_provider(self, tmp_path):
+        from heyvox.herald.orchestrator import _workspace_target
+        assert _workspace_target(self._cfg_two(tmp_path), "orca") == ("orca", "Orca", "")
+
+    def test_target_unconfigured_provider_is_skipped(self, tmp_path):
+        from heyvox.herald.orchestrator import _workspace_target
+        assert _workspace_target(self._cfg_two(tmp_path), "ghost") == ("", "", "")
+
+    def test_switch_uses_named_provider_and_its_db(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        mock_provider = unittest.mock.Mock()
+        mock_provider.activate.return_value = True
+        with patch("heyvox.adapters.get_workspace_provider", return_value=mock_provider) as getp:
+            _switch_workspace("HeyVox", self._cfg_two(tmp_path), workspace_id="wid",
+                              provider_name="orca")
+        getp.assert_called_once_with("orca")
+        assert mock_provider.activate.call_args[0][0].workspace_id == "wid"
+        assert mock_provider.activate.call_args[0][1].workspace_db == ""
+
+    def test_switch_skipped_for_unconfigured_provider(self, tmp_path):
+        from heyvox.herald.orchestrator import _switch_workspace
+        with patch("heyvox.adapters.get_workspace_provider") as getp:
+            _switch_workspace("x", self._cfg_two(tmp_path), workspace_id="wid",
+                              provider_name="ghost")
+        getp.assert_not_called()
+
+    def test_workspace_apps_from_profiles_first_per_provider_wins(self):
+        from heyvox.config import AppProfileConfig
+        from heyvox.herald.orchestrator import workspace_apps_from_profiles
+        apps = workspace_apps_from_profiles([
+            AppProfileConfig(name="Orca", has_workspace_detection=True, workspace_provider="orca"),
+            AppProfileConfig(name="Orca 2", has_workspace_detection=True, workspace_provider="orca"),
+            AppProfileConfig(name="Cursor"),
+        ])
+        assert apps == {"orca": {"app_name": "Orca", "db": ""}}

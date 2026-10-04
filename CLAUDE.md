@@ -150,6 +150,7 @@ HeyVox is a **generic voice layer** that works with ANY app. Conductor is just o
 
 ## Done (previously pending)
 - [x] Generic app switching / de-hardcoded Conductor (2026-07-23) — WorkspaceProvider protocol + registry, generic TargetLock workspace_id/session_id, per-app ax_value_paste flag; Herald was already profile-driven
+- [x] Orca workspace provider (2026-10-04) — `adapters/orca.py` (Orca CLI: `worktree ps` isActive for detect, `terminal create --focus` + close for activate, `describe_cwd` for Herald's spoken workspace name); Herald sidecar carries `provider` so Conductor + Orca can be configured side by side (`OrchestratorConfig.workspace_apps`); Conductor path unchanged
 - [x] Volume control — CoreAudio ducking + restore in herald/coreaudio.py + orchestrator.py
 - [x] Menu bar state text — NSStatusItem title updates in hud/overlay.py (_STATUS_LABELS)
 - [x] Train "Hey Vox" custom wake word — MLP model deployed, conv-attention pipeline + auto-collection in place

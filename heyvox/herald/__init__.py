@@ -32,23 +32,24 @@ def start_orchestrator() -> None:
 
     Loads the app profile config to configure workspace switching.
     """
-    from heyvox.herald.orchestrator import HeraldOrchestrator, OrchestratorConfig
+    from heyvox.herald.orchestrator import (
+        HeraldOrchestrator, OrchestratorConfig, workspace_apps_from_profiles,
+    )
 
     ws_provider = ""
     ws_app_name = ""
     ws_db = ""
+    ws_apps: dict = {}
     tts_min_volume: float | None = None
     switch_countdown_secs: float | None = None
     switch_cancel_key: str | None = None
     try:
         from heyvox.config import load_config
         cfg = load_config()
-        for profile in cfg.app_profiles:
-            if profile.has_workspace_detection and profile.workspace_provider:
-                ws_provider = profile.workspace_provider
-                ws_app_name = profile.name
-                ws_db = profile.workspace_db
-                break
+        ws_apps = workspace_apps_from_profiles(cfg.app_profiles)
+        for ws_provider, entry in ws_apps.items():  # first = default
+            ws_app_name, ws_db = entry["app_name"], entry["db"]
+            break
         tts_min_volume = float(cfg.tts.min_volume)
         switch_countdown_secs = float(cfg.workspace_switch.countdown_secs)
         switch_cancel_key = cfg.workspace_switch.cancel_key
@@ -58,6 +59,7 @@ def start_orchestrator() -> None:
         workspace_provider=ws_provider,
         workspace_app_name=ws_app_name,
         workspace_db=ws_db,
+        workspace_apps=ws_apps,
     )
     if tts_min_volume is not None:
         orch_kwargs["tts_min_volume"] = tts_min_volume

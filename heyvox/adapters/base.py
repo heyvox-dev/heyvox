@@ -51,6 +51,22 @@ class WorkspaceIdentity:
     session_id: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class WorkspaceInfo:
+    """What a provider's optional describe_cwd() reports about a working directory.
+
+    name:   the workspace's sidebar name as the user sees it (spoken, and the
+            string the Herald switch sidecar carries as `workspace`)
+    project: the owning project/repo's display name ("" if unknown) — Herald
+            prepends it to the spoken label unless the name already says it
+    """
+
+    provider: str
+    name: str
+    workspace_id: str
+    project: str = ""
+
+
 class WorkspaceProvider(Protocol):
     """App-specific workspace detection + resolution behind a generic face."""
 
@@ -89,3 +105,9 @@ class WorkspaceProvider(Protocol):
         fast-path hint for callers that already have one; omitted callers
         get it resolved internally."""
         ...
+
+    # Optional (not part of the required surface — providers whose app has no
+    # per-cwd lookup simply omit it, callers use getattr):
+    #   describe_cwd(cwd, profile=None) -> Optional[WorkspaceInfo]
+    # Names the workspace containing `cwd` without any sidecar DB. Herald's
+    # worker uses it (see heyvox.herald.workspace_label.identify_workspace).

@@ -664,6 +664,7 @@ class TestSessionIdAndWorkspaceId:
             "workspace_id": "ws-uuid-123",
             "session_id": "sess-uuid-456",
             "cwd": w._cwd,
+            "provider": "",
         }
 
     def test_write_workspace_sidecar_includes_cwd(self, tmp_path):
