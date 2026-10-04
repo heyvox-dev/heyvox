@@ -336,8 +336,17 @@ def _ax_inject_text(snap, text: str) -> bool:
         # osascript Cmd-V inserts at the cursor; Electron's cursor position is
         # structurally unreadable (returns {0,0}), so append-to-end is the
         # closest non-destructive equivalent and preserves any existing text.
-        cerr, current = AXUIElementCopyAttributeValue(focused, "AXValue", None)
-        current = str(current) if (cerr == 0 and current) else ""
+        cerr, raw_current = AXUIElementCopyAttributeValue(focused, "AXValue", None)
+        raw_current = str(raw_current) if (cerr == 0 and raw_current) else ""
+        # DEF-259: an EMPTY rich-text field (Orca's ProseMirror composer) reports
+        # its CSS placeholder as AXValue ("Send a message…\n"). That is not
+        # content — appending to it, or "restoring" it, writes the placeholder
+        # into the editor as real text that then gets sent.
+        placeholders = {str(v).strip() for v in (
+            getattr(snap, "leaf_description", None),
+            AXUIElementCopyAttributeValue(focused, "AXPlaceholderValue", None)[1],
+        ) if v}
+        current = "" if raw_current.strip() in placeholders else raw_current
         newval = current + text if current else text
         err = AXUIElementSetAttributeValue(focused, "AXValue", newval)
         if err != 0:
@@ -347,7 +356,16 @@ def _ax_inject_text(snap, text: str) -> bool:
         # AXValue with err=0 but it didn't take. Only claim success if our text
         # is actually present now; otherwise restore the prior value (so the
         # osascript fallback doesn't double-insert) and return False.
+        # DEF-259: Chromium rich-text editors apply the set asynchronously
+        # (Orca: 6-13 ms later), so an immediate read-back still shows the old
+        # value. Poll briefly before declaring failure; the loop costs nothing
+        # when the first read already matches (native fields).
         verr, got = AXUIElementCopyAttributeValue(focused, "AXValue", None)
+        for _ in range(20):
+            if verr == 0 and got is not None and text in str(got):
+                break
+            time.sleep(0.01)
+            verr, got = AXUIElementCopyAttributeValue(focused, "AXValue", None)
         if verr == 0 and got is not None and text in str(got):
             _log(f"AX fast-path: injected+verified {len(text)} chars into "
                  f"{leaf_role}{' (workspace-managed)' if ws_id else ''}")
