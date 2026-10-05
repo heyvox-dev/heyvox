@@ -1314,3 +1314,23 @@ class TestMultiProviderSelection:
             AppProfileConfig(name="Cursor"),
         ])
         assert apps == {"orca": {"app_name": "Orca", "db": ""}}
+
+
+class TestMuteReason:
+    """T-004: the silent drop of queued TTS now says why (log line in the loop)."""
+
+    def test_mute_flag(self, tmp_path):
+        from heyvox.herald.orchestrator import _mute_reason
+        cfg = _cfg(tmp_path)
+        cfg.mute_flag.write_text("")
+        assert _mute_reason(cfg) == "herald mute flag set"
+
+    def test_verbosity_skip(self, tmp_path):
+        from heyvox.herald.orchestrator import _mute_reason
+        cfg = _cfg(tmp_path)
+        cfg.verbosity_file.write_text("skip")
+        assert _mute_reason(cfg) == "verbosity=skip"
+
+    def test_system_mute_is_the_remaining_cause(self, tmp_path):
+        from heyvox.herald.orchestrator import _mute_reason
+        assert _mute_reason(_cfg(tmp_path)) == "macOS system output muted"
