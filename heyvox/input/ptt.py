@@ -15,15 +15,19 @@ import time
 from collections.abc import Callable
 
 
-# Modifier flag masks for PTT key detection (CGEventFlags values)
+# Modifier flag masks for PTT key detection (CGEventFlags values), tested with
+# `flags & mask`, so each mask must name exactly one key. The right-side keys
+# use only their device bit (NX_DEVICER*KEYMASK, IOLLEvent.h): the former
+# values also carried 0x100000 (kCGEventFlagMaskCommand), so any Command press
+# (left or right) counted as the right Option/Control/Shift/Command key.
 _PTT_KEY_FLAGS = {
     "fn":            0x800000,   # NSEventModifierFlagFunction (fn/Globe)
-    "right_cmd":     0x100010,   # Right Command
-    "right_command": 0x100010,
-    "right_alt":     0x100040,   # Right Option
-    "right_option":  0x100040,
-    "right_ctrl":    0x102000,   # Right Control
-    "right_shift":   0x100004,   # Right Shift
+    "right_cmd":     0x000010,   # Right Command (NX_DEVICERCMDKEYMASK)
+    "right_command": 0x000010,
+    "right_alt":     0x000040,   # Right Option (NX_DEVICERALTKEYMASK)
+    "right_option":  0x000040,
+    "right_ctrl":    0x002000,   # Right Control (NX_DEVICERCTLKEYMASK)
+    "right_shift":   0x000004,   # Right Shift (NX_DEVICERSHIFTKEYMASK)
 }
 
 ESCAPE_KEYCODE = 53

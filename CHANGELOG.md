@@ -23,6 +23,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Push-to-talk keys `right_cmd`, `right_alt`, `right_ctrl` and `right_shift`
+  (and the countdown cancel key) no longer fire on every Command press. Their
+  masks carried the generic Command flag besides the device bit, so left or
+  right Command counted as the configured key; they now use the device bit
+  only. `fn` (the default) was not affected.
 - Dictations recorded at a low microphone level are no longer dropped
   silently (DEF-255). A recording whose mean level falls below the energy
   gate is now transcribed anyway when its speech level (95th percentile of
