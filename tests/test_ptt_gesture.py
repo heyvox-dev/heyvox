@@ -342,3 +342,26 @@ def test_cancel_key_edge_distinguishes_from_fn():
     edge, now_down = _cancel_key_edge(_FN | _RCTRL, _RCTRL, was_down=False)
     assert edge is True
     assert now_down is True
+
+
+# ---------------------------------------------------------------------------
+# Key masks name exactly one physical key
+# ---------------------------------------------------------------------------
+
+_CMD_GENERIC = 0x100000   # kCGEventFlagMaskCommand
+_LEFT_CMD = 0x000008      # NX_DEVICELCMDKEYMASK
+_LEFT_CTRL = 0x000001     # NX_DEVICELCTLKEYMASK
+
+
+@pytest.mark.parametrize("key", ["right_cmd", "right_alt", "right_ctrl", "right_shift"])
+def test_right_key_masks_ignore_left_command(key):
+    """Pressing left Command must not look like any right-side PTT key."""
+    assert not (_CMD_GENERIC | _LEFT_CMD) & _PTT_KEY_FLAGS[key]
+
+
+def test_right_ctrl_mask_ignores_left_ctrl():
+    assert not (0x40000 | _LEFT_CTRL) & _PTT_KEY_FLAGS["right_ctrl"]
+
+
+def test_right_cmd_mask_matches_right_cmd():
+    assert (_CMD_GENERIC | 0x000010) & _PTT_KEY_FLAGS["right_cmd"]
