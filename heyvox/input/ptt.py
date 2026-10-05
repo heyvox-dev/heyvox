@@ -28,6 +28,91 @@ _PTT_KEY_FLAGS = {
 
 ESCAPE_KEYCODE = 53
 
+# Device-dependent modifier bits (NX_DEVICE*KEYMASK in IOLLEvent.h). Unlike the
+# generic masks above, each one names exactly one physical key, so a left-side
+# key can be told apart from its right-side twin. Used by the Herald jump key.
+_DEVICE_MODIFIER_BITS = {
+    "left_ctrl":   0x00000001,
+    "left_shift":  0x00000002,
+    "right_shift": 0x00000004,
+    "left_cmd":    0x00000008,
+    "right_cmd":   0x00000010,
+    "left_alt":    0x00000020,
+    "left_option": 0x00000020,
+    "right_alt":   0x00000040,
+    "right_option": 0x00000040,
+    "right_ctrl":  0x00002000,
+}
+_ALL_DEVICE_MODIFIER_BITS = 0x0000207F
+_FN_FLAG = 0x800000  # NSEventModifierFlagFunction (fn/Globe)
+
+
+class ModifierDoubleTap:
+    """Detects a clean double-tap of one modifier key (like iTerm's hotkey).
+
+    A tap is the key going down and up within ``tap_max_secs`` with no other
+    key or modifier involved; two taps with at most ``gap_secs`` between the
+    first release and the second press fire once. Ctrl+C, Ctrl+R, a held
+    Ctrl, or Ctrl together with Shift never count.
+
+    Quartz-free and deterministic (injectable clock) so it can be unit-tested
+    without an event tap, same contract as GestureRecognizer.
+    """
+
+    def __init__(
+        self, bit: int, *, tap_max_secs: float = 0.3, gap_secs: float = 0.35,
+        clock=time.monotonic,
+    ) -> None:
+        self._bit = bit
+        self._tap_max_secs = tap_max_secs
+        self._gap_secs = gap_secs
+        self._clock = clock
+        self._down = False
+        self._down_at = 0.0
+        self._dirty = False  # another key/modifier was involved in this press
+        self._last_tap_up = 0.0
+
+    def _reset(self) -> None:
+        self._last_tap_up = 0.0
+
+    def on_other_key(self) -> None:
+        """A non-modifier key went down: the current press is no clean tap."""
+        if self._down:
+            self._dirty = True
+        self._reset()
+
+    def on_flags(self, flags: int) -> bool:
+        """Feed a flagsChanged event; True when a double-tap just completed."""
+        others = (flags & _ALL_DEVICE_MODIFIER_BITS & ~self._bit) or (flags & _FN_FLAG)
+        now_down = bool(flags & self._bit)
+        now = self._clock()
+
+        if others:
+            if self._down:
+                self._dirty = True
+            self._reset()
+            self._down = now_down
+            return False
+
+        if now_down and not self._down:
+            self._down = True
+            self._down_at = now
+            self._dirty = False
+            if self._last_tap_up and now - self._last_tap_up > self._gap_secs:
+                self._reset()
+            return False
+
+        if not now_down and self._down:
+            self._down = False
+            if self._dirty or now - self._down_at > self._tap_max_secs:
+                self._reset()
+                return False
+            if self._last_tap_up:
+                self._reset()
+                return True
+            self._last_tap_up = now
+        return False
+
 
 def _cancel_key_edge(flags: int, mask: int, was_down: bool) -> tuple[bool, bool]:
     """Rising-edge detector for the workspace-switch cancel key.
@@ -254,6 +339,8 @@ def start_ptt_listener(
     tap_max_secs: float = 0.2,
     double_tap_secs: float = 0.35,
     cancel_key: str | None = None,
+    jump_key: str | None = None,
+    jump_double_tap_secs: float = 0.35,
 ) -> threading.Thread | None:
     """Start push-to-talk using Quartz CGEventTap.
 
@@ -269,6 +356,7 @@ def start_ptt_listener(
     - On Escape (speaking): calls callbacks["on_cancel_tts"]()
     - On cancel_key down, while callbacks["is_switch_pending"]() is true:
       calls callbacks["on_cancel_switch"]()
+    - On a clean double-tap of jump_key: calls callbacks["on_jump"]()
 
     Args:
         ptt_key: Key name from _PTT_KEY_FLAGS (e.g. "fn", "right_cmd").
@@ -289,6 +377,9 @@ def start_ptt_listener(
             - "is_speaking": callable() -> bool — is TTS playing?
             - "is_switch_pending": callable() -> bool — is a Herald
               workspace-switch countdown currently running?
+            - "on_jump": callable() — jump_key double-tapped. Runs inside
+              the Quartz callback, so it must return quickly (hand real
+              work to a thread).
         log_fn: Optional callable(str) for log output.
         double_tap: enable the double-tap → hands-free gesture.
         tap_max_secs: max press duration counted as a tap (also hold delay).
@@ -297,6 +388,10 @@ def start_ptt_listener(
             workspace switch (e.g. "right_ctrl"). None/unrecognized/same as
             ptt_key disables this feature (graceful degradation, same
             contract as an unrecognized ptt_key).
+        jump_key: Key name from _DEVICE_MODIFIER_BITS (e.g. "left_ctrl") whose
+            clean double-tap jumps to the last announced Herald workspace.
+            None/unrecognized disables it.
+        jump_double_tap_secs: max gap between the two jump-key taps.
 
     Returns:
         Background thread running the CFRunLoop, or None if setup failed.
@@ -329,6 +424,14 @@ def start_ptt_listener(
                     f"WARNING: cancel_key '{cancel_key}' not supported for Quartz "
                     f"mode, disabling switch-cancel"
                 )
+
+    jump_tap = None
+    if jump_key:
+        jump_bit = _DEVICE_MODIFIER_BITS.get(jump_key.lower())
+        if jump_bit is None:
+            _log(f"WARNING: jump_key '{jump_key}' not supported, disabling the jump key")
+        else:
+            jump_tap = ModifierDoubleTap(jump_bit, gap_secs=jump_double_tap_secs)
 
     # Gesture FSM — all recording-mode logic lives here; the Quartz callback
     # below only does edge detection and forwards on_key_down / on_key_up.
@@ -412,6 +515,8 @@ def start_ptt_listener(
         # so it doesn't propagate to the foreground app (e.g. exit fullscreen).
         if event_type == Quartz.kCGEventKeyDown:
             _last_keydown_time = time.time()
+            if jump_tap is not None:
+                jump_tap.on_other_key()
             keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
             if keycode == ESCAPE_KEYCODE:
                 # Diagnose source: pid==0 → real HID keypress; pid>0 → synthesized
@@ -452,6 +557,15 @@ def start_ptt_listener(
             return event
 
         flags = Quartz.CGEventGetFlags(event)
+
+        # Herald jump key — independent of the PTT gesture below; the
+        # modifier event always passes through to the app.
+        if jump_tap is not None and jump_tap.on_flags(flags):
+            on_jump = callbacks.get("on_jump")
+            if on_jump:
+                on_jump()
+            _log(f"Jump key: double-tap {jump_key}")
+
         fn_down = bool(flags & flag_mask)
 
         # Edge detection only — all gesture/recording logic lives in the

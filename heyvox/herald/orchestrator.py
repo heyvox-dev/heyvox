@@ -2,8 +2,10 @@
 
 Features:
   - Audio ducking: lowers system volume during playback, then restores
-  - Workspace auto-switch: announces + switches app workspace on a cancelable
-    countdown if it's the frontmost app (see _run_switch_countdown)
+  - Workspace jump target: every new message's workspace becomes the target
+    of the jump key (default mode, see heyvox.herald.jump); the older
+    countdown auto-switch stays available as mode "countdown"
+    (see _run_switch_countdown)
   - Media pause/resume (Hush / MediaRemote) during playback
   - Recording watchdog: kills afplay if recording starts mid-playback
   - WAV normalization: RMS-based loudness matching inline in Python
@@ -38,7 +40,7 @@ from heyvox.constants import (  # noqa: E402 — after __future__ import
     HERALD_DEBUG_LOG, HERALD_VIOLATIONS_LOG,
     HERALD_ORCH_PID, HERALD_PLAYING_PID, HERALD_ORIGINAL_VOL_FILE,
     HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG, RECORDING_FLAG,
-    HERALD_PENDING_SWITCH_FLAG, HERALD_CANCEL_SWITCH_FLAG,
+    HERALD_PENDING_SWITCH_FLAG, HERALD_CANCEL_SWITCH_FLAG, HERALD_JUMP_TARGET_FILE,
     HERALD_LAST_PLAY, HERALD_STOP_TS_FILE, VERBOSITY_FILE,
     HERALD_WATCHER_HANDLED_DIR, TTS_PLAYING_FLAG,
 )
@@ -68,6 +70,7 @@ class OrchestratorConfig:
     recording_flag: Path = field(default_factory=lambda: Path(RECORDING_FLAG))
     pending_switch_file: Path = field(default_factory=lambda: Path(HERALD_PENDING_SWITCH_FLAG))
     cancel_switch_flag: Path = field(default_factory=lambda: Path(HERALD_CANCEL_SWITCH_FLAG))
+    jump_target_file: Path = field(default_factory=lambda: Path(HERALD_JUMP_TARGET_FILE))
     last_play_file: Path = field(default_factory=lambda: Path(HERALD_LAST_PLAY))
     stop_ts_file: Path = field(default_factory=lambda: Path(HERALD_STOP_TS_FILE))
     verbosity_file: Path = field(default_factory=lambda: Path(VERBOSITY_FILE))
@@ -93,6 +96,8 @@ class OrchestratorConfig:
     # key capture lives in ptt.py) — used for the alert text.
     switch_countdown_secs: float = 2.5
     switch_cancel_key: str = "right_ctrl"
+    # WorkspaceSwitchConfig.mode: "jump_key" | "countdown" | "off"
+    switch_mode: str = "jump_key"
 
     # Audio ducking
     duck_enabled: bool = True
@@ -399,7 +404,7 @@ def _workspace_app_is_frontmost(cfg: OrchestratorConfig, app_name: str | None = 
 def _switch_workspace(
     workspace: str, cfg: OrchestratorConfig, *,
     workspace_id: str = "", session_id: str = "", cwd: str = "", provider_name: str = "",
-) -> None:
+) -> bool:
     """Switch the workspace-aware app to the given workspace name.
 
     Delegates to the app's WorkspaceProvider.activate() (heyvox.adapters),
@@ -439,7 +444,7 @@ def _switch_workspace(
     """
     provider_name, _app_name, ws_db = _workspace_target(cfg, provider_name)
     if not provider_name:
-        return
+        return False
     from heyvox.adapters import get_workspace_provider
     provider = get_workspace_provider(provider_name)
     if provider is None:
@@ -447,7 +452,7 @@ def _switch_workspace(
             f"ORCH: unknown workspace_provider {provider_name!r} — skipping switch",
             cfg.debug_log,
         )
-        return
+        return False
 
     from heyvox.adapters.base import WorkspaceIdentity
     from types import SimpleNamespace
@@ -460,19 +465,19 @@ def _switch_workspace(
             identity = provider.resolve_by_name(workspace, profile)
         except Exception as e:
             _herald_log(f"ORCH: resolve_by_name({workspace!r}) raised {e!r}", cfg.debug_log)
-            return
+            return False
         if identity is None:
             _herald_log(f"ORCH: resolve_by_name({workspace!r}) found no match", cfg.debug_log)
             if not cwd:
-                return
+                return False
             try:
                 identity = provider.resolve_by_cwd(cwd, profile)
             except Exception as e:
                 _herald_log(f"ORCH: resolve_by_cwd({cwd!r}) raised {e!r}", cfg.debug_log)
-                return
+                return False
             if identity is None:
                 _herald_log(f"ORCH: resolve_by_cwd({cwd!r}) found no match", cfg.debug_log)
-                return
+                return False
             _herald_log(
                 f"ORCH: resolve_by_cwd({cwd!r}) -> workspace_id={identity.workspace_id!r}",
                 cfg.debug_log,
@@ -492,8 +497,10 @@ def _switch_workspace(
             f"workspace_id={identity.workspace_id!r} session_id={identity.session_id!r})",
             cfg.debug_log,
         )
+        return bool(ok)
     except Exception as e:
         _herald_log(f"ORCH: provider.activate raised {e!r}", cfg.debug_log)
+        return False
 
 
 def _hammerspoon_running() -> bool:
@@ -600,6 +607,31 @@ def _play_switch_pending_cue() -> None:
         )
     except Exception:
         pass
+
+
+def _record_jump_target(workspace_file: Path, cfg: OrchestratorConfig) -> str:
+    """Jump-key mode: make this message the jump target instead of switching.
+
+    Replaces the previous target — also when the message carries no
+    workspace, because the jump key always means "the last thing announced"
+    (an older target would send the user somewhere unexpected). Consumes the
+    sidecar. Returns the workspace name ("" when there is none).
+    """
+    from heyvox.herald.jump import clear_jump_target, write_jump_target
+    identity = None
+    if workspace_file.exists():
+        try:
+            from heyvox.herald.workspace_label import read_switch_sidecar
+            identity = read_switch_sidecar(workspace_file.read_text())
+        except (OSError, ValueError):
+            identity = None
+        workspace_file.unlink(missing_ok=True)
+    if identity and (identity["workspace"] or identity["workspace_id"]):
+        write_jump_target(cfg.jump_target_file, identity)
+        _herald_log(f"ORCH: jump target -> {identity['workspace']!r}", cfg.debug_log)
+        return identity["workspace"]
+    clear_jump_target(cfg.jump_target_file)
+    return ""
 
 
 def _run_switch_countdown(
@@ -1070,8 +1102,12 @@ def _play_wav(
         time.sleep(0.3)
 
     if not is_continuation:
-        # Workspace switch -- only if the workspace-aware app is frontmost
-        if workspace_file.exists():
+        if cfg.switch_mode == "jump_key":
+            ws = _record_jump_target(workspace_file, cfg)
+            if ws:
+                current_workspace = ws
+        # Workspace switch (countdown mode) -- only if the workspace-aware app is frontmost
+        elif cfg.switch_mode == "countdown" and workspace_file.exists():
             try:
                 from heyvox.herald.workspace_label import read_switch_sidecar
                 identity = read_switch_sidecar(workspace_file.read_text())
@@ -1107,6 +1143,8 @@ def _play_wav(
                 workspace_file.unlink(missing_ok=True)
             except (OSError, ValueError):
                 pass
+
+        workspace_file.unlink(missing_ok=True)  # "off" mode, or already consumed
 
         if cfg.media_pause:
             _media_pause(cfg)
@@ -1503,6 +1541,7 @@ def main() -> None:
     tts_min_volume: float | None = None
     switch_countdown_secs: float | None = None
     switch_cancel_key: str | None = None
+    switch_mode: str | None = None
     try:
         from heyvox.config import load_config
         heyvox_cfg = load_config()
@@ -1513,6 +1552,7 @@ def main() -> None:
         tts_min_volume = float(heyvox_cfg.tts.min_volume)
         switch_countdown_secs = float(heyvox_cfg.workspace_switch.countdown_secs)
         switch_cancel_key = heyvox_cfg.workspace_switch.cancel_key
+        switch_mode = heyvox_cfg.workspace_switch.mode
     except Exception:
         pass
 
@@ -1531,6 +1571,8 @@ def main() -> None:
         cfg_kwargs["switch_countdown_secs"] = switch_countdown_secs
     if switch_cancel_key is not None:
         cfg_kwargs["switch_cancel_key"] = switch_cancel_key
+    if switch_mode is not None:
+        cfg_kwargs["switch_mode"] = switch_mode
     cfg = OrchestratorConfig(**cfg_kwargs)
 
     orch = HeraldOrchestrator(config=cfg)

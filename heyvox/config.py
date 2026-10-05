@@ -261,25 +261,42 @@ class TTSConfig(BaseModel):
 
 
 class WorkspaceSwitchConfig(BaseModel):
-    """Herald's TTS-triggered workspace-switch countdown behaviour.
+    """What Herald does with the workspace a TTS message came from.
 
-    When a new (non-continuation) TTS message starts, Herald announces (visual
-    alert + sound cue) that it's about to switch the workspace-aware app to
-    match where the message came from, then waits `countdown_secs` before
-    actually switching — giving the user a window to cancel via `cancel_key`
-    without affecting TTS playback, which always starts immediately regardless.
+    mode:
+      * "jump_key" (default) — nothing happens on its own. Every new
+        (non-continuation) message replaces the jump target; a clean
+        double-tap of `jump_key` brings the app, workspace and chat tab of the
+        last announced message to the front. The target stays valid until the
+        next announcement; Escape only stops the audio. Not switching on its
+        own also keeps the app's own "unread/done" markers for that session
+        until the user actually goes there.
+      * "countdown" — the former behaviour: announce (visual alert + sound
+        cue), wait `countdown_secs`, then switch unless `cancel_key` was
+        pressed. Only while the workspace-aware app is frontmost.
+      * "off" — never switch.
 
-    Replaces the former hold-queue behaviour (DEF-100/094), which hid
-    cross-workspace messages until the user went idle — in practice this
-    silently swallowed most TTS messages with no visible feedback. Making the
-    switch visible and cancelable solves the same problem without hiding
-    anything.
+    The countdown replaced the former hold-queue behaviour (DEF-100/094),
+    which hid cross-workspace messages until the user went idle.
     """
+    mode: str = "jump_key"
+    # Device-specific modifier (heyvox.input.ptt._DEVICE_MODIFIER_BITS), so
+    # left and right keys are told apart. Unrecognized disables the jump key.
+    jump_key: str = "left_ctrl"
+    jump_double_tap_secs: float = 0.35
     countdown_secs: float = 2.5
-    # Which key cancels a pending switch. Looked up the same way as
-    # push_to_talk.key — an unrecognized name just disables this feature
-    # rather than failing config load.
+    # Which key cancels a pending switch (countdown mode). Looked up the same
+    # way as push_to_talk.key — an unrecognized name just disables this
+    # feature rather than failing config load.
     cancel_key: str = "right_ctrl"
+
+    @field_validator("mode")
+    @classmethod
+    def _known_mode(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("jump_key", "countdown", "off"):
+            raise ValueError("workspace_switch.mode must be jump_key, countdown or off")
+        return v
 
 
 class AppProfileConfig(BaseModel):

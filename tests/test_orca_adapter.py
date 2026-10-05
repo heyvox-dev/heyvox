@@ -241,3 +241,51 @@ class TestHeraldLabel:
         from heyvox.adapters.base import WorkspaceInfo
         info = WorkspaceInfo("orca", "Orca Anbindung", "id", "HeyVox")
         assert get_workspace_label(info.name, cfg=_cfg(announce_workspace=False), info=info) == ""
+
+
+class TestSessionTab:
+    """Jump to a specific chat tab: worktree first, then session.tabs.activate."""
+
+    @pytest.fixture
+    def rpc(self, monkeypatch):
+        calls = []
+
+        def fake_rpc(method, params, timeout=3.0):
+            calls.append((method, params))
+            return {"ok": True}
+
+        monkeypatch.setattr(orca_mod, "_rpc", fake_rpc)
+        return calls
+
+    def test_describe_cwd_carries_orca_session_id(self, fake, monkeypatch):
+        monkeypatch.setenv("ORCA_AGENT_SESSION_ID", "claude_abc")
+        info = OrcaWorkspaceProvider().describe_cwd("/Users/x/Source/vox")
+        assert info.session_id == "claude_abc"
+
+    def test_activate_selects_tab_after_raising_worktree(self, fake, rpc):
+        ident = WorkspaceIdentity(FEATURE, session_id="claude_abc")
+        assert OrcaWorkspaceProvider().activate(ident, None) is True
+        assert fake.created == [FEATURE]
+        assert rpc == [("session.tabs.activate", {
+            "worktree": f"id:{FEATURE}", "tabId": "agent-session:claude_abc",
+        })]
+
+    def test_activate_selects_tab_in_already_active_worktree(self, fake, rpc):
+        ident = WorkspaceIdentity(MAIN, session_id="claude_abc")
+        assert OrcaWorkspaceProvider().activate(ident, None) is True
+        assert fake.created == []
+        assert [m for m, _ in rpc] == ["session.tabs.activate"]
+
+    def test_no_session_no_rpc(self, fake, rpc):
+        assert OrcaWorkspaceProvider().activate(WorkspaceIdentity(FEATURE), None) is True
+        assert rpc == []
+
+    def test_no_tab_when_worktree_fails(self, fake, rpc):
+        ident = WorkspaceIdentity("r9::nope", session_id="claude_abc")
+        assert OrcaWorkspaceProvider().activate(ident, None) is False
+        assert rpc == []
+
+    def test_tab_failure_keeps_worktree_success(self, fake, monkeypatch):
+        monkeypatch.setattr(orca_mod, "_rpc", lambda *a, **k: None)
+        ident = WorkspaceIdentity(FEATURE, session_id="claude_abc")
+        assert OrcaWorkspaceProvider().activate(ident, None) is True

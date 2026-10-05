@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Herald no longer switches the workspace on its own when a message is
+  announced. New default `workspace_switch.mode: jump_key`: every
+  announcement replaces the jump target, and a clean double-tap of
+  `workspace_switch.jump_key` (default `left_ctrl`, left and right keys are
+  told apart) brings the app, the workspace and — for Orca — the chat tab of
+  the session that spoke to the front. The target stays valid until the next
+  announcement; Escape only stops the audio. `herald jump` does the same from
+  the command line. The former countdown switch remains available as
+  `mode: countdown`, `mode: off` disables switching.
+- The Orca provider now selects the speaking session's chat tab (runtime RPC
+  `session.tabs.activate`, tab `agent-session:<ORCA_AGENT_SESSION_ID>`) after
+  raising its worktree; before, Orca showed whichever tab was last open there.
+
 ### Fixed
 
 - Dictations recorded at a low microphone level are no longer dropped

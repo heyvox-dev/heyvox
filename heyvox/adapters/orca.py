@@ -14,8 +14,13 @@ walking and no sidecar database:
                         shell terminal tab, which would hide the chat tab the
                         dictation composer lives in. Chat sessions are not
                         terminals and have no CLI handle, so the workspace is
-                        raised and Orca shows whichever tab it last showed
-                        there.
+                        raised first; then the runtime RPC
+                        `session.tabs.activate` selects the chat tab of the
+                        session (tab id `agent-session:<ORCA_AGENT_SESSION_ID>`).
+                        Orca ignores that call for a chat tab in a worktree
+                        that is not active yet, hence the order. The CLI has
+                        no chat-tab command, so the RPC goes through Orca's
+                        own runtime client (`_rpc`).
 
 Every CLI call costs ~130 ms. detect_context() therefore pays for one call and
 resolve() none (the context already IS the worktree id), which keeps the
@@ -65,6 +70,44 @@ def _run(args: list, cwd: Optional[str] = None, timeout: float = _CLI_TIMEOUT) -
         data = json.loads(r.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         log.debug("orca %s failed: %s", args, e)
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    result = data.get("result")
+    return result if isinstance(result, dict) else None
+
+
+def _rpc(method: str, params: dict, timeout: float = _CLI_TIMEOUT) -> Optional[dict]:
+    """Call an Orca runtime RPC method via Orca's bundled runtime client.
+
+    The CLI exposes no chat-tab command; Orca's own CLI runs on the same
+    client (Electron in node mode), so this costs about the same as a CLI
+    call (~150 ms). Returns the response `result`, None on any failure.
+    """
+    cli = _cli()
+    if not cli:
+        return None
+    contents = os.path.realpath(cli).split("/Contents/")[0] + "/Contents"
+    electron = os.path.join(contents, "MacOS", "Orca")
+    client = os.path.join(
+        contents, "Resources", "app.asar.unpacked", "out", "cli", "runtime-client.js",
+    )
+    if not (os.path.exists(electron) and os.path.exists(client)):
+        return None
+    script = (
+        "const {RuntimeClient}=require(" + json.dumps(client) + ");"
+        "new RuntimeClient().call(" + json.dumps(method) + "," + json.dumps(params) + ")"
+        ".then(r=>{process.stdout.write(JSON.stringify(r));process.exit(0)},"
+        "e=>{process.stderr.write(String(e&&e.message||e));process.exit(1)});"
+    )
+    try:
+        r = subprocess.run(
+            [electron, "-e", script], capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "ELECTRON_RUN_AS_NODE": "1"},
+        )
+        data = json.loads(r.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        log.debug("orca rpc %s failed: %s", method, e)
         return None
     if not isinstance(data, dict) or not data.get("ok"):
         return None
@@ -170,11 +213,16 @@ class OrcaWorkspaceProvider:
         return WorkspaceInfo(
             provider=self.name, name=name, workspace_id=row["worktreeId"],
             project=row.get("repo") or "",
+            session_id=os.environ.get("ORCA_AGENT_SESSION_ID", ""),
         )
 
     def activate(self, identity, profile, *, pid: Optional[int] = None) -> bool:
         try:
-            return self._activate(identity.workspace_id)
+            if not self._activate(identity.workspace_id):
+                return False
+            if identity.session_id:
+                self._activate_tab(identity.workspace_id, identity.session_id)
+            return True
         except Exception as e:  # never raises (protocol contract)
             log.debug("orca activate raised: %r", e)
             return False
@@ -204,3 +252,18 @@ class OrcaWorkspaceProvider:
         finally:
             _run(["terminal", "close", "--terminal", handle])
         return ok
+
+    def _activate_tab(self, worktree_id: str, session_id: str) -> bool:
+        """Select the chat tab of `session_id` in the (already active) worktree.
+
+        Best effort: the worktree is up either way, so a failure here only
+        means Orca keeps showing whichever tab it last showed.
+        """
+        result = _rpc("session.tabs.activate", {
+            "worktree": f"id:{worktree_id}",
+            "tabId": f"agent-session:{session_id}",
+        })
+        if result is None:
+            log.debug("orca: activating tab of session %r failed", session_id)
+            return False
+        return True

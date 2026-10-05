@@ -419,7 +419,9 @@ class HeraldWorker:
         self._workspace_id = ""
         if self._ws_info is not None:
             self._workspace_id = self._ws_info.workspace_id
-            self._session_id = ""  # Conductor's session id means nothing to another provider
+            # The provider's own session id (Conductor's means nothing to
+            # another provider); "" when the provider has none.
+            self._session_id = self._ws_info.session_id
         elif self._workspace:
             try:
                 from heyvox.herald.workspace_label import resolve_workspace_id
