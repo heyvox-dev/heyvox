@@ -607,6 +607,19 @@ def _cancel_pending_switch() -> None:
     log("Pending workspace switch cancelled.")
 
 
+def _jump_to_announced() -> None:
+    """Jump-key double-tap: go to the last announced workspace (off-thread).
+
+    Called from the Quartz event-tap callback, which must return quickly, so
+    the CLI/RPC round-trips run on their own thread.
+    """
+    import threading
+    from heyvox.herald.jump import jump_to_target
+    threading.Thread(
+        target=jump_to_target, kwargs={"log_fn": log}, daemon=True, name="herald-jump",
+    ).start()
+
+
 # ---------------------------------------------------------------------------
 # Setup phase (D-05)
 # ---------------------------------------------------------------------------
@@ -896,6 +909,7 @@ def _setup(config: HeyvoxConfig):
                 os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
             ),
             "is_switch_pending": lambda: os.path.exists(HERALD_PENDING_SWITCH_FLAG),
+            "on_jump": _jump_to_announced,
         }
         start_ptt_listener(
             config.push_to_talk.key, ptt_callbacks, log_fn=log,
@@ -903,6 +917,11 @@ def _setup(config: HeyvoxConfig):
             tap_max_secs=config.push_to_talk.tap_max_secs,
             double_tap_secs=config.push_to_talk.double_tap_secs,
             cancel_key=config.workspace_switch.cancel_key,
+            jump_key=(
+                config.workspace_switch.jump_key
+                if config.workspace_switch.mode == "jump_key" else None
+            ),
+            jump_double_tap_secs=config.workspace_switch.jump_double_tap_secs,
         )
 
     # Load wake word models

@@ -59,12 +59,16 @@ class WorkspaceInfo:
             string the Herald switch sidecar carries as `workspace`)
     project: the owning project/repo's display name ("" if unknown) — Herald
             prepends it to the spoken label unless the name already says it
+    session_id: the app's id for the chat/session running in that directory
+            ("" if the app has none or it is unknown) — rides along in the
+            Herald switch sidecar so a jump can select that exact tab
     """
 
     provider: str
     name: str
     workspace_id: str
     project: str = ""
+    session_id: str = ""
 
 
 class WorkspaceProvider(Protocol):

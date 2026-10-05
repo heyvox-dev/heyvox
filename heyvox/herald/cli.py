@@ -39,6 +39,8 @@ def dispatch(args: list[str]) -> int:
         return _cmd_interrupt()
     elif cmd == "cancel-switch":
         return _cmd_cancel_switch()
+    elif cmd == "jump":
+        return _cmd_jump()
     elif cmd == "mute":
         return _cmd_mute()
     elif cmd == "status":
@@ -164,6 +166,16 @@ def _cmd_cancel_switch() -> int:
     """Cancel a pending workspace-switch countdown."""
     _write_cancel_switch_flag()
     return 0
+
+
+def _cmd_jump() -> int:
+    """Jump to the workspace/session of the last announced message.
+
+    Same action as the jump-key double-tap (heyvox.herald.jump); handy for
+    testing and for binding to other launchers.
+    """
+    from heyvox.herald.jump import jump_to_target
+    return 0 if jump_to_target(log_fn=lambda m: print(m, file=sys.stderr)) else 1
 
 
 def _cmd_interrupt() -> int:

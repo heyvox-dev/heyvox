@@ -215,6 +215,11 @@ HERALD_LAST_PLAY = f"{_TMP}/herald-last-play"
 HERALD_PENDING_SWITCH_FLAG = f"{_TMP}/herald-pending-switch"
 HERALD_CANCEL_SWITCH_FLAG = f"{_TMP}/herald-cancel-switch"
 
+# Workspace jump target (workspace_switch.mode "jump_key"). JSON identity of
+# the last announced message, written by the orchestrator, replaced by every
+# further announcement, read when the user double-taps the jump key.
+HERALD_JUMP_TARGET_FILE = f"{_TMP}/herald-jump-target.json"
+
 # Kokoro TTS daemon IPC — Unix socket + PID file
 KOKORO_DAEMON_SOCK = f"{_TMP}/kokoro-daemon.sock"
 KOKORO_DAEMON_PID = f"{_TMP}/kokoro-daemon.pid"
@@ -360,6 +365,7 @@ def cleanup_ipc_files(herald_too: bool = True):
                  HERALD_PAUSE_FLAG, HERALD_MUTE_FLAG,
                  HERALD_MODE_FILE, HERALD_LAST_PLAY,
                  HERALD_PENDING_SWITCH_FLAG, HERALD_CANCEL_SWITCH_FLAG,
+                 HERALD_JUMP_TARGET_FILE,
                  KOKORO_DAEMON_SOCK,
                  KOKORO_DAEMON_PID, HERALD_AMBIENT_FLAG,
                  HERALD_WORKSPACE_FILE, HERALD_ORIGINAL_VOL_FILE,
