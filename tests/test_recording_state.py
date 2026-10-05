@@ -505,3 +505,65 @@ def test_send_local_garbled_without_debug_wav_falls_back_on_demand(rsm_and_ctx, 
     finally:
         if os.path.exists(on_demand_path):
             os.remove(on_demand_path)
+
+
+def _paste_failure_run(rsm, *, outcome_reason=None, paste_ok=False):
+    """Drive _send_local through a resolved target whose paste returns paste_ok."""
+    from types import SimpleNamespace
+    rsm.config = _send_local_garbled_config()
+    rsm.config.get_app_profile.return_value = SimpleNamespace(
+        name="Orca", focus_shortcut="", enter_count=1, enter_delay=0.0,
+    )
+    rsm.config.injection = None
+    rsm.config.transcription_prefix = ""
+    rsm.ctx.adapter = SimpleNamespace(should_auto_send=lambda: True, enter_count=1)
+    outcome = SimpleNamespace(
+        ok=outcome_reason is None, tier_used=2, reason=outcome_reason,
+        element=None, message="m", elapsed_ms=1,
+    )
+    target = SimpleNamespace(app_name="Orca", window_number=0, app_pid=90130)
+    hud = []
+    rsm._hud_send = hud.append
+    with patch("heyvox.audio.stt.transcribe_audio", return_value="Das ist ein ganz normaler Satz"), \
+         patch("heyvox.audio.stt.model_loaded", return_value=True), \
+         patch("heyvox.input.target.resolve_lock", return_value=outcome), \
+         patch("heyvox.input.injection.type_text", return_value=paste_ok), \
+         patch("heyvox.input.injection.save_frontmost_pid", return_value=36573), \
+         patch("heyvox.input.injection._set_clipboard", return_value=(True, 1)) as set_clip, \
+         patch("heyvox.input.toast.show_failure_toast"), \
+         patch("heyvox.audio.cues.audio_cue"), \
+         patch("heyvox.audio.cues.get_cues_dir", return_value="/tmp"), \
+         patch("heyvox.ipc.update_state"), \
+         patch("heyvox.recording._release_recording_guard"), \
+         patch("heyvox.audio.media.resume_media"):
+        rsm._send_local(
+            duration=3.0, audio_chunks=[], raw_rms_db=-30.0, ptt=False,
+            recording_target=target, stop_time=0.0,
+        )
+    return set_clip, hud
+
+
+def test_failed_paste_leaves_transcript_on_clipboard(rsm_and_ctx, isolate_flags):
+    """DEF-260: a paste that aborts after the target resolved (e.g. the focus
+    check) used to leave the transcript only in history; the user then had to
+    retype it. It must end up on the clipboard."""
+    rsm, ctx = rsm_and_ctx
+    set_clip, hud = _paste_failure_run(rsm)
+    set_clip.assert_called_once_with("Das ist ein ganz normaler Satz")
+    assert any(m.get("text") == "Paste failed (clipboard saved)" for m in hud)
+
+
+def test_successful_paste_does_not_touch_clipboard(rsm_and_ctx, isolate_flags):
+    rsm, ctx = rsm_and_ctx
+    set_clip, hud = _paste_failure_run(rsm, paste_ok=True)
+    set_clip.assert_not_called()
+
+
+def test_fail_closed_branch_still_writes_clipboard_once(rsm_and_ctx, isolate_flags):
+    """The existing fail-closed branch already writes the clipboard; the new
+    generic fallback must not write it a second time."""
+    from heyvox.input.target import FailReason
+    rsm, ctx = rsm_and_ctx
+    reason = list(FailReason)[0]
+    set_clip, hud = _paste_failure_run(rsm, outcome_reason=reason)
+    assert set_clip.call_count == 1

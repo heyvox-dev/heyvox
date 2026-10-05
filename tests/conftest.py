@@ -126,6 +126,18 @@ def isolate_orca_session_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def disable_live_frontmost(monkeypatch):
+    """Keep tests that mock AppKit.NSWorkspace deterministic.
+
+    heyvox.input.frontmost.frontmost_app() asks `lsappinfo` first (the live
+    frontmost app of whatever machine runs the suite) and only then falls back
+    to NSWorkspace. Disable the lsappinfo leg so the suite sees the mocked
+    NSWorkspace, like CI does. tests/test_frontmost.py exercises the real leg
+    with subprocess mocked."""
+    monkeypatch.setattr("heyvox.input.frontmost._lsappinfo_front", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def disable_hush_socket(monkeypatch):
     """Force injection's osascript fallback so the suite is deterministic.
 

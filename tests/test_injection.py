@@ -650,3 +650,12 @@ class TestAXPlaceholderAndAsyncCommit:
         assert result is False
         assert not any("Send a message" in v for v in state["sets"])
         assert state["sets"][-1] == ""  # restored to the real (empty) content
+
+
+class TestFocusVerificationUnavailable:
+    """DEF-260: no determinable frontmost app (lsappinfo and NSWorkspace both
+    give nothing) fails open, like any other check failure."""
+
+    def test_no_frontmost_app_fails_open(self):
+        with patch("heyvox.input.frontmost.frontmost_app", return_value=None):
+            assert _verify_target_focused("com.stablyai.orca") is True

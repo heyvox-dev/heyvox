@@ -365,8 +365,8 @@ def capture_lock(config=None) -> Optional[TargetLock]:
 
     # Primary: find the app under the mouse cursor (correct on multi-monitor)
     mouse_app = _app_under_mouse()
-    ws = AppKit.NSWorkspace.sharedWorkspace()
-    front_app = ws.frontmostApplication()
+    from heyvox.input.frontmost import frontmost_app
+    front_app = frontmost_app()
 
     if mouse_app:
         app_name, app_pid = mouse_app
@@ -986,9 +986,9 @@ def _focus_unchanged(lock) -> bool:
     real signal.
     """
     try:
-        import AppKit
+        from heyvox.input.frontmost import frontmost_app
 
-        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        front = frontmost_app()
         if front is None:
             return False
         front_bundle = front.bundleIdentifier() or ""
@@ -1013,13 +1013,14 @@ def _acquire_focused_element(lock):
     Requirement: PASTE-15-R7 (Tier 2 verification parity)
     """
     try:
-        import AppKit
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
             AXUIElementCreateApplication,
         )
 
-        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        from heyvox.input.frontmost import frontmost_app
+
+        front = frontmost_app()
         if front is None:
             return None
         front_bundle = front.bundleIdentifier() or ""
