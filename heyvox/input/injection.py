@@ -223,8 +223,9 @@ def _clipboard_still_ours(expected_count: int) -> bool:
 def _verify_target_focused(expected_bundle_id: str | None) -> bool:
     """Check if the frontmost app matches the expected target before pasting.
 
-    Uses NSWorkspace.sharedWorkspace().frontmostApplication().bundleIdentifier()
-    to verify the correct app is focused. Returns True if:
+    Uses the live frontmost app (heyvox.input.frontmost, NOT NSWorkspace's
+    cached value, which is frozen inside the listener, DEF-260) to verify the
+    correct app is focused. Returns True if:
     - expected_bundle_id is None (skip check)
     - frontmost app bundle ID matches expected_bundle_id
 
@@ -236,11 +237,14 @@ def _verify_target_focused(expected_bundle_id: str | None) -> bool:
     if expected_bundle_id is None:
         return True
     try:
-        import AppKit
 
         def _do():
-            ws = AppKit.NSWorkspace.sharedWorkspace()
-            front = ws.frontmostApplication()
+            # Live value, not NSWorkspace's cached one (DEF-260).
+            from heyvox.input.frontmost import frontmost_app
+            front = frontmost_app()
+            if front is None:
+                # Cannot tell at all: fail open (handled below), do not abort.
+                raise RuntimeError("frontmost app unavailable")
             return front.bundleIdentifier()
 
         actual = _call_with_timeout(_do, timeout=_APPKIT_CALL_TIMEOUT)
@@ -660,8 +664,8 @@ def _settle_delay_for(app_name: str | None, app_delays: dict[str, float], defaul
 def save_frontmost_pid() -> int:
     """Return the PID of the currently frontmost app (for restoring later)."""
     try:
-        import AppKit
-        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        from heyvox.input.frontmost import frontmost_app
+        app = frontmost_app()
         return app.processIdentifier() if app else 0
     except Exception:
         return 0

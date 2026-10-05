@@ -48,10 +48,10 @@ def activate_pid(
                 pass
             app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
             # Poll-verify: frontmost PID may lag or land on a sibling helper PID.
-            ws = AppKit.NSWorkspace.sharedWorkspace()
+            from heyvox.input.frontmost import frontmost_app
             for i in range(5):
                 _time.sleep(0.1)
-                front = ws.frontmostApplication()
+                front = frontmost_app()
                 front_pid = front.processIdentifier() if front else 0
                 if front_pid == pid:
                     if i > 0:

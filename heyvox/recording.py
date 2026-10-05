@@ -1432,6 +1432,7 @@ class RecordingStateMachine:
                 # with the auto-Enter path during triage.
                 self._log("[PASTE] verify skipped (auto-Enter clears field)")
 
+            clip_saved = False
             if paste_ok:
                 if combined_enter > 0:
                     self._log("Sent!")
@@ -1439,6 +1440,17 @@ class RecordingStateMachine:
                     self._log(f"Injected (paste, {'PTT' if ptt else 'wake word'})")
             else:
                 self._log("[inject] paste failed")
+                if outcome is None or outcome.reason is None:
+                    # DEF-260: the paste aborted after the target resolved fine
+                    # (focus check, osascript error, ...). The fail-closed branch
+                    # above already wrote the clipboard; this one did not, so the
+                    # transcript would exist only in history. Leave it on the
+                    # clipboard so the user can paste it by hand.
+                    clip_saved, _ = _set_clipboard(paste_text)
+                    self._log(
+                        f"[inject] paste failed — transcript left on clipboard "
+                        f"(ok={clip_saved})"
+                    )
 
             # Only restore focus if the user moved to a DIFFERENT app during
             # transcription. If they're still on the target app, no restore needed.
@@ -1468,7 +1480,8 @@ class RecordingStateMachine:
                     )
                 else:
                     self._hud_send({
-                        "type": "state", "state": "idle", "text": "Paste failed",
+                        "type": "state", "state": "idle",
+                        "text": "Paste failed (clipboard saved)" if clip_saved else "Paste failed",
                     })
                     self._log("Paste FAILED — error cue played by injection")
             elif ptt:

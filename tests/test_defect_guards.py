@@ -532,8 +532,14 @@ def test_def054_activate_app_poll_verifies_pid():
     )
     assert m, "DEF-054: could not locate activate_pid body in heyvox/input/activation.py"
     body = m.group(1)
-    assert "frontmostApplication" in body and "processIdentifier" in body, (
-        "DEF-054: activate_pid must read frontmostApplication().processIdentifier() "
+    # DEF-260: the live helper replaced NSWorkspace.frontmostApplication() (a
+    # value frozen inside the listener); either way the loop must read the
+    # frontmost app's processIdentifier().
+    assert (
+        ("frontmostApplication" in body or "frontmost_app()" in body)
+        and "processIdentifier" in body
+    ), (
+        "DEF-054: activate_pid must read the frontmost app's processIdentifier() "
         "to verify the target PID actually became frontmost."
     )
     assert "for" in body and "range" in body and "activateWithOptions_" in body, (
