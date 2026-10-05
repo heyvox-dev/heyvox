@@ -45,7 +45,11 @@ def worker(tmp_path):
     claim_dir = str(tmp_path / "claims")
     with patch.dict(os.environ, env, clear=False), \
          patch("heyvox.herald.worker.HERALD_CLAIM_DIR", claim_dir), \
+         patch("heyvox.herald.worker._ensure_orchestrator"), \
          patch("heyvox.herald.workspace_label.detect_workspace_from_cwd", return_value=""):
+        # _ensure_orchestrator is stubbed: process_response() would otherwise
+        # spawn a real, detached `heyvox.herald.cli orchestrator` on every run
+        # of the verbosity tests (T-006).
         w = HeraldWorker()
         # The checkout may itself live in /tmp; keep the temp-dir skip out of
         # tests that don't target it.

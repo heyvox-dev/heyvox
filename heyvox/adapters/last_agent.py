@@ -48,33 +48,38 @@ class LastAgentAdapter:
         with self._lock:
             return self._last_agent_name
 
+    def _track_once(self, first_match: bool = False) -> bool:
+        """Record the frontmost app if it is one of the tracked agents.
+
+        Uses the live frontmost app (heyvox.input.frontmost), not NSWorkspace's
+        cached value, which stays frozen at process start inside the listener
+        (DEF-260): last_agent_name used to stay None for the whole run.
+        Returns the updated first_match flag.
+        """
+        from heyvox.input.frontmost import frontmost_app
+        app = frontmost_app()
+        if app is not None:
+            name = app.localizedName() or ""
+            name_lower = name.lower()
+            for agent in self._agents:
+                if agent in name_lower:
+                    with self._lock:
+                        changed = self._last_agent_name != name
+                        self._last_agent_name = name
+                    if changed or first_match:
+                        _safe_stderr(f"[last-agent] Tracked: {name}")
+                        first_match = False
+                    break
+        return first_match
+
     def _start_observer(self) -> None:
-        """Start a daemon thread that polls NSWorkspace for frontmost app."""
+        """Start a daemon thread that polls the frontmost app once a second."""
 
         def _poll() -> None:
-            try:
-                import AppKit
-                workspace = AppKit.NSWorkspace.sharedWorkspace()
-            except Exception as e:
-                _safe_stderr(f"[last-agent] AppKit unavailable: {e}")
-                return
-
             _first_match = True
             while True:
                 try:
-                    app = workspace.frontmostApplication()
-                    if app is not None:
-                        name = app.localizedName() or ""
-                        name_lower = name.lower()
-                        for agent in self._agents:
-                            if agent in name_lower:
-                                with self._lock:
-                                    changed = self._last_agent_name != name
-                                    self._last_agent_name = name
-                                if changed or _first_match:
-                                    _safe_stderr(f"[last-agent] Tracked: {name}")
-                                    _first_match = False
-                                break
+                    _first_match = self._track_once(_first_match)
                 except Exception as e:
                     _safe_stderr(f"[last-agent] Poll error: {e}")
                 time.sleep(1.0)

@@ -923,7 +923,40 @@
 - **Fix**: new `heyvox/input/frontmost.py::frontmost_app()` asks LaunchServices through `lsappinfo` (~16 ms), falls back to NSWorkspace; used by `_verify_target_focused`, `save_frontmost_pid`, `activation.activate_pid`'s poll and the three `target.py` call sites. A frontmost app that cannot be determined at all fails open (as the docstring always said). `recording.py` now leaves the transcript on the clipboard whenever a paste fails outside the fail-closed branch, with the HUD text "Paste failed (clipboard saved)".
 - **Found by**: user report ("the beep, I have to paste by hand, it is not on the clipboard either"), then the log (`Focus verify FAILED ... got None`), then the constant `saved pre-inject frontmost pid`.
 - **Would have caught earlier**: (1) a startup/long-run check that compares `NSWorkspace.frontmostApplication()` with `lsappinfo front` and logs a WARNING on mismatch; the constant pid in the log line was visible for the whole life of the project. (2) A live end-to-end dictation after PR #49 (its tests mocked NSWorkspace, and the live checks covered Herald switching, not dictation). (3) Any fail-path of a paste must end with the text on the clipboard, asserted by a test per failure branch.
-- **Not changed**: `adapters/last_agent.py` still polls `NSWorkspace.frontmostApplication()` in its own thread and has the same staleness; `_app_under_mouse` (CGWindowList) is unaffected.
+- **Not changed here**: `adapters/last_agent.py` had the same staleness, fixed separately as DEF-262; `_app_under_mouse` (CGWindowList) is unaffected.
+
+## DEF-261 — a muted macOS output made Herald drop every queued message and every cue go unheard without any log line (FIXED 2026-10-05)
+
+- **Date**: 2026-10-05
+- **Category**: error-handling / ux
+- **Severity**: S2 (no sound, no workspace switch, nothing to find in the logs)
+- **Symptom**: with the Mac's output muted, `herald-debug.log` showed TTS being generated but no `ORCH:` line for hours (2026-10-04 21:26 to 23:15); cues logged `playing via afplay` and were inaudible.
+- **Root cause**: `HeraldOrchestrator.run()` unlinks the queued wav and its sidecar when `_is_muted()` (which includes the macOS system mute) or `_is_skip()` is true, without logging. `audio_cue()` skips the system-mute check on purpose (it was an osascript call, WW_LATENCY) and so never noticed either.
+- **Fix**: the orchestrator logs `ORCH: dropping <file> (<reason>)` with the reason from `_mute_reason()` (mute flag / verbosity=skip / macOS system output muted). `audio_cue()` runs `_warn_if_system_muted()` after dispatch (CoreAudio mute property via ctypes, microseconds) and logs `WARNING system output is muted` at most once a minute. No HUD banner (not decided).
+- **Found by**: live end-to-end test of the Orca workspace switch, which never happened; `is_system_muted()` was True. Todo T-004.
+- **Would have caught earlier**: P-silent-input-drop already said a gate that discards input must say so on its first occurrence; the queue-drop gate predates that rule and was never audited against it.
+
+## DEF-262 — the Last-Agent tracker never saw a frontmost app (FIXED 2026-10-05)
+
+- **Date**: 2026-10-05
+- **Category**: platform / dead-code
+- **Severity**: S3 (nothing reads `last_agent_name` today; only its own log line showed `last_agent=None`)
+- **Symptom**: with `target_mode: last-agent`, `[last-agent] should_auto_send=True, last_agent=None` on every dictation, and `[last-agent] Tracked:` never appeared.
+- **Root cause**: same as DEF-260: the observer thread polled `NSWorkspace.frontmostApplication()`, which is frozen at process start inside the listener.
+- **Fix**: `LastAgentAdapter._track_once()` uses `heyvox.input.frontmost.frontmost_app()`; tests cover live value, non-agent app and missing app. Todo T-008.
+- **Found by**: following DEF-260's pattern through the remaining `frontmostApplication()` call sites.
+- **Would have caught earlier**: a test that drives the observer with a stale NSWorkspace mock; the existing test only reimplemented the loop body inline.
+
+## DEF-263 — three test runs per session each left a real Herald orchestrator process running (FIXED 2026-10-05)
+
+- **Date**: 2026-10-05
+- **Category**: state-pollution
+- **Severity**: S3 (dev machine only; a leaked orchestrator can compete with the real one for the queue)
+- **Symptom**: after every full `pytest` run a detached `python -m heyvox.herald.cli orchestrator` from the test venv was left behind (parent pid 1): three from three runs on 2026-10-04, two more on 2026-10-05.
+- **Root cause**: `TestVerbosityFiltering` (`full`, `missing_defaults_to_full`, `short`) in `tests/test_herald_worker.py` runs `process_response()` to completion; `_ensure_orchestrator()` sees the isolated, stale PID file and spawns a real orchestrator. Only two other tests stubbed it.
+- **Fix**: the `worker` fixture patches `heyvox.herald.worker._ensure_orchestrator`. Verified with a Popen spy over the whole suite: zero orchestrator spawns. Todo T-006.
+- **Found by**: `pgrep` after the Orca work showed test-venv orchestrators; a Popen spy plugin named the three tests.
+- **Would have caught earlier**: a conftest-level assertion (or spy) that no test spawns a process whose argv contains `orchestrator`.
 
 ## Patterns & Process Gaps
 
@@ -948,4 +981,4 @@
 - **P-stacked-root-causes-one-symptom** (DEF-231/232/236/237, all found the same day off the same user report): "the workspace switch doesn't work" had FOUR independent root causes stacked across one pipeline — hold-queue suppression and idle-gate veto and synchronous blocking (DEF-231/232), then a sidebar-label mismatch breaking the click itself (DEF-236), then a missing session identifier (DEF-237). Fixing the first three still left the complaint reproducible, because any ONE unfixed cause is sufficient to keep the whole feature looking broken — "fixed 3 of 4 bugs" reads identically to "fixed 0 of 4" from the user's side, and DEF-231/232's own fix commit landed the same day this was re-reported. **Action item**: after fixing a "doesn't work" report by finding and fixing A cause, re-verify against live logs/DB end-to-end (not just re-test the specific mechanism just changed) before treating the report as closed — a clean explanation for SOME of the failures is not evidence there are no others.
 - **P-untracked-external-script-drifts-from-repo-logic** (DEF-236, sibling to the `~/.local/bin/conductor-switch-workspace` vs. `claude-conductor-setup/conductor-switch-workspace.sh` drift noted in `reference_conductor_switch_workspace_flags.md`): logic that has to exist twice — once correctly in this repo (`workspace_label.py`'s workspace_name-over-pr_title precedence) and once in an external, hand-maintained, untracked script this repo shells out to — has no mechanism to stay in sync and no test coverage on the external side, so a fix to one copy silently does not reach the other. **Action item**: for any external script a fix like this depends on, either vendor its logic into the repo (even as a thin wrapper this codebase's tests can exercise) or add a smoke test that diffs the script's behavior against the in-repo reference implementation it's supposed to mirror.
 - **P-silent-input-drop** (DEF-255, sibling to DEF-101 and the early-return family DEF-084/DEF-169): a gate that discards the user's input must say so on the FIRST occurrence; hiding the notice behind a streak counter (to spare false-positive triggers) lets alternating good and bad input reset the counter forever, and a whole-recording mean is the wrong statistic for a gate meant to reject silence because it also rejects long dictations with pauses. **Action item**: for every early-return path in `_send_local` (quiet, garbled, empty-stt, cancelled, quiet-admit text guard) decide what the user sees; any path that drops a recording of 3 s or more shows a banner or leaves a recoverable copy (garbled: clipboard and history, quiet: admitted to STT).
-- **P-cached-frontmost-in-longrunning-process** (DEF-260, sibling to DEF-054's frontmost-PID polling): AppKit values that are refreshed by the main run loop (`NSWorkspace.frontmostApplication()`, likely `runningApplications` too) are frozen in a long-running process that does not spin one; the symptom is a constant value in a log line across context switches. **Action item**: new code that needs "the frontmost app right now" calls `heyvox.input.frontmost.frontmost_app()`; `adapters/last_agent.py` still needs the same change.
+- **P-cached-frontmost-in-longrunning-process** (DEF-260, sibling to DEF-054's frontmost-PID polling): AppKit values that are refreshed by the main run loop (`NSWorkspace.frontmostApplication()`, likely `runningApplications` too) are frozen in a long-running process that does not spin one; the symptom is a constant value in a log line across context switches. **Action item**: new code that needs "the frontmost app right now" calls `heyvox.input.frontmost.frontmost_app()`; `adapters/last_agent.py` was converted too (DEF-262).

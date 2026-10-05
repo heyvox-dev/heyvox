@@ -228,6 +228,31 @@ def _play_via_sounddevice(cue_file: str) -> bool:
         return False
 
 
+_SYSTEM_MUTE_WARN_EVERY = 60.0
+_last_system_mute_warn = 0.0
+
+
+def _warn_if_system_muted(name: str) -> None:
+    """Log (at most once a minute) that a cue went out on a muted macOS output.
+
+    audio_cue() deliberately skips the osascript-based system-mute check for
+    latency, so with the Mac muted every cue logged "playing via afplay" and
+    nothing was audible (T-004). The CoreAudio mute property is a ctypes call
+    of microseconds, cheap enough to run after dispatch.
+    """
+    global _last_system_mute_warn
+    now = time.time()
+    if now - _last_system_mute_warn < _SYSTEM_MUTE_WARN_EVERY:
+        return
+    try:
+        from heyvox.herald.coreaudio import is_system_muted
+        if is_system_muted():
+            _last_system_mute_warn = now
+            _log(f"[cue] {name}: WARNING system output is muted, the cue is inaudible")
+    except Exception:
+        pass
+
+
 def audio_cue(
     name: str,
     cues_dir: str | None = None,
@@ -299,6 +324,7 @@ def audio_cue(
         from heyvox.audio.keepalive import play_cue_via_stream
         if play_cue_via_stream(name, cue_file):
             _log(f"[cue] {name}: played via keepalive stream")
+            _warn_if_system_muted(name)
             return
     except Exception as e:
         _log(f"[cue] {name}: keepalive dispatch raised, falling back: {e}")
@@ -319,6 +345,7 @@ def audio_cue(
             start_new_session=True,
         )
         _reap_async(proc)
+    _warn_if_system_muted(name)
 
 
 def is_suppressed() -> bool:

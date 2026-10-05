@@ -272,6 +272,15 @@ def _is_muted(cfg: OrchestratorConfig) -> bool:
         return False
 
 
+def _mute_reason(cfg: OrchestratorConfig) -> str:
+    """Why _is_muted()/_is_skip() dropped a message (for the log line)."""
+    if cfg.mute_flag.exists():
+        return "herald mute flag set"
+    if _is_skip(cfg):
+        return "verbosity=skip"
+    return "macOS system output muted"
+
+
 def _get_verbosity(cfg: OrchestratorConfig) -> str:
     """Read verbosity from shared flag file. Default 'full'."""
     try:
@@ -1375,8 +1384,14 @@ class HeraldOrchestrator:
                     if not next_wav.exists():
                         continue
 
-                    # Skip if muted or skip-verbosity
+                    # Skip if muted or skip-verbosity. Log which one: a muted
+                    # macOS output used to drop every message without a trace
+                    # (no playback, no workspace switch, no ORCH line, T-004).
                     if _is_muted(cfg) or _is_skip(cfg):
+                        _herald_log(
+                            f"ORCH: dropping {next_wav.name} ({_mute_reason(cfg)})",
+                            debug_log,
+                        )
                         next_wav.unlink(missing_ok=True)
                         next_wav.with_suffix(".workspace").unlink(missing_ok=True)
                         continue
