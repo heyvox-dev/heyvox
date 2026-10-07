@@ -13,6 +13,9 @@ def clean_flags(tmp_path, monkeypatch):
     flag = str(tmp_path / "heyvox-media-paused-rec")
     monkeypatch.setattr(media, "_PAUSE_FLAG", flag)
     monkeypatch.setattr(media, "_mr_lib", None)
+    # Never drive real players (VLC, Music, ...) from tests: tests that want
+    # players patch _scriptable_players themselves.
+    monkeypatch.setattr(media, "_scriptable_players", lambda: [])
     yield
     try:
         os.unlink(flag)
@@ -161,3 +164,123 @@ class TestFlagLifecycle:
             f.write("mr")
         media.resume_media()
         assert not os.path.exists(media._PAUSE_FLAG)
+
+
+class _Proc:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+class TestScriptablePlayers:
+    """AppleScript tier for players MediaRemote cannot see (DEF-264)."""
+
+    @pytest.fixture
+    def vlc(self, monkeypatch):
+        from heyvox.config import MediaPlayerConfig
+        player = MediaPlayerConfig(
+            name="VLC", bundle_id="org.videolan.vlc",
+            is_playing="playing", pause="play", resume="play",
+        )
+        monkeypatch.setattr(media, "_scriptable_players", lambda: [player])
+        monkeypatch.setattr(media, "_no_media_cache_until", 0.0)
+        monkeypatch.setattr(media, "_hush_command", lambda *a, **k: None)
+        monkeypatch.setattr(media, "_is_media_playing_native", lambda: None)
+        return player
+
+    @staticmethod
+    def _osa(monkeypatch, state):
+        """Fake osascript: state probe answers `state`, commands are recorded."""
+        calls = []
+
+        def fake(script):
+            calls.append(script)
+            if "is running" in script:
+                return _Proc(stdout=state + "\n")
+            return _Proc()
+        monkeypatch.setattr(media, "_run_osa", fake)
+        return calls
+
+    def test_pauses_playing_player_and_flags_it(self, vlc, monkeypatch):
+        calls = self._osa(monkeypatch, "true")
+        assert media.pause_media() is True
+        assert open(media._PAUSE_FLAG).read() == "app:org.videolan.vlc"
+        assert calls[-1] == 'tell application id "org.videolan.vlc" to play'
+
+    def test_does_not_touch_player_paused_by_user(self, vlc, monkeypatch):
+        calls = self._osa(monkeypatch, "false")
+        assert media.pause_media() is False
+        assert len(calls) == 1  # probe only, no toggle command
+        assert not os.path.exists(media._PAUSE_FLAG)
+
+    def test_closed_player_is_not_launched(self, vlc, monkeypatch):
+        calls = self._osa(monkeypatch, "off")
+        assert media.pause_media() is False
+        assert all("is running" in c for c in calls)
+
+    def test_probe_script_checks_running_before_telling_app(self, vlc, monkeypatch):
+        calls = self._osa(monkeypatch, "off")
+        media.pause_media()
+        script = calls[0]
+        assert script.index("is running") < script.index("tell application id")
+
+    def test_automation_denied_warns_once_and_returns_none(self, vlc, monkeypatch):
+        monkeypatch.setattr(media, "_osa_denied_warned", set())
+        logs = []
+        monkeypatch.setattr(media, "_log", logs.append)
+        monkeypatch.setattr(
+            media, "_run_osa",
+            lambda s: _Proc(stderr="execution error: Not authorized (-1743)", returncode=1),
+        )
+        assert media._player_state(vlc) is None
+        assert media._player_state(vlc) is None
+        assert sum("Automation permission denied" in m for m in logs) == 1
+
+    @patch("heyvox.audio.media.glob.glob", return_value=[])
+    @patch("heyvox.audio.media.time.sleep")
+    def test_resume_plays_when_still_paused(self, mock_sleep, mock_glob, vlc, monkeypatch):
+        calls = self._osa(monkeypatch, "false")
+        with open(media._PAUSE_FLAG, "w") as f:
+            f.write("app:org.videolan.vlc")
+        assert media.resume_media() is True
+        assert calls[-1] == 'tell application id "org.videolan.vlc" to play'
+        assert not os.path.exists(media._PAUSE_FLAG)
+
+    @patch("heyvox.audio.media.glob.glob", return_value=[])
+    @patch("heyvox.audio.media.time.sleep")
+    def test_resume_does_not_toggle_player_playing_again(self, mock_sleep, mock_glob, vlc, monkeypatch):
+        """VLC's play toggles: resuming an already-playing player would pause it."""
+        calls = self._osa(monkeypatch, "true")
+        with open(media._PAUSE_FLAG, "w") as f:
+            f.write("app:org.videolan.vlc")
+        assert media.resume_media() is False
+        assert len(calls) == 1
+
+    @patch("heyvox.audio.media.glob.glob", return_value=[])
+    @patch("heyvox.audio.media.time.sleep")
+    def test_resume_handles_hush_and_player_together(self, mock_sleep, mock_glob, vlc, monkeypatch):
+        calls = self._osa(monkeypatch, "false")
+        hush = []
+        monkeypatch.setattr(media, "_hush_command", lambda *a, **k: hush.append(a) or {"state": "playing"})
+        with open(media._PAUSE_FLAG, "w") as f:
+            f.write("hush,app:org.videolan.vlc")
+        assert media.resume_media() is True
+        assert hush and calls[-1].endswith("to play")
+
+    def test_pause_combines_hush_and_player(self, vlc, monkeypatch):
+        self._osa(monkeypatch, "true")
+        monkeypatch.setattr(media, "_hush_command", lambda *a, **k: {"pausedCount": 1, "tabs": []})
+        assert media.pause_media() is True
+        assert open(media._PAUSE_FLAG).read() == "hush,app:org.videolan.vlc"
+
+
+class TestMediaPlayerConfig:
+    def test_defaults_include_vlc_and_quicktime(self):
+        from heyvox.config import TTSConfig
+        names = {p.name for p in TTSConfig().media_players}
+        assert {"VLC", "QuickTime Player", "Music", "Spotify"} <= names
+
+    def test_user_entry_overrides_default_by_name(self):
+        from heyvox.config import TTSConfig
+        cfg = TTSConfig(media_players=[{"name": "vlc", "enabled": False}])
+        vlc = [p for p in cfg.media_players if p.name.lower() == "vlc"]
+        assert len(vlc) == 1 and vlc[0].enabled is False
