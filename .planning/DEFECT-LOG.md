@@ -958,6 +958,17 @@
 - **Found by**: `pgrep` after the Orca work showed test-venv orchestrators; a Popen spy plugin named the three tests.
 - **Would have caught earlier**: a conftest-level assertion (or spy) that no test spawns a process whose argv contains `orchestrator`.
 
+## DEF-264 — media pause never touched VLC (or any native player): `nowplaying-cli` sees no Now Playing session on macOS 26 (FIXED 2026-10-07)
+
+- **Date**: 2026-10-07
+- **Category**: platform
+- **Severity**: S2 (the feature `tts.pause_media` silently did nothing for every non-browser player)
+- **Symptom**: a file playing in VLC kept playing while Herald spoke and while dictating; the log showed `pause_media: native_state=None … no playing media found` three times (09:42:01, 09:42:19, 09:43:10). `native_state` was `None` 339 times in ~19k log lines and never anything else.
+- **Root cause**: tier 2 depended on `nowplaying-cli get playbackRate`, which returned `null` while VLC was running. Either the OS withholds MediaRemote data from unentitled processes (unverified here; the handoff guessed macOS 15.4+) or VLC does not publish a Now Playing session; the two were not distinguished (no Apple Music test while Franz was listening). Either way the tier cannot be relied on, and it failed silently as `None` ("unknown") which the code treats the same as "nothing playing".
+- **Fix**: new AppleScript tier between Hush and MediaRemote, configured in `tts.media_players` (`MediaPlayerConfig`, defaults VLC, QuickTime Player, Music, Spotify; user entries override by name, `enabled: false` switches one off). `application id … is running` probes first, so a closed player is never launched; pause only after the probe returned "playing" (VLC's `play` is a toggle); resume only if the probe says "not playing" again, so media the user paused or restarted is left alone. Flag file now holds comma-separated tokens (`hush,app:<bundle id>`), so a browser tab and a local player can be paused together. A denied Automation permission (-1743) is logged once per player.
+- **Found by**: Franz opened a file in VLC during a session; handoff `.context/handoffs/2026-10-07-pause-native-media-players.md`.
+- **Would have caught earlier**: a log-health counter for "native_state=None N times in a row while pause_media is on" (P-silent-unknown-as-nothing); one live check per supported player category after each macOS major update.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.

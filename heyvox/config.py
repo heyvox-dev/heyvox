@@ -99,6 +99,53 @@ class STTConfig(BaseModel):
     local: STTLocalConfig = STTLocalConfig()
 
 
+class MediaPlayerConfig(BaseModel):
+    """Scriptable native media player that can be paused/resumed during TTS and recording.
+
+    macOS 15.4+ reportedly withholds MediaRemote now-playing data from unentitled
+    processes, so ``nowplaying-cli`` sees nothing (DEF-264). Players with an
+    AppleScript dictionary are driven directly instead. All app-specific
+    behavior lives here — media.py has no per-app branches. Users add players
+    (or switch a shipped one off with ``enabled: false``) under
+    ``tts.media_players`` in config.yaml:
+
+        tts:
+          media_players:
+            - name: VLC
+              enabled: false
+            - name: MyPlayer
+              bundle_id: com.example.myplayer
+              is_playing: playing
+              pause: pause
+              resume: play
+
+    The three fields are AppleScript fragments evaluated inside
+    ``tell application id "<bundle_id>"``. ``is_playing`` must yield a boolean.
+    ``pause`` is only run after ``is_playing`` returned true, ``resume`` only
+    if ``is_playing`` is false again (so a toggle command is safe).
+    """
+    name: str
+    bundle_id: str = ""
+    is_playing: str = "playing"
+    pause: str = "pause"
+    resume: str = "play"
+    enabled: bool = True
+
+
+_DEFAULT_MEDIA_PLAYERS: list[dict] = [
+    # VLC's "play" toggles play/pause; "playing" is a read-only property.
+    {"name": "VLC", "bundle_id": "org.videolan.vlc",
+     "is_playing": "playing", "pause": "play", "resume": "play"},
+    {"name": "QuickTime Player", "bundle_id": "com.apple.QuickTimePlayerX",
+     "is_playing": "playing of document 1",
+     "pause": "pause document 1", "resume": "play document 1"},
+    {"name": "Music", "bundle_id": "com.apple.Music",
+     "is_playing": "player state is playing", "pause": "pause", "resume": "play"},
+    {"name": "Spotify", "bundle_id": "com.spotify.client",
+     "is_playing": "player state is playing", "pause": "pause", "resume": "play"},
+]
+
+
 class TTSConfig(BaseModel):
     """TTS engine configuration for native Kokoro-based TTS output.
 
@@ -155,6 +202,12 @@ class TTSConfig(BaseModel):
     # Pause system media (YouTube, Spotify, etc.) during TTS playback.
     # Uses macOS MediaRemote to send explicit pause/play commands.
     pause_media: bool = False
+
+    # Scriptable native players (VLC, QuickTime, Music, ...) paused via
+    # AppleScript when pause_media is on. Shipped defaults are merged in by
+    # name; a user entry with the same name overrides or disables (enabled:
+    # false) the default. See MediaPlayerConfig.
+    media_players: list[MediaPlayerConfig] = []
 
     # Kokoro daemon lifecycle. Lower values free MLX/Metal memory sooner after
     # speech bursts; env KOKORO_IDLE_TIMEOUT still wins for ad-hoc overrides.
@@ -258,6 +311,15 @@ class TTSConfig(BaseModel):
                 f"Set tts.script_path in config or set tts.enabled: false"
             )
         return v
+
+    @model_validator(mode="after")
+    def merge_default_media_players(self) -> "TTSConfig":
+        """Append shipped players the user did not override by name."""
+        user_names = {p.name.lower() for p in self.media_players}
+        for default in _DEFAULT_MEDIA_PLAYERS:
+            if default["name"].lower() not in user_names:
+                self.media_players.append(MediaPlayerConfig(**default))
+        return self
 
 
 class WorkspaceSwitchConfig(BaseModel):
@@ -1180,7 +1242,9 @@ tts:
   ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
   min_volume: 0.10         # Minimum TTS playback volume [0.0–1.0]. After ducking, Herald sets
                            # max(your_pre_duck_volume, min_volume). 0.0 = fully respect your slider.
-  pause_media: false       # Pause YouTube/Spotify/etc. during TTS, resume after
+  pause_media: false       # Pause YouTube/Spotify/VLC/etc. during TTS, resume after
+                           # Scriptable players (VLC, QuickTime, Music, Spotify) are built in;
+                           # add or disable players via tts.media_players (see MediaPlayerConfig).
   kokoro_idle_timeout: 120 # Seconds before warm Kokoro daemon exits and frees MLX/Metal memory
 
   # Allowed output languages. "auto" = detect + route freely.

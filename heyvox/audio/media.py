@@ -6,7 +6,11 @@ resumes afterward.
 
 Detection & control strategy (in priority order):
 1. Hush (Chrome extension) — for browser media via Unix socket
-2. nowplaying-cli + MediaRemote — for native apps (Spotify, Music, Podcasts)
+2. Scriptable native players (VLC, QuickTime Player, Music, Spotify, ...) —
+   driven directly via AppleScript, configured in ``tts.media_players``.
+   macOS 15.4+ reportedly hides now-playing data from unentitled processes, so tier 3
+   sees nothing for players like VLC (DEF-264).
+3. nowplaying-cli + MediaRemote — for native apps that publish Now Playing
 
 If Hush isn't installed/running and the media is browser-based, we no longer
 try to guess via Chrome JavaScript-from-AppleEvents or blindly toggle the
@@ -64,7 +68,8 @@ _MR_PAUSE = 1
 # pause_media() in this module and write the same path (HEYVOX_MEDIA_PAUSED_REC).
 # Herald additionally drops its own namespace flag (/tmp/herald-media-paused-*)
 # from herald-media.sh for the cross-caller "keep paused" handoff checked below.
-# Contents: "hush" (Hush extension) or "mr" (MediaRemote).
+# Contents: comma-separated tokens — "hush" (Hush extension), "mr"
+# (MediaRemote), "app:<bundle_id>" (scriptable player paused via AppleScript).
 from heyvox.constants import HEYVOX_MEDIA_PAUSED_REC as _PAUSE_FLAG
 
 # Lazy-loaded framework handle (guarded by _mr_lock for thread-safe init)
@@ -209,6 +214,124 @@ def _is_media_playing_native() -> bool | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Scriptable native players (AppleScript)
+# ---------------------------------------------------------------------------
+
+_OSA_TIMEOUT = 2.0
+_APP_TOKEN = "app:"
+# Players whose Automation permission was denied — warn once per process.
+_osa_denied_warned: set[str] = set()
+
+
+def _scriptable_players() -> list:
+    """Enabled players from ``tts.media_players`` (config errors → none)."""
+    try:
+        from heyvox.config import load_config
+        return [p for p in load_config().tts.media_players if p.enabled and p.bundle_id]
+    except Exception as e:
+        _log(f"players: config unavailable ({e})")
+        return []
+
+
+def _run_osa(script: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=_OSA_TIMEOUT,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _log_player_problem(player, msg: str) -> None:
+    """Log a probe failure once per player and message (probes run on every pause)."""
+    key = f"{player.bundle_id}:{msg}"
+    if key not in _osa_denied_warned:
+        _osa_denied_warned.add(key)
+        _log(f"players: {player.name}: {msg}")
+
+
+def _player_state(player) -> bool | None:
+    """True = playing, False = running but not playing, None = not running/unknown.
+
+    ``application id ... is running`` never launches the app, so a closed
+    player costs one cheap probe and is never started by us.
+    """
+    b = player.bundle_id
+    script = (
+        f'if application id "{b}" is running then\n'
+        f'tell application id "{b}" to return ({player.is_playing}) as text\n'
+        f'end if\nreturn "off"'
+    )
+    r = _run_osa(script)
+    if r is None:
+        _log_player_problem(player, "osascript timeout/unavailable")
+        return None
+    if r.returncode != 0:
+        # -1743 = Automation permission denied (System Settings → Privacy →
+        # Automation); without it every pause silently does nothing.
+        if "-1743" in r.stderr:
+            _log_player_problem(
+                player, "Automation permission denied — allow it in "
+                "System Settings → Privacy & Security → Automation")
+        elif "-1728" not in r.stderr:  # -1728 = app not installed: expected for defaults
+            _log_player_problem(player, f"probe failed: {r.stderr.strip()[:120]}")
+        return None
+    out = r.stdout.strip()
+    if out == "true":
+        return True
+    if out == "false":
+        return False
+    return None
+
+
+def _player_command(player, command: str) -> bool:
+    b = player.bundle_id
+    r = _run_osa(f'tell application id "{b}" to {command}')
+    ok = r is not None and r.returncode == 0
+    if not ok:
+        _log(f"players: {player.name}: '{command}' failed"
+             + (f": {r.stderr.strip()[:120]}" if r is not None else " (timeout)"))
+    return ok
+
+
+def _pause_scriptable_players() -> list[str]:
+    """Pause every enabled player that is currently playing; return flag tokens.
+
+    States are probed in parallel (one osascript each) to stay well under 1 s
+    with several players configured; pausing is only attempted on players
+    that reported "playing", which makes toggle commands (VLC ``play``) safe.
+    """
+    players = _scriptable_players()
+    if not players:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(players)) as pool:
+        states = list(pool.map(_player_state, players))
+    _log("players: " + ", ".join(f"{p.name}={s}" for p, s in zip(players, states)))
+    paused = []
+    for player, state in zip(players, states):
+        if state is True and _player_command(player, player.pause):
+            _log(f"pause_media: paused {player.name} via AppleScript")
+            paused.append(_APP_TOKEN + player.bundle_id)
+    return paused
+
+
+def _resume_scriptable_player(bundle_id: str) -> bool:
+    """Resume a player we paused — unless it is already playing again or gone."""
+    player = next((p for p in _scriptable_players() if p.bundle_id == bundle_id), None)
+    if player is None:
+        return False
+    state = _player_state(player)
+    if state is not False:
+        _log(f"resume_media: {player.name} state={state}, not resuming")
+        return False
+    ok = _player_command(player, player.resume)
+    _log(f"resume_media: {player.name} resume ok={ok}")
+    return ok
+
+
 # Cache: when pause_media() finds nothing playing, skip the slow detection
 # for this many seconds.  Worst case: media started during the window gets
 # missed for one TTS utterance, then detected on the next.
@@ -221,8 +344,11 @@ def pause_media() -> bool:
 
     Strategy:
     1. If Hush extension is running → use it for browser media.
-    2. If nowplaying-cli detects active playback → use MediaRemote.
-    3. If media is registered but paused → don't touch (user paused it).
+    2. Configured scriptable players (VLC, QuickTime, ...) that report
+       "playing" → pause via AppleScript.
+    3. If nothing above paused: nowplaying-cli detects active playback →
+       use MediaRemote. Media registered but paused → don't touch (user
+       paused it).
 
     Browser media without Hush is not handled — the user should install Hush
     if they want browser audio paused during TTS/recording. See heyvox/hush/.
@@ -239,16 +365,17 @@ def pause_media() -> bool:
         _log("pause_media: skipped (no-media cache hit)")
         return False
 
+    paused: list[str] = []
+
     # --- Tier 1: Try Hush for browser media ---
     hush_resp = _hush_command("pause")
     if hush_resp is not None:
         paused_count = hush_resp.get("pausedCount", 0)
         if paused_count > 0:
-            with open(_PAUSE_FLAG, "w") as f:
-                f.write("hush")
+            paused.append("hush")
             _log(f"pause_media: paused {paused_count} browser tab(s) via Hush ({time.time()-t0:.2f}s)")
-            return True
-        _log("pause_media: Hush available but no browser media playing")
+        else:
+            _log("pause_media: Hush available but no browser media playing")
         # DEF-128: The previous `hush-noop` info banner ("Hush: no browser
         # media paused") fired on every TTS event where no browser tab had
         # active media. That is the *normal* steady state, not a degraded
@@ -267,7 +394,17 @@ def pause_media() -> bool:
             "paused. Install via `heyvox setup` or the Hush Chrome extension."
         )
 
-    # --- Tier 2: Try native media (Spotify, Music, Podcasts) ---
+    # --- Tier 2: Scriptable native players (VLC, QuickTime, Music, ...) ---
+    # Independent of Hush: a browser tab and a local player can play at once.
+    paused += _pause_scriptable_players()
+
+    if paused:
+        with open(_PAUSE_FLAG, "w") as f:
+            f.write(",".join(paused))
+        _log(f"pause_media: paused {paused} ({time.time()-t0:.2f}s)")
+        return True
+
+    # --- Tier 3: MediaRemote for players that publish Now Playing ---
     native_state = _is_media_playing_native()
     _log(f"pause_media: native_state={native_state} ({time.time()-t0:.2f}s)")
 
@@ -316,14 +453,13 @@ def resume_media() -> bool:
     # Media is about to be active again — invalidate the no-media cache
     _no_media_cache_until = 0.0
 
-    # Read which method we used to pause
+    # Read which methods we used to pause (comma-separated tokens)
     try:
         with open(_PAUSE_FLAG) as f:
             method = f.read().strip()
     except OSError:
         method = "mr"
-
-    _log(f"resume_media: method={method}")
+    methods = [m for m in method.split(",") if m]
 
     # Remove our flag
     try:
@@ -349,25 +485,30 @@ def resume_media() -> bool:
     # Graceful delay before resuming
     time.sleep(RESUME_DELAY)
 
-    if method == "hush":
+    resumed = False
+
+    if "hush" in methods:
         hush_resp = _hush_command(
             "resume", rewindSecs=HUSH_REWIND_SECS, fadeInMs=HUSH_FADE_IN_MS
         )
         if hush_resp is not None:
             _log(f"resume_media: Hush resume result={hush_resp}")
-            return True
-        _log("resume_media: Hush unavailable for resume, media may stay paused")
-        return False
+            resumed = True
+        else:
+            _log("resume_media: Hush unavailable for resume, media may stay paused")
 
-    if method == "mr":
+    for token in methods:
+        if token.startswith(_APP_TOKEN):
+            resumed = _resume_scriptable_player(token[len(_APP_TOKEN):]) or resumed
+
+    if "mr" in methods:
         mr = _get_mr()
         if mr is not None:
             try:
                 result = mr.MRMediaRemoteSendCommand(_MR_PLAY, None)
                 _log(f"resume_media: MediaRemote play result={result}")
-                return result
+                resumed = bool(result) or resumed
             except Exception as e:
                 _log(f"resume_media: MediaRemote failed: {e}")
-                return False
 
-    return False
+    return resumed
