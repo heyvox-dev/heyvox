@@ -1081,9 +1081,15 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
         log(f"Training collector enabled → {training_base} (max {config.wake_words.negatives_max_clips} clips/category)")
         log("  Categories: tp/ fp/ tn/ fn/")
 
-    # Memory watchdog
-    _MEM_WARN_MB = 2000
-    _MEM_CRITICAL_MB = 2500
+    # Memory watchdog. DEF-265: measured as physical footprint, not RSS — MLX
+    # Metal buffers and swapped pages are invisible to RSS (live: RSS 52 MB vs
+    # footprint 6.7 GB). Healthy listener ≈ 1–2 GB; a garbled-STT reverify
+    # briefly holds large-v3 on top (~+3 GB), so CRITICAL must persist for
+    # _MEM_CRITICAL_STREAK consecutive checks before restarting.
+    _MEM_WARN_MB = 3000
+    _MEM_CRITICAL_MB = 4500
+    _MEM_CRITICAL_STREAK = 4
+    _mem_critical_count = 0
     _last_mem_check = time.time()
     _MEM_CHECK_INTERVAL = 15.0
 
@@ -1563,13 +1569,19 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                   start_new_session=True)
                         ctx.shutdown.set()
 
-                # Memory watchdog -- check RSS every 60s
+                # Memory watchdog -- check footprint every _MEM_CHECK_INTERVAL
                 if now - _last_mem_check >= _MEM_CHECK_INTERVAL:
                     _last_mem_check = now
-                    import psutil
-                    rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
-                    if rss_mb > _MEM_CRITICAL_MB:
-                        log(f"WATCHDOG: Memory critical ({rss_mb:.0f} MB), auto-restarting...")
+                    from heyvox.ram_pressure import process_footprint_mb
+                    rss_mb = process_footprint_mb()
+                    if rss_mb is None:
+                        import psutil
+                        rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+                    _mem_critical_count = (
+                        _mem_critical_count + 1 if rss_mb > _MEM_CRITICAL_MB else 0
+                    )
+                    if _mem_critical_count >= _MEM_CRITICAL_STREAK:
+                        log(f"WATCHDOG: Memory critical ({rss_mb:.0f} MB footprint), auto-restarting...")
                         hud_send({"type": "error", "text": f"Restarting: {rss_mb:.0f}MB"})
                         time.sleep(0.5)
                         _release_singleton()
@@ -1582,7 +1594,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                                       start_new_session=True)
                             ctx.shutdown.set()
                     elif rss_mb > _MEM_WARN_MB:
-                        log(f"WARNING: Memory usage high: {rss_mb:.0f} MB (threshold: {_MEM_WARN_MB} MB)")
+                        log(f"WARNING: Memory usage high: {rss_mb:.0f} MB footprint (threshold: {_MEM_WARN_MB} MB)")
                         hud_send({"type": "error", "text": f"Memory: {rss_mb:.0f}MB"})
 
                     # System-wide RAM pressure -> menu-bar banner. Distinct from

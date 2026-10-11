@@ -464,7 +464,7 @@ class TestAXFastPath:
                 with patch("heyvox.input.injection.subprocess.run") as mock_run:
                     mock_run.return_value = MagicMock(returncode=0)
                     result = type_text("hello", snap=snap)
-        mock_ax.assert_called_once_with(snap, "hello")
+        mock_ax.assert_called_once_with(snap, "hello", allow_workspace_managed=False)
         assert result is True
         # Clipboard path (osascript) should NOT have been called
         mock_run.assert_not_called()

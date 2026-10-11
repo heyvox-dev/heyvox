@@ -213,7 +213,7 @@ def _reverify_garbled_async(
             audio_secs = len(audio) / sr
 
             try:
-                import mlx_whisper  # type: ignore
+                import mlx_whisper  # type: ignore  # noqa: F401  (availability check)
             except ImportError:
                 if log:
                     log("Reverify: mlx_whisper not available — skipping")
@@ -234,7 +234,8 @@ def _reverify_garbled_async(
             }
             if language:
                 kwargs["language"] = language
-            result = mlx_whisper.transcribe(audio, **kwargs)
+            from heyvox.audio.stt import transcribe_with_other_model
+            result = transcribe_with_other_model(audio, **kwargs)
             text = (result.get("text") or "").strip()
             elapsed = time.time() - t0
 
@@ -1342,6 +1343,9 @@ class RecordingStateMachine:
                             enter_count=combined_enter,
                             enter_delay=enter_delay,
                             focus_shortcut="",  # tier-1 success -> input focused
+                            ax_workspace_managed=bool(
+                                getattr(profile, "ax_value_paste", False)
+                            ),
                         )
                 else:
                     # Fail-closed: write clipboard, NO Cmd+V, error cue, toast (R5).

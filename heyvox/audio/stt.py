@@ -125,6 +125,13 @@ _mlx_transcribing: bool = False  # Guard: prevents unload during active transcri
 _mlx_unavailable: bool = False  # True once an mlx-whisper import fails (e.g. Intel Mac) — makes the load wait fail fast instead of blocking _LOAD_TIMEOUT
 _log_fn: Callable[[str], None] | None = None
 _mlx_initial_prompt: str = ""   # Phase 16: glossary bias for the first decode window
+# DEF-266: mlx_whisper caches exactly ONE model in a class-level slot
+# (mlx_whisper.transcribe.ModelHolder). Any transcribe() call with a different
+# path_or_hf_repo — the garbled-STT reverify with large-v3 — replaces the live
+# model, so the next dictation silently cold-reloads it while _mlx_loaded still
+# says "warm". This lock serializes every use of that slot so a reverify can
+# borrow it and put the live model back (transcribe_with_other_model).
+_holder_lock = threading.Lock()
 
 
 def _log(msg: str) -> None:
@@ -132,6 +139,48 @@ def _log(msg: str) -> None:
         _log_fn(msg)
     else:
         print(msg, flush=True)
+
+
+def _release_mlx_cache() -> None:
+    """Return MLX's freed-buffer cache to the OS. Never raises.
+
+    DEF-265: MLX keeps freed Metal buffers in a cache that is never trimmed on
+    its own — ~1 GB right after loading the model, +4 GB after one large-v3
+    reverify. Benchmarked 2026-10-11 on real dictations: clearing before each
+    decode costs no measurable time (3.3 s either way on 44 s of audio).
+    """
+    try:
+        import mlx.core as mx
+        clear = getattr(mx, "clear_cache", None) or mx.metal.clear_cache
+        clear()
+    except Exception:
+        pass
+
+
+def transcribe_with_other_model(audio, **kwargs) -> dict:
+    """Run mlx_whisper.transcribe with a non-live model, then restore the live one.
+
+    DEF-266: without this, the reverify's large-v3 evicts the live model from
+    mlx_whisper's single ModelHolder slot (next dictation cold-reloads it) and
+    leaves ~4 GB of freed buffers in MLX's cache. Holds _holder_lock, so a live
+    dictation that starts meanwhile waits for the reverify instead of running
+    on the borrowed model.
+    """
+    import gc
+    import mlx_whisper
+    from mlx_whisper.transcribe import ModelHolder
+
+    # A timed-out live worker may still be decoding on the live model (DEF-221)
+    if not _wait_for_orphan():
+        raise RuntimeError("timed-out live transcription still running")
+    with _holder_lock:
+        saved = (ModelHolder.model, ModelHolder.model_path)
+        try:
+            return mlx_whisper.transcribe(audio, **kwargs)
+        finally:
+            ModelHolder.model, ModelHolder.model_path = saved
+            gc.collect()
+            _release_mlx_cache()
 
 
 def _load_mlx_model() -> None:
@@ -157,7 +206,9 @@ def _load_mlx_model() -> None:
         _log(f"Loading MLX whisper model ({_mlx_model_id})...")
         t0 = time.perf_counter()
         dummy = np.zeros(16000, dtype=np.float32)
-        mlx_whisper.transcribe(dummy, path_or_hf_repo=_mlx_load_ref)
+        with _holder_lock:
+            mlx_whisper.transcribe(dummy, path_or_hf_repo=_mlx_load_ref)
+        _release_mlx_cache()  # DEF-265: loading leaves ~1 GB of freed buffers cached
         elapsed = time.perf_counter() - t0
         _mlx_last_use = time.time()
         _mlx_loaded.set()
@@ -180,18 +231,19 @@ def _unload_mlx_model() -> None:
             # Not idle long enough — reschedule
             _schedule_unload()
             return
+        # Release the cached model. DEF-265: importlib.reload(mlx_whisper) did
+        # NOT do this — it re-runs only the package __init__, the transcribe
+        # submodule (and its ModelHolder) survives, so the weights stayed put.
         try:
-            import mlx.core as mx
-            mx.metal.clear_cache()
+            from mlx_whisper.transcribe import ModelHolder
+            with _holder_lock:
+                ModelHolder.model = None
+                ModelHolder.model_path = None
         except ImportError:
             pass
-        # Force Python to release the module's cached model
-        import mlx_whisper
-        # Clear any cached state in mlx_whisper
-        import importlib
-        importlib.reload(mlx_whisper)
         import gc
         gc.collect()
+        _release_mlx_cache()
         _mlx_loaded.clear()
         _log(f"MLX model unloaded after {idle:.0f}s idle (memory freed)")
 
@@ -437,6 +489,16 @@ def transcribe_audio(
             return ""
         with _mlx_lock:
             _mlx_transcribing = True
+        # DEF-266: wait out a reverify borrowing mlx_whisper's model slot. Taken
+        # here, not in the worker, so the wait does not count against
+        # _TRANSCRIBE_TIMEOUT. Lock order: load/unload take _mlx_lock, then
+        # _holder_lock; this path never holds both, so it cannot deadlock them.
+        if not _holder_lock.acquire(timeout=_LOAD_TIMEOUT):
+            with _mlx_lock:
+                _mlx_transcribing = False
+            _log(f"ERROR: MLX model slot still busy after {_LOAD_TIMEOUT}s "
+                 f"(reverify running?) — skipping this transcription")
+            return ""
         def _run_mlx_transcribe(seg):
             _boost_transcribe_thread_priority()
             return mlx_whisper.transcribe(seg, **kwargs)
@@ -458,21 +520,19 @@ def transcribe_audio(
         except FuturesTimeout:
             _timed_out = True
             _log(f"ERROR: MLX transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
-            # Force-unload model to reclaim memory from the orphaned thread
-            try:
-                import mlx.core as mx
-                mx.metal.clear_cache()
-            except Exception:
-                pass
+            # Reclaim cached buffers (the orphaned worker keeps the model itself)
+            _release_mlx_cache()
             # Return whatever we transcribed so far
             return " ".join(parts)
         except Exception as e:
             _log(f"ERROR: MLX transcription failed: {e}")
             return " ".join(parts)
         finally:
+            _holder_lock.release()
             with _mlx_lock:
                 _mlx_transcribing = False
 
+        _release_mlx_cache()  # DEF-265: keep the footprint at the model's size
         with _mlx_lock:
             _mlx_last_use = time.time()
             _schedule_unload()  # Reset the idle timer
