@@ -1262,11 +1262,13 @@ class RecordingStateMachine:
 
             # Save the user's current focus so we can restore it if injection
             # steals focus from the SAME app they're already in.
+            _t_front = time.monotonic()
             pre_inject_pid = save_frontmost_pid()
             target_pid = recording_target.app_pid if recording_target else 0
             self._log(
                 f"[inject] saved pre-inject frontmost pid={pre_inject_pid}, "
-                f"target pid={target_pid}"
+                f"target pid={target_pid} "
+                f"({(time.monotonic() - _t_front) * 1000:.0f}ms)"
             )
 
             # --- 15-05: resolve_lock + tier-aware paste + fail-closed branch ---

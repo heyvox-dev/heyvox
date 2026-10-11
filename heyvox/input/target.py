@@ -405,6 +405,28 @@ def capture_lock(config=None) -> Optional[TargetLock]:
         err, focused = AXUIElementCopyAttributeValue(
             ax_app, "AXFocusedUIElement", None
         )
+        if err != 0 or focused is None:
+            # DEF-268: Chromium builds its a11y tree lazily and only once asked
+            # (AXManualAccessibility, harmless no-op on native apps). Right after
+            # the app (re)started nothing has asked yet, so the lock was taken
+            # with nothing focused and the paste had to recover at stop time:
+            # 2-3 s of polling a tree that only then started to build. Switch it
+            # on here — this runs in the record-start background thread — and
+            # give it a short moment.
+            _ta = _time.monotonic()
+            from ApplicationServices import AXUIElementSetAttributeValue
+            AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
+            for _ in range(10):
+                _time.sleep(0.05)
+                err, focused = AXUIElementCopyAttributeValue(
+                    ax_app, "AXFocusedUIElement", None
+                )
+                if err == 0 and focused is not None:
+                    break
+            _log(
+                f"capture: enabled a11y tree, focused after "
+                f"{(_time.monotonic() - _ta) * 1000:.0f}ms err={err}"
+            )
         if err == 0 and focused is not None:
             err2, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
             leaf_role = str(role) if err2 == 0 and role else ""
@@ -672,8 +694,10 @@ def _poll_live_focus(pid: int):
         AXUIElementSetAttributeValue,
     )
 
+    _ts = _time.monotonic()
     ax_app = AXUIElementCreateApplication(pid)
     AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
+    _log(f"[live-focus] a11y on {(_time.monotonic() - _ts) * 1000:.0f}ms")
     err, focused = -1, None
     _tf = _time.monotonic()
     for _polls in range(1, 21):
@@ -721,7 +745,9 @@ def _try_activate_and_recapture(lock) -> bool:
         if running is None:
             return False
         # NSApplicationActivateIgnoringOtherApps = 1 << 1
+        _ta = _time.monotonic()
         running.activateWithOptions_(1 << 1)
+        _log(f"[activate-recapture] activate {(_time.monotonic() - _ta) * 1000:.0f}ms")
 
         focused, role_str = _poll_live_focus(pid)
         if focused is None:
@@ -744,6 +770,11 @@ def _try_activate_and_recapture(lock) -> bool:
         # TargetLock is a frozen dataclass — use object.__setattr__ to bypass.
         object.__setattr__(lock, "focused_was_text_field", True)
         object.__setattr__(lock, "leaf_role", role_str)
+        # DEF-268: the injector recognises an empty field's placeholder by the
+        # lock's AXDescription; give the recovered lock the live one.
+        _axid, _title, _desc = _capture_leaf_tiebreakers(focused)
+        if _desc and not getattr(lock, "leaf_description", None):
+            object.__setattr__(lock, "leaf_description", _desc)
         return True
     except Exception as e:
         _log(f"[activate-recapture] exception: {e}")

@@ -353,11 +353,9 @@ def _ax_inject_text(snap, text: str, allow_workspace_managed: bool = False) -> b
         # its CSS placeholder as AXValue ("Send a message…\n"). That is not
         # content — appending to it, or "restoring" it, writes the placeholder
         # into the editor as real text that then gets sent.
-        placeholders = {str(v).strip() for v in (
-            getattr(snap, "leaf_description", None),
-            AXUIElementCopyAttributeValue(focused, "AXPlaceholderValue", None)[1],
-        ) if v}
-        current = "" if raw_current.strip() in placeholders else raw_current
+        current = _strip_placeholder(
+            focused, raw_current, getattr(snap, "leaf_description", None),
+        )
         newval = current + text if current else text
         err = AXUIElementSetAttributeValue(focused, "AXValue", newval)
         if err != 0:
@@ -388,6 +386,32 @@ def _ax_inject_text(snap, text: str, allow_workspace_managed: bool = False) -> b
     except Exception as e:
         _log(f"AX fast-path exception: {e}")
         return False
+
+
+def _strip_placeholder(el, raw: str, *known) -> str:
+    """Return `raw` unless it is just the field's placeholder, else "".
+
+    DEF-259: an EMPTY rich-text field (Orca's ProseMirror composer) reports its
+    CSS placeholder as AXValue ("Send a message…\n"). That is not content —
+    appending to it, or "restoring" it, writes the placeholder into the editor
+    as real text that then gets sent. DEF-268: the placeholder was only
+    recognised via the captured lock's AXDescription; a lock captured with
+    nothing focused (Orca freshly started, a11y tree still off) has none, so the
+    placeholder went out as part of the message. Read the LIVE element's
+    AXDescription and AXPlaceholderValue as well.
+    """
+    from ApplicationServices import AXUIElementCopyAttributeValue
+
+    candidates = list(known)
+    for attr in ("AXPlaceholderValue", "AXDescription"):
+        try:
+            err, v = AXUIElementCopyAttributeValue(el, attr, None)
+            if err == 0:
+                candidates.append(v)
+        except Exception:
+            pass
+    placeholders = {str(v).strip() for v in candidates if v}
+    return "" if raw.strip() in placeholders else raw
 
 
 def _ax_walk_to_native_role(el, depth: int = 8):
@@ -450,6 +474,7 @@ def _ax_set_focused_value(pid: int, text: str) -> bool:
         return False
     cerr, current = AXUIElementCopyAttributeValue(target, "AXValue", None)
     current = str(current) if (cerr == 0 and current) else ""
+    current = _strip_placeholder(target, current)
     newval = current + text if current else text
     serr = AXUIElementSetAttributeValue(target, "AXValue", newval)
     if serr != 0:
