@@ -37,6 +37,7 @@ from heyvox.constants import (
     HERALD_QUEUE_DIR,
     HERALD_ORCH_PID,
     HERALD_CLAIM_DIR,
+    HERALD_SUPPRESS_DIR,
     KOKORO_DAEMON_PID,
     KOKORO_DAEMON_SOCK,
     QWEN_DAEMON_PID,
@@ -285,6 +286,36 @@ def _is_temp_cwd(cwd: str) -> bool:
     return any(real == root or real.startswith(root + "/") for root in _TEMP_ROOTS)
 
 
+def _consume_suppress_marker(raw_text: str, suppress_dir: str | None = None) -> bool:
+    """True if a sibling hook asked Herald not to speak this exact response.
+
+    Stop hooks run in parallel. A hook that rejects the response with
+    ``decision=block`` (Claude then writes a corrected one) cannot stop Herald
+    from speaking the rejected text, so it drops a marker named
+    ``<session_id>__<md5(last_assistant_message)[:16]>`` in HERALD_SUPPRESS_DIR.
+    Keyed on the message text, so the corrected response is never suppressed.
+    Best-effort: if the marker lands after generation started, the text is spoken.
+    The marker is removed once honored.
+    """
+    try:
+        payload = json.loads(raw_text)
+        message = payload.get("last_assistant_message") or ""
+        session_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("session_id") or ""))
+    except (ValueError, AttributeError):
+        return False
+    if not message or not session_id:
+        return False
+    digest = hashlib.md5(str(message).encode("utf-8")).hexdigest()[:16]
+    marker = os.path.join(suppress_dir or HERALD_SUPPRESS_DIR, f"{session_id}__{digest}")
+    try:
+        os.unlink(marker)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator auto-start
 # ---------------------------------------------------------------------------
@@ -515,6 +546,16 @@ class HeraldWorker:
             os.close(fd)
         except FileExistsError:
             log.debug("TTS already claimed by watcher (%s) — skipping", speech_hash)
+            return True
+
+        # A sibling Stop hook rejected this response (it will be rewritten).
+        # Checked AFTER the claim so the watcher fallback dedups against it
+        # and does not speak the rejected text either.
+        if _consume_suppress_marker(raw_text):
+            log.info(
+                "WORKER: response suppressed by hook marker (hook=%s ws=%r len=%d)",
+                hook_type, self._workspace, len(speech),
+            )
             return True
 
         # Voice/language/mood selection
