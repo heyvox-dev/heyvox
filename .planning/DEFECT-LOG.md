@@ -1002,6 +1002,17 @@
 - **Found by**: DEF-265 investigation; per-step log timing of the paste path.
 - **Would have caught earlier**: a paste-path assertion per app profile in the provider PR ("Orca dictation still logs `done via AX fast-path`"); logging which injection path was taken with its duration in the `[TIMING]` line, so a path switch shows up as a step change.
 
+## DEF-268 — first dictation after an Orca restart sent the composer placeholder as text and spent ~3 s finding the field: the lock was captured while Orca's a11y tree was still off (FIXED 2026-10-11)
+
+- **Date**: 2026-10-11
+- **Category**: integration
+- **Severity**: S2 (the message sent to the agent started with "Ask anything, @ to mention files, / for commands"; plus ~3 s paste latency)
+- **Symptom**: Franz's dictation at 07:30 arrived in Orca as `Ask anything, @ to mention files, / for commands\nso den Diktat …`. Log: `[capture_lock] … text_field=False leaf_role=''`, then `[live-focus] poll 17x 2062ms`, `tier_used=2 (activate-recovered) elapsed_ms=3118`, `AX fast-path: injected+verified`. Orca had been restarted (pid 50582 → 22831).
+- **Root cause**: Chromium builds its accessibility tree only once a client sets `AXManualAccessibility`. `capture_lock` never set it, so right after an Orca restart (nobody had asked yet) the record-start lock found nothing focused and carried no `leaf_description`. At stop time `_try_activate_and_recapture` switched the tree on and polled ~2 s until it was built, but did not copy the live AXDescription into the lock. `_ax_inject_text` recognised an empty composer's placeholder (DEF-259) only via the lock's AXDescription or `AXPlaceholderValue`, which Orca does not report, so it appended the transcript to the placeholder. `_ax_set_focused_value` had no placeholder check at all.
+- **Fix**: shared `_strip_placeholder()` in `injection.py` also reads the LIVE element's `AXDescription` and `AXPlaceholderValue`, used by both AX setters; `_try_activate_and_recapture` copies the live AXDescription onto the recovered lock; `capture_lock` switches the a11y tree on when nothing is focused and polls up to 0.5 s (record-start background thread). Millisecond timing on the recovery path and the pre-inject frontmost lookup. Guard tests `tests/test_def268_orca_placeholder_cold_tree.py` (4 of 5 fail on the old code).
+- **Found by**: Franz noticed the placeholder in his own message during the paste-latency investigation (PR #56 timing).
+- **Would have caught earlier**: the DEF-259 tests covered only a lock that already carried the placeholder as its AXDescription. A test for each path into the AX setter (captured lock, recovered lock, focus-shortcut path) with a lock that has no description would have shown the gap; same for a dogfooding check "first dictation after restarting the target app".
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
