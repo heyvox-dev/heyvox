@@ -535,6 +535,10 @@ _DEFAULT_APP_PROFILES: list[dict] = [
         # switching + spoken workspace names. No DB, no session ids.
         "has_workspace_detection": True,
         "workspace_provider": "orca",
+        # AX insert into the Tiptap composer is verified (DEF-258/259: async
+        # set + placeholder handled in _ax_inject_text); without the flag the
+        # workspace_id from the provider forces the slow osascript path (DEF-267).
+        "ax_value_paste": True,
     },
 ]
 

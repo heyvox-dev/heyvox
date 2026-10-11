@@ -267,7 +267,7 @@ _AX_NATIVE_ROLES = frozenset({"AXTextField", "AXTextArea"})
 # from the frontmost app's AXFocusedUIElement at call time (the lock does
 # not carry an AX ref — D-04: refs are ephemeral, role-path is the durable
 # identity).
-def _ax_inject_text(snap, text: str) -> bool:
+def _ax_inject_text(snap, text: str, allow_workspace_managed: bool = False) -> bool:
     """Inject text directly via AX value set — only for native AppKit text fields.
 
     Bypasses clipboard entirely by setting AXValue directly on the element.
@@ -280,6 +280,9 @@ def _ax_inject_text(snap, text: str) -> bool:
             from the lock; element handle is acquired live from the focused
             element of the current frontmost app.
         text: Text to inject.
+        allow_workspace_managed: the target's profile opts in via
+            ax_value_paste (DEF-267), so a lock with a workspace_id may take
+            this path too.
 
     Returns:
         True if text was injected via AX, False if not applicable or failed.
@@ -300,8 +303,12 @@ def _ax_inject_text(snap, text: str) -> bool:
     # behind HEYVOX_AX_CONDUCTOR so the proven osascript path stays the default
     # until validated across apps/versions/long text; the read-back verify below
     # is the hard guard (only claim success if the value actually stuck).
+    # DEF-267: the skip keyed on workspace_id alone, so when Orca gained a
+    # workspace provider (PR #49) its dictation silently fell from this path
+    # (~0.1 s) to osascript Cmd+V (~1 s). Apps that verified AX insert opt in
+    # per profile (ax_value_paste) instead of the old Conductor-only env var.
     ws_id = getattr(snap, "workspace_id", None)
-    if ws_id and not os.environ.get("HEYVOX_AX_CONDUCTOR"):
+    if ws_id and not (allow_workspace_managed or os.environ.get("HEYVOX_AX_CONDUCTOR")):
         app_name = getattr(snap, "app_name", "?")
         _log(f"AX fast-path: skipping for workspace-managed app ({app_name})")
         return False
@@ -934,6 +941,7 @@ def type_text(
     enter_count: int = 0,
     enter_delay: float = 0.05,
     focus_shortcut: str = "",
+    ax_workspace_managed: bool = False,
 ) -> bool:
     """Insert text into an app, optionally pressing Enter to submit.
 
@@ -957,6 +965,8 @@ def type_text(
         enter_count: Number of Enter keystrokes after paste (0 = no auto-send).
         enter_delay: Delay (seconds) between Cmd+V and first Enter. Electron apps
             need ~0.3s for paste to propagate through IPC before Enter can submit.
+        ax_workspace_managed: profile.ax_value_paste — lets a workspace-managed
+            target use the AX fast-path (DEF-267).
 
     Returns:
         True on success, False on failure. Error cue is played on failure.
@@ -976,11 +986,16 @@ def type_text(
             _chrome_press_enter(enter_count)
         return True
 
-    if _ax_inject_text(snap, text):
+    if _ax_inject_text(snap, text, allow_workspace_managed=ax_workspace_managed):
         _log(f"type_text: done via AX fast-path ({len(text)} chars)")
-        # AX path doesn't support combined Enter — fall through to separate call
+        # AX path doesn't support combined Enter — separate keypress. DEF-267:
+        # in-process CGEvent (~5 ms) when the target is frontmost (CGEvent goes
+        # to the frontmost app); osascript (~400 ms) otherwise.
         if enter_count > 0:
-            _osascript_press_enter(enter_count, app_name)
+            pid = getattr(snap, "app_pid", 0)
+            if not (pid and save_frontmost_pid() == pid
+                    and _post_return_key(enter_count)):
+                _osascript_press_enter(enter_count, app_name)
         return True
 
     _log(f"type_text: using osascript → {app_name or 'frontmost'}"

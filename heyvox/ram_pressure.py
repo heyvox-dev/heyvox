@@ -72,6 +72,53 @@ def macos_pressure_level() -> int | None:
         return None
 
 
+class _RusageInfoV0(ctypes.Structure):
+    """``struct rusage_info_v0`` from <sys/resource.h>."""
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+    ]
+
+
+def process_footprint_mb(pid: int | None = None) -> float | None:
+    """Return the process' physical footprint in MB, or ``None`` on failure.
+
+    DEF-265: RSS is blind to MLX. Metal buffers (model weights, MLX's buffer
+    cache) count toward the footprint — what Activity Monitor shows as
+    "Memory" — but barely toward RSS, and swapped-out pages drop out of RSS
+    entirely. Live case 2026-10-11: RSS 52 MB, footprint 6.7 GB (6.2 GB of it
+    Metal), so the RSS watchdog never fired. Read via ``proc_pid_rusage``
+    through libc, no subprocess spawn.
+    """
+    import os
+
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        libc.proc_pid_rusage.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.POINTER(_RusageInfoV0),
+        ]
+        libc.proc_pid_rusage.restype = ctypes.c_int
+        info = _RusageInfoV0()
+        rc = libc.proc_pid_rusage(
+            pid if pid is not None else os.getpid(), 0, ctypes.byref(info),
+        )
+        if rc != 0:
+            return None
+        return info.ri_phys_footprint / 1024 / 1024
+    except Exception:
+        return None
+
+
 def contention_snapshot() -> str:
     """Return a compact, log-ready "is the system under load right now" string.
 
