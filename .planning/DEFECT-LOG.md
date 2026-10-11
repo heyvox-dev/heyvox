@@ -1024,6 +1024,17 @@
 - **Found by**: ms timing in the live listener, then reproduced with a 3-line script (worker thread vs main thread).
 - **Would have caught earlier**: profiling in the same thread context the production code runs in. A standalone benchmark of a thread-sensitive API (AppKit) on the main thread measured a different operation.
 
+## DEF-270 — Orca dictation failed closed: the app was frontmost but reported no focused element for 2.4 s (DIAGNOSTIC SHIPPED 2026-10-11, root cause open)
+
+- **Date**: 2026-10-11
+- **Category**: platform
+- **Severity**: S3 (one transcript, left on the clipboard; Cmd+V recovers it)
+- **Symptom**: 20:28:50, `[live-focus] poll 20x 2399ms err=-25212` then `no match: live role '' vs lock 'AXTextArea'` → `fail_closed multi_field_no_shortcut`, error cue, toast. The lock had been captured at 20:28:40 with `leaf_role=AXTextArea`, Orca (running since 07:17) was frontmost, `provider.activate` took 228 ms (worktree already active, no probe terminal). Earlier pastes the same day matched on poll 1 in 54-124 ms.
+- **Root cause**: not established. Rejected: cold a11y tree (the tree answered the capture 7 s earlier, the flag was set right before polling, a standalone set+probe found focus in 54 ms afterwards), probe-terminal focus theft (T-007; activate was the plain `isActive` branch). Open hypotheses: focus really sat on no element for those seconds (Orca palette/tab re-render), or Chromium's a11y mode had dropped despite the flag.
+- **Fix** (diagnostic + one recovery step): `_poll_live_focus` cycles `AXManualAccessibility` False→True once after 10 empty reads, only when the app is the live frontmost app, and logs `a11y-toggled`; when it still finds nothing it logs one `[live-focus] diag:` line (frontmost pid vs target pid, AXFocusedWindow / AXMainWindow with title and child count, window count). `tests/test_def270_live_focus_novalue.py`.
+- **Found by**: Franz's report "warum hat das Einfügen gerade nicht funktioniert?", read from the paste log; second fail-closed in Orca that day (18:39 was a different cause: lock `AXWebArea` vs live `AXTextArea`).
+- **Would have caught earlier**: the poll logged only the error code. A NoValue result carried no window/frontmost context, so the first occurrence could not be classified. Next occurrence: read the `diag:` line; if `a11y-toggled` is followed by a match, the flag state was the cause and the toggle can move before the first poll.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
