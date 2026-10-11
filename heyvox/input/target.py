@@ -677,6 +677,57 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
             )
 
 
+_LIVE_FOCUS_POLLS = 20
+_LIVE_FOCUS_TOGGLE_AT = 10
+
+
+def _app_is_frontmost(pid: int) -> bool:
+    try:
+        from heyvox.input.frontmost import frontmost_app
+        front = frontmost_app()
+        return front is not None and front.processIdentifier() == pid
+    except Exception:
+        return False
+
+
+def _log_no_focus_diag(ax_app, pid: int) -> None:
+    """DEF-270: one line saying what the app's a11y tree looked like when it
+    reported no focused element, so the next occurrence can be told apart
+    (cold tree vs. focus really nowhere vs. other window). Never raises."""
+    from ApplicationServices import AXUIElementCopyAttributeValue as _copy
+
+    parts = []
+    try:
+        from heyvox.input.frontmost import frontmost_app
+        front = frontmost_app()
+        parts.append(
+            f"front_pid={front.processIdentifier() if front else None} "
+            f"target_pid={pid}"
+        )
+    except Exception as e:
+        parts.append(f"front=?({e!r})")
+    for attr in ("AXFocusedWindow", "AXMainWindow"):
+        try:
+            err, win = _copy(ax_app, attr, None)
+            if err != 0 or win is None:
+                parts.append(f"{attr}=err{err}")
+                continue
+            _, title = _copy(win, "AXTitle", None)
+            _, kids = _copy(win, "AXChildren", None)
+            parts.append(
+                f"{attr}=ok title={str(title or '')[:40]!r} "
+                f"children={len(kids) if kids is not None else '?'}"
+            )
+        except Exception as e:
+            parts.append(f"{attr}=exc({e!r})")
+    try:
+        err, wins = _copy(ax_app, "AXWindows", None)
+        parts.append(f"windows={len(wins) if err == 0 and wins is not None else f'err{err}'}")
+    except Exception as e:
+        parts.append(f"windows=exc({e!r})")
+    _log("[live-focus] diag: " + " ".join(parts))
+
+
 def _poll_live_focus(pid: int):
     """Return (focused_element, role) of the app's live AXFocusedUIElement.
 
@@ -699,18 +750,28 @@ def _poll_live_focus(pid: int):
     _log(f"[live-focus] a11y on {(_time.monotonic() - _ts) * 1000:.0f}ms")
     err, focused = -1, None
     _tf = _time.monotonic()
-    for _polls in range(1, 21):
+    _toggled = False
+    for _polls in range(1, _LIVE_FOCUS_POLLS + 1):
         _time.sleep(0.05)
         err, focused = AXUIElementCopyAttributeValue(
             ax_app, "AXFocusedUIElement", None
         )
         if err == 0 and focused is not None:
             break
+        if _polls == _LIVE_FOCUS_TOGGLE_AT and _app_is_frontmost(pid):
+            # DEF-270: the app is in front yet reports no focused element
+            # (Orca, 2026-10-11 20:28, 2.4 s of -25212 with the flag already
+            # set). Cycle the flag once so Chromium rebuilds its a11y tree;
+            # the remaining polls show whether that was the missing piece.
+            _toggled = True
+            AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", False)
+            AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
     _log(
         f"[live-focus] poll {_polls}x {(_time.monotonic() - _tf) * 1000:.0f}ms "
-        f"err={err}"
+        f"err={err}" + (" a11y-toggled" if _toggled else "")
     )
     if err != 0 or focused is None:
+        _log_no_focus_diag(ax_app, pid)
         return None, ""
     err, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
     return focused, (str(role) if err == 0 and role else "")
