@@ -188,6 +188,10 @@ MIC_SWITCH_REQUEST_FILE = f"{_TMP}/heyvox-mic-switch"
 HERALD_QUEUE_DIR = f"{_TMP}/herald-queue"
 HERALD_HISTORY_DIR = f"{_TMP}/herald-history"
 HERALD_CLAIM_DIR = f"{_TMP}/herald-claim"
+# Suppress markers: a sibling Stop hook that rejects a response (decision=block)
+# touches <session_id>__<md5(last_assistant_message)[:16]> here so the worker
+# does not speak the rejected text. Written by hooks outside this package.
+HERALD_SUPPRESS_DIR = f"{_TMP}/herald-suppress"
 
 # Herald log files
 HERALD_DEBUG_LOG = f"{_TMP}/herald-debug.log"

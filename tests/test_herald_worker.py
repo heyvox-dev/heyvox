@@ -21,6 +21,7 @@ import pytest
 from heyvox.herald.worker import (
     GERMAN_SPEECH_NOTICE,
     HeraldWorker,
+    _consume_suppress_marker,
     _is_temp_cwd,
     detect_language,
     detect_mood,
@@ -749,3 +750,59 @@ class TestTempCwd:
     @pytest.mark.parametrize("cwd", ["/Users/work/Personal/Source/vox", "/tmpfoo", ""])
     def test_non_temp_paths(self, cwd):
         assert not _is_temp_cwd(cwd)
+
+
+# ---------------------------------------------------------------------------
+# Hook suppress marker (frage-einzeln guard: rejected response must not be spoken)
+# ---------------------------------------------------------------------------
+
+
+def _stop_payload(message: str, session_id: str = "sess-1") -> str:
+    return json.dumps({"session_id": session_id, "last_assistant_message": message})
+
+
+def _marker_path(directory, message: str, session_id: str = "sess-1") -> Path:
+    import hashlib
+    digest = hashlib.md5(message.encode("utf-8")).hexdigest()[:16]
+    return Path(directory) / f"{session_id}__{digest}"
+
+
+class TestSuppressMarker:
+    def test_marker_present_is_consumed(self, tmp_path):
+        msg = "F1: a? F2: b? <tts>Two questions.</tts>"
+        marker = _marker_path(tmp_path, msg)
+        marker.touch()
+        assert _consume_suppress_marker(_stop_payload(msg), str(tmp_path)) is True
+        assert not marker.exists()
+
+    def test_marker_absent(self, tmp_path):
+        assert _consume_suppress_marker(_stop_payload("hello"), str(tmp_path)) is False
+
+    def test_corrected_message_is_not_suppressed(self, tmp_path):
+        """The marker is keyed on the rejected text; the rewrite must be spoken."""
+        _marker_path(tmp_path, "rejected <tts>Two questions here.</tts>").touch()
+        corrected = "fixed <tts>Should I merge now, yes or no?</tts>"
+        assert _consume_suppress_marker(_stop_payload(corrected), str(tmp_path)) is False
+
+    @pytest.mark.parametrize("raw", ["not json", "[]", "{}", '{"session_id": "s"}'])
+    def test_malformed_payload_never_suppresses(self, tmp_path, raw):
+        assert _consume_suppress_marker(raw, str(tmp_path)) is False
+
+    def test_process_response_skips_generation_when_marked(self, worker, tmp_path):
+        msg = "text <tts>This response was rejected by a hook.</tts>"
+        suppress_dir = tmp_path / "suppress"
+        suppress_dir.mkdir()
+        _marker_path(suppress_dir, msg).touch()
+        calls = []
+        worker._generate = lambda *a, **k: calls.append(a) or True
+        with patch("heyvox.herald.worker.HERALD_SUPPRESS_DIR", str(suppress_dir)):
+            assert worker.process_response(_stop_payload(msg)) is True
+        assert calls == []
+
+    def test_process_response_generates_without_marker(self, worker, tmp_path):
+        msg = "text <tts>This response is fine to speak.</tts>"
+        calls = []
+        worker._generate = lambda *a, **k: calls.append(a) or True
+        with patch("heyvox.herald.worker.HERALD_SUPPRESS_DIR", str(tmp_path / "none")):
+            assert worker.process_response(_stop_payload(msg)) is True
+        assert len(calls) == 1
