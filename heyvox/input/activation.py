@@ -13,6 +13,38 @@ import time as _time
 from typing import Callable, Optional
 
 
+def is_frontmost(pid: int) -> bool:
+    """True when `pid` is the live frontmost app (lsappinfo, DEF-260)."""
+    if not pid:
+        return False
+    from heyvox.input.frontmost import frontmost_app
+    try:
+        front = frontmost_app()
+        return bool(front) and front.processIdentifier() == pid
+    except Exception:
+        return False
+
+
+def activate_running_app(app) -> bool:
+    """Activate an NSRunningApplication unless it is already frontmost.
+
+    DEF-269: `activateWithOptions_` called off the main thread blocks ~1.0 s
+    (measured: 1001-1006 ms from a worker thread, 0-37 ms from the main
+    thread), and the paste path runs on a worker thread. Every Orca dictation
+    paid that second for an app that was already in front. Returns True when
+    the app was already frontmost (no call made), else activateWithOptions_'s
+    result.
+    """
+    import AppKit
+
+    try:
+        if is_frontmost(int(app.processIdentifier())):
+            return True
+    except Exception:
+        pass
+    return bool(app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps))
+
+
 def activate_pid(
     pid: int,
     app_name: str = "",
@@ -46,6 +78,10 @@ def activate_pid(
                 target_bundle = app.bundleIdentifier()
             except Exception:
                 pass
+            # DEF-269: already in front → skip the ~1 s off-main-thread call
+            # and the poll loop.
+            if is_frontmost(pid):
+                return True
             app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
             # Poll-verify: frontmost PID may lag or land on a sibling helper PID.
             from heyvox.input.frontmost import frontmost_app

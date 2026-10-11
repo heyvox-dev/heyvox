@@ -640,9 +640,8 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
                 .runningApplicationsWithBundleIdentifier_(lock.app_bundle_id)
             )
             if apps and len(apps) > 0:
-                apps[0].activateWithOptions_(
-                    AppKit.NSApplicationActivateIgnoringOtherApps
-                )
+                from heyvox.input.activation import activate_running_app
+                activate_running_app(apps[0])
                 bundle_activate_ok = True
         except Exception as e:
             _log(
@@ -746,7 +745,8 @@ def _try_activate_and_recapture(lock) -> bool:
             return False
         # NSApplicationActivateIgnoringOtherApps = 1 << 1
         _ta = _time.monotonic()
-        running.activateWithOptions_(1 << 1)
+        from heyvox.input.activation import activate_running_app
+        activate_running_app(running)
         _log(f"[activate-recapture] activate {(_time.monotonic() - _ta) * 1000:.0f}ms")
 
         focused, role_str = _poll_live_focus(pid)

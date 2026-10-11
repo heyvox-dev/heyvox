@@ -1013,6 +1013,17 @@
 - **Found by**: Franz noticed the placeholder in his own message during the paste-latency investigation (PR #56 timing).
 - **Would have caught earlier**: the DEF-259 tests covered only a lock that already carried the placeholder as its AXDescription. A test for each path into the AX setter (captured lock, recovered lock, focus-shortcut path) with a lock that has no description would have shown the gap; same for a dogfooding check "first dictation after restarting the target app".
 
+## DEF-269 — every paste spent ~1 s re-activating an app that was already in front: activateWithOptions_ blocks ~1 s off the main thread (FIXED 2026-10-11)
+
+- **Date**: 2026-10-11
+- **Category**: platform
+- **Severity**: S3 (~1.1 s of the ~1.4 s paste-target resolution on every Orca dictation; no loss)
+- **Symptom**: Orca dictations logged `tier_used=2 (live-focus match) elapsed_ms≈1400-1500` while the same `resolve_lock` took ~0.2 s from a standalone script. ms timing (PR #56/#57): `yank: app activate 1074ms`, `provider.activate 183ms`, live-focus poll 118 ms.
+- **Root cause**: `NSRunningApplication.activateWithOptions_` called from a non-main thread returns only after ~1.0 s (measured 1001-1006 ms from a worker thread, 0-37 ms from the main thread, same process, same target). The listener's paste path runs on a worker thread, and `_yank_back_app_and_workspace` activated the target unconditionally, although in the dictation case it is almost always already frontmost. `activate_pid` (used by the Conductor provider) re-activates up to 5 times in its poll loop, so up to ~5 s off the main thread. The standalone profiling had run on the main thread, which hid it.
+- **Fix**: `activation.activate_running_app()` skips the call when the app is the live frontmost app (lsappinfo); used by the yank and by `_try_activate_and_recapture`. `activate_pid` returns True immediately for an already-frontmost target. A target that is really in the background still pays the ~1 s (open).
+- **Found by**: ms timing in the live listener, then reproduced with a 3-line script (worker thread vs main thread).
+- **Would have caught earlier**: profiling in the same thread context the production code runs in. A standalone benchmark of a thread-sensitive API (AppKit) on the main thread measured a different operation.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
