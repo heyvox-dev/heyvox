@@ -610,6 +610,7 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
         return
 
     bundle_activate_ok = False
+    _ty = _time.monotonic()
     if lock.app_bundle_id:
         try:
             apps = (
@@ -629,6 +630,7 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
 
     if not bundle_activate_ok and lock.app_pid:
         _activate_app(lock.app_pid, lock.app_name or "")
+    _log(f"yank: app activate {(_time.monotonic() - _ty) * 1000:.0f}ms")
 
     if lock.workspace_id and profile is not None:
         provider = _workspace_provider_for(profile)
@@ -638,8 +640,13 @@ def _yank_back_app_and_workspace(lock, profile, config) -> None:
                 workspace_id=lock.workspace_id, session_id=lock.session_id
             )
             try:
+                _tp = _time.monotonic()
                 ok = provider.activate(identity, profile, pid=lock.app_pid)
-                _log(f"yank: provider.activate -> {ok} (ws={lock.workspace_id!r})")
+                _log(
+                    f"yank: provider.activate -> {ok} "
+                    f"{(_time.monotonic() - _tp) * 1000:.0f}ms "
+                    f"(ws={lock.workspace_id!r})"
+                )
             except Exception as e:
                 _log(f"yank: provider.activate raised {e!r}")
         else:
@@ -668,13 +675,18 @@ def _poll_live_focus(pid: int):
     ax_app = AXUIElementCreateApplication(pid)
     AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
     err, focused = -1, None
-    for _ in range(20):
+    _tf = _time.monotonic()
+    for _polls in range(1, 21):
         _time.sleep(0.05)
         err, focused = AXUIElementCopyAttributeValue(
             ax_app, "AXFocusedUIElement", None
         )
         if err == 0 and focused is not None:
             break
+    _log(
+        f"[live-focus] poll {_polls}x {(_time.monotonic() - _tf) * 1000:.0f}ms "
+        f"err={err}"
+    )
     if err != 0 or focused is None:
         return None, ""
     err, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
@@ -869,8 +881,13 @@ def resolve_lock(lock, config=None) -> PasteOutcome:
             elapsed_ms=elapsed,
         )
 
+    _tw = _time.monotonic()
     ax_app = AXUIElementCreateApplication(lock.app_pid)
     window = _find_window_by_number(ax_app, lock.window_number)
+    _log(
+        f"[PASTE] tier1 window lookup {(_time.monotonic() - _tw) * 1000:.0f}ms "
+        f"found={window is not None} role_path={len(lock.ax_role_path or ())}"
+    )
     if window is not None and lock.ax_role_path:
         leaf = _walk_role_path(window, lock.ax_role_path)
         if leaf is not None:
