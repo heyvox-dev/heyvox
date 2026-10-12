@@ -777,6 +777,126 @@ def _poll_live_focus(pid: int):
     return focused, (str(role) if err == 0 and role else "")
 
 
+# DEF-271: per app (bundle id), the role + AXDescription of the last field a
+# paste was proven to go into. When the app's live focus sits on a non-text
+# element at paste time, the field is searched by this identity and focused.
+# In-memory only: the first proven paste after a listener restart seeds it.
+_KNOWN_FIELDS: dict[str, tuple[str, str]] = {}
+_FIELD_SEARCH_MAX_NODES = 4000
+_REFOCUS_POLLS = 6
+
+
+def _remember_field(lock) -> None:
+    bundle_id = getattr(lock, "app_bundle_id", "")
+    role = getattr(lock, "leaf_role", "")
+    desc = getattr(lock, "leaf_description", None)
+    if bundle_id and role in _TEXT_ROLES and desc:
+        _KNOWN_FIELDS[bundle_id] = (role, desc)
+
+
+def _describe_element(element, hops: int = 3) -> str:
+    """DEF-271 diagnostic: role, description and DOM classes of an element and
+    its parents, e.g. "AXGroup[relative.flex] < AXGroup'Chat'[...]". Never raises."""
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue as _copy
+    except ImportError:
+        return "?"
+
+    def _get(el, attr):
+        try:
+            err, v = _copy(el, attr, None)
+            return v if err == 0 else None
+        except Exception:
+            return None
+
+    parts = []
+    el = element
+    for _ in range(hops):
+        if el is None:
+            break
+        desc = _get(el, "AXDescription")
+        classes = list(_get(el, "AXDOMClassList") or [])[:5]
+        parts.append(
+            f"{_get(el, 'AXRole') or '?'}"
+            + (f"{str(desc)[:40]!r}" if desc else "")
+            + f"[{'.'.join(str(c) for c in classes)}]"
+        )
+        el = _get(el, "AXParent")
+    return " < ".join(parts)
+
+
+def _find_fields(window, role: str, desc: str) -> tuple[list, int]:
+    """Elements under `window` with this AXRole and AXDescription. Stops at the
+    second match (only a unique match is used) or after _FIELD_SEARCH_MAX_NODES.
+    Returns (matches, nodes_visited)."""
+    from ApplicationServices import AXUIElementCopyAttributeValue as _copy
+
+    matches = []
+    stack = [window]
+    nodes = 0
+    while stack and nodes < _FIELD_SEARCH_MAX_NODES and len(matches) < 2:
+        el = stack.pop()
+        nodes += 1
+        err, r = _copy(el, "AXRole", None)
+        if err == 0 and str(r or "") == role:
+            err_d, d = _copy(el, "AXDescription", None)
+            if err_d == 0 and d and str(d) == desc:
+                matches.append(el)
+                continue
+        err_c, kids = _copy(el, "AXChildren", None)
+        if err_c == 0 and kids:
+            stack.extend(reversed(list(kids)))
+    return matches, nodes
+
+
+def _refocus_field(pid: int, window_number: int, role: str, desc: str):
+    """DEF-271: focus the one field in the target window that has this role and
+    AXDescription. Returns the element once the app reports it as focused, else
+    None (zero or several candidates, or the focus did not move). Never raises."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+            AXUIElementSetAttributeValue,
+        )
+
+        _ts = _time.monotonic()
+        ax_app = AXUIElementCreateApplication(pid)
+        window = _find_window_by_number(ax_app, window_number)
+        if window is None:
+            _log("[refocus] target window not found")
+            return None
+        matches, nodes = _find_fields(window, role, desc)
+        _log(
+            f"[refocus] {len(matches)} candidate(s) {role} {desc!r} in {nodes} "
+            f"nodes {(_time.monotonic() - _ts) * 1000:.0f}ms"
+        )
+        if len(matches) != 1:
+            return None
+        field = matches[0]
+        AXUIElementSetAttributeValue(field, "AXFocused", True)
+        for _ in range(_REFOCUS_POLLS):
+            _time.sleep(0.05)
+            err, focused = AXUIElementCopyAttributeValue(
+                ax_app, "AXFocusedUIElement", None
+            )
+            if err != 0 or focused is None:
+                continue
+            err_r, r = AXUIElementCopyAttributeValue(focused, "AXRole", None)
+            err_d, d = AXUIElementCopyAttributeValue(focused, "AXDescription", None)
+            if err_r == 0 and str(r or "") == role and err_d == 0 and str(d or "") == desc:
+                _log(
+                    f"[refocus] focused {role} {desc!r} "
+                    f"{(_time.monotonic() - _ts) * 1000:.0f}ms"
+                )
+                return focused
+        _log("[refocus] focus did not move to the field")
+        return None
+    except Exception as e:
+        _log(f"[refocus] exception: {e!r}")
+        return None
+
+
 def _try_activate_and_recapture(lock) -> bool:
     """Multi-monitor fix: when the mouse-target app was not OS-frontmost at
     capture (e.g. Slack visible on monitor 2 while Chrome is system-frontmost
@@ -811,21 +931,33 @@ def _try_activate_and_recapture(lock) -> bool:
         _log(f"[activate-recapture] activate {(_time.monotonic() - _ta) * 1000:.0f}ms")
 
         focused, role_str = _poll_live_focus(pid)
-        if focused is None:
-            _log(
-                f"[activate-recapture] AXFocusedUIElement still empty after "
-                f"activate (app={lock.app_name})"
-            )
-            return False
-        if role_str not in _TEXT_ROLES:
-            _log(
-                f"[activate-recapture] new focused role {role_str!r} is not "
-                f"a text field (app={lock.app_name})"
-            )
-            return False
+        refocused = False
+        if focused is None or role_str not in _TEXT_ROLES:
+            if focused is None:
+                _log(
+                    f"[activate-recapture] AXFocusedUIElement still empty after "
+                    f"activate (app={lock.app_name})"
+                )
+            else:
+                _log(
+                    f"[activate-recapture] new focused role {role_str!r} is not "
+                    f"a text field (app={lock.app_name}): "
+                    f"{_describe_element(focused)}"
+                )
+            # DEF-271: Orca had focus on a chat AXGroup at record start and at
+            # paste time (2026-10-12, 2 of 70 pastes) — the composer was still
+            # the only one in the window. Focus the field a paste last went into.
+            known = _KNOWN_FIELDS.get(getattr(lock, "app_bundle_id", ""))
+            if known is None:
+                _log("[refocus] no proven field remembered for this app")
+                return False
+            focused = _refocus_field(pid, getattr(lock, "window_number", 0), *known)
+            if focused is None:
+                return False
+            role_str, refocused = known[0], True
         _log(
             f"[activate-recapture] success: app={lock.app_name} "
-            f"new_focused_role={role_str!r}"
+            f"new_focused_role={role_str!r}" + (" (refocused)" if refocused else "")
         )
         # Mutate lock so caller's downstream tiers see the recovery.
         # TargetLock is a frozen dataclass — use object.__setattr__ to bypass.
@@ -834,8 +966,9 @@ def _try_activate_and_recapture(lock) -> bool:
         # DEF-268: the injector recognises an empty field's placeholder by the
         # lock's AXDescription; give the recovered lock the live one.
         _axid, _title, _desc = _capture_leaf_tiebreakers(focused)
-        if _desc and not getattr(lock, "leaf_description", None):
+        if _desc and (refocused or not getattr(lock, "leaf_description", None)):
             object.__setattr__(lock, "leaf_description", _desc)
+        _remember_field(lock)
         return True
     except Exception as e:
         _log(f"[activate-recapture] exception: {e}")
@@ -865,6 +998,23 @@ def _live_focus_matches_lock(lock) -> bool:
         return False
     try:
         focused, role_str = _poll_live_focus(pid)
+        if (focused is None or role_str not in _TEXT_ROLES) and expected.get(
+            "AXDescription"
+        ):
+            # DEF-271: focus left every text field (or the app reports none,
+            # DEF-270) — the captured field itself may still be there; focus it
+            # by the lock's own identity. A different text field keeps focus.
+            if focused is not None:
+                _log(
+                    f"[live-focus] focused element is not a text field "
+                    f"(app={lock.app_name}): {_describe_element(focused)}"
+                )
+            refocused = _refocus_field(
+                pid, getattr(lock, "window_number", 0), lock.leaf_role,
+                expected["AXDescription"],
+            )
+            if refocused is not None:
+                focused, role_str = refocused, lock.leaf_role
         if focused is None or role_str != lock.leaf_role:
             _log(
                 f"[live-focus] no match: live role {role_str!r} vs lock "
@@ -885,6 +1035,7 @@ def _live_focus_matches_lock(lock) -> bool:
                 )
                 return False
         _log(f"[live-focus] match: {lock.leaf_role} {expected} (app={lock.app_name})")
+        _remember_field(lock)
         return True
     except Exception as e:
         _log(f"[live-focus] exception: {e}")

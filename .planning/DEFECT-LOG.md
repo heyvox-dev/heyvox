@@ -1035,6 +1035,17 @@
 - **Found by**: Franz's report "warum hat das Einfügen gerade nicht funktioniert?", read from the paste log; second fail-closed in Orca that day (18:39 was a different cause: lock `AXWebArea` vs live `AXTextArea`).
 - **Would have caught earlier**: the poll logged only the error code. A NoValue result carried no window/frontmost context, so the first occurrence could not be classified. Next occurrence: read the `diag:` line; if `a11y-toggled` is followed by a match, the flag state was the cause and the toggle can move before the first poll.
 
+## DEF-271 — Orca dictation failed closed: focus sat on a chat AXGroup at record start and at paste time (FIXED 2026-10-12, cause of the focus move open)
+
+- **Date**: 2026-10-12
+- **Category**: ux
+- **Severity**: S3 (two transcripts that day, left on the clipboard; Cmd+V recovers them)
+- **Symptom**: 09:09:26 and 09:58:10, `[capture_lock] text_field=False leaf_role='AXGroup'`, then at paste `[activate-recapture] new focused role 'AXGroup' is not a text field` → `fail_closed no_text_field_at_start`, error cue, toast. 6 of 70 Orca captures that day started on an AXGroup; in 4 the composer had focus again by paste time and the paste succeeded.
+- **Root cause**: not established for the focus move itself. Rejected: Escape to stop TTS (the event tap consumes it, `ptt.py:556`; only one of the six cases had an Escape before it). Open: a click into the chat transcript, a widget taking focus, or Orca moving focus after a turn. Whatever the cause, the paste path had no way back: activate-recapture polled once and gave up although the window held exactly one composer (live probe: 1 match in ~700 nodes, 80-95 ms).
+- **Fix**: (1) the non-text focused element is logged with role, description and DOM classes of it and two parents (`_describe_element`), so the next case names what held the focus; (2) per app (bundle id) the role + AXDescription of the last field a paste was proven to go into is remembered (`_KNOWN_FIELDS`, in-memory); when focus is on a non-text element, `_refocus_field` searches the target window, focuses the field only when exactly one matches, and verifies the app then reports it as focused, else fail-closed as before; (3) Tier 1b does the same with the lock's own field identity when live focus is on no text field (covers DEF-270's NoValue case too); a different text field keeps its focus. Live-verified against Orca: focus moved from "Find files" back to the composer in 143 ms. `tests/test_def271_orca_refocus_composer.py`.
+- **Found by**: Franz's report "paste hat mehrmals nicht funktioniert", read from the paste log.
+- **Would have caught earlier**: the recapture branch logged only the role of the wrong element, so the first occurrences could not be classified; and the recovery ladder had no step for "app in front, field present, focus elsewhere in the same window", because the multi-monitor recapture assumed a non-text focus means the user is somewhere else.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
