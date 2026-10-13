@@ -23,6 +23,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The listener no longer crashes hours after a microphone stall. A read that
+  stalled mid-chunk left a reader thread behind on a stream that recovery then
+  closed; the thread later read freed memory and took the process down, once
+  right after a finished transcription, losing the dictation (DEF-272). The
+  main loop now reads only full chunks, and a read that still times out
+  restarts the process cleanly.
+
 - Push-to-talk keys `right_cmd`, `right_alt`, `right_ctrl` and `right_shift`
   (and the countdown cancel key) no longer fire on every Command press. Their
   masks carried the generic Command flag besides the device bit, so left or
