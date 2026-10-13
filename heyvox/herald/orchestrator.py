@@ -110,7 +110,7 @@ class OrchestratorConfig:
     tts_min_volume: float = 0.10
 
     # Queue caps
-    max_queued: int = 10   # drop oldest messages when queue exceeds this
+    max_queued: int = 10   # messages (not sentence parts); drop oldest waiting ones beyond this
 
     # Media pause
     media_pause: bool = True
@@ -1029,14 +1029,20 @@ def _purge_message_parts(msg_prefix: str, queue_dir: Path, debug_log: Path) -> i
     return purged
 
 
-def _enforce_queue_cap(cfg: "OrchestratorConfig", debug_log: Path) -> int:
-    """Drop oldest complete messages when queue exceeds cap.
+def _enforce_queue_cap(
+    cfg: "OrchestratorConfig", debug_log: Path, active_prefix: str = "",
+) -> int:
+    """Drop the oldest waiting messages when more than ``max_queued`` messages are queued.
+
+    DEF-273: the cap counts MESSAGES (distinct ``<prefix>-NN.wav`` groups), not
+    files. Counting files cut every message longer than ``max_queued`` sentence
+    parts down to its first sentence, and dropping from the oldest prefix hit
+    the message that was playing. ``active_prefix`` (the message in flight) is
+    never dropped; only messages that have not started yet are.
 
     Returns number of files dropped.
     """
     queue_wavs = sorted(cfg.queue_dir.glob("*.wav"))
-    if len(queue_wavs) <= cfg.max_queued:
-        return 0
 
     # Group by message prefix
     messages: dict[str, list[Path]] = {}
@@ -1044,12 +1050,19 @@ def _enforce_queue_cap(cfg: "OrchestratorConfig", debug_log: Path) -> int:
         prefix = wav.name.split("-")[0] if "-" in wav.name else wav.name
         messages.setdefault(prefix, []).append(wav)
 
-    # Drop oldest complete messages until under cap
+    if len(messages) <= cfg.max_queued:
+        return 0
+
+    # Drop oldest waiting messages until under cap
     dropped = 0
+    remaining = len(messages)
     msg_prefixes = list(messages.keys())  # already sorted (timestamp-based names)
     for prefix in msg_prefixes:
-        if len(queue_wavs) - dropped <= cfg.max_queued:
+        if remaining <= cfg.max_queued:
             break
+        if prefix == active_prefix:
+            continue
+        remaining -= 1
         parts = messages[prefix]
         for wav in parts:
             wav.unlink(missing_ok=True)
@@ -1412,7 +1425,7 @@ class HeraldOrchestrator:
         try:
             while not self._stop_event.is_set():
                 # Enforce queue cap before picking next file
-                _enforce_queue_cap(cfg, debug_log)
+                _enforce_queue_cap(cfg, debug_log, active_prefix=last_msg_prefix)
 
                 # Find next WAV in queue (sorted by name = timestamp order)
                 queue_wavs = sorted(cfg.queue_dir.glob("*.wav"))
