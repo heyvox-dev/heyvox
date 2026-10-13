@@ -23,6 +23,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Long spoken announcements play to the end again. The Herald queue limit
+  counted sentence parts instead of messages, so any announcement over ten
+  sentences was cut after the first one; it now counts messages and never
+  drops the one that is playing (DEF-273).
+
 - The listener no longer crashes hours after a microphone stall. A read that
   stalled mid-chunk left a reader thread behind on a stream that recovery then
   closed; the thread later read freed memory and took the process down, once

@@ -1058,6 +1058,17 @@
 - **Found by**: Franz's report "HeyVox hat sich beim Diktieren aufgehängt, Diktat verloren", read from the macOS crash reports.
 - **Would have caught earlier**: the 2026-10-07 crash report sat unread in DiagnosticReports; nothing surfaces a listener SIGSEGV (launchd just relaunches). And the timeout path assumed an abandoned thread is harmless, without checking what the abandoned native call does with memory freed under it.
 
+## DEF-273 — Herald cut every long announcement after its first sentence: the queue cap counted sentence parts and dropped the message in flight (FIXED 2026-10-13)
+
+- **Date**: 2026-10-13 (first described 2026-09-20, parked)
+- **Category**: regression
+- **Severity**: S2 (long spoken summaries silently reduced to one sentence; common for workspaces whose TTS runs long)
+- **Symptom**: `ORCH: dropped N parts of <ts> (queue cap=10)` right after part 01 starts. 2026-10-13: 10:59:56 18 of 19 parts (89.6 s of audio, 12.5 s played), plus 07:59, 08:03, 08:08; three more on 10-12. Franz: "TTS war unterbrochen, ein Teil hat gefehlt".
+- **Root cause**: `orchestrator._enforce_queue_cap` (added 2026-04-13, cf120b18b) compared the number of WAV files with `max_queued=10`, although its docstring and the config comment speak of messages. The worker writes one WAV per sentence part, so any message over ten parts tripped the cap, and the loop dropped from the oldest prefix, which is the message currently playing. No test covered the function.
+- **Fix**: the cap counts distinct message prefixes; the message in flight (`last_msg_prefix`) is never dropped; only the oldest messages that have not started go. `tests/test_def273_queue_cap_messages.py` (one 19-part message, a 20-part message not yet started, 12 two-part messages, protected in-flight head).
+- **Found by**: Franz's report; the 2026-09-20 analysis had the evidence and the proposed fix but stayed open for three weeks.
+- **Would have caught earlier**: a unit test for the cap with a realistic multi-part message — the unit mismatch (files vs messages) is visible with the first long message. And a silent drop of content the user is listening to should surface somewhere other than a debug log.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
