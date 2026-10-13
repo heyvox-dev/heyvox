@@ -1340,11 +1340,16 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                 # without raising IOError, holding the GIL and freezing
                 # the entire process (watchdog threads can't run either).
                 _read_avail = devices.stream.get_read_available()
-                if _read_avail < 1:
-                    # No data ready — check for prolonged stall.
-                    # Must check < 1, not < chunk_size: Bluetooth SCO
-                    # delivers in 1024-frame periods (< chunk_size 1280)
-                    # but stream.read() accumulates internally.
+                if _read_avail < chunk_size:
+                    # Not a full chunk yet — check for prolonged stall.
+                    # DEF-272: wait for a FULL chunk, not just 1 frame. PortAudio's
+                    # blocking ReadStream (pa_mac_core_blocking.c) busy-waits on
+                    # the same ring buffer get_read_available() reports, with no
+                    # stream-state check, so reading more than is available
+                    # can block forever once the device stalls mid-chunk;
+                    # reading <= available never blocks (single consumer).
+                    # Bluetooth SCO's 1024-frame periods still work: the ring
+                    # buffer (>= 3 x chunk_size) accumulates until >= 1280.
                     _stall = time.monotonic() - ctx.last_read_time
                     # DEF-132: a freshly-(re)selected mic — especially Bluetooth
                     # after an A2DP→HFP renegotiation — can take several seconds
@@ -1371,26 +1376,36 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                     time.sleep(0.01)  # Brief yield, don't spin
                     continue
 
-                # Guarded read: get_read_available() can lie after AUHAL
-                # errors, causing stream.read() to block indefinitely.
-                # Use a thread with timeout to prevent main loop freeze.
+                # Guarded read: with the full-chunk gate above this should never
+                # block, but keep the timeout as a backstop so the main loop
+                # can't freeze if PortAudio ever misbehaves.
                 try:
                     _raw = _read_executor.submit(
                         devices.stream.read, chunk_size, False
                     ).result(timeout=3.0)
                 except (_cf.TimeoutError, TimeoutError):
                     _stall = time.monotonic() - ctx.last_read_time
-                    log(f"WARNING: stream.read() blocked for 3s (stall={_stall:.1f}s), recovering")
-                    # Kill the stuck executor and create a fresh one
-                    _read_executor.shutdown(wait=False, cancel_futures=True)
-                    _read_executor = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-read")
-                    if not devices.handle_io_error():
-                        ctx.last_read_time = time.monotonic()
-                        continue
-                    model.reset()
-                    consecutive_errors = 0
-                    ctx.last_read_time = time.monotonic()
-                    continue
+                    # DEF-272: do NOT recover in-process. The stuck reader thread
+                    # can't be interrupted and keeps polling the stream's ring
+                    # buffer; handle_io_error() would close the stream and free
+                    # that buffer under it, and the orphan later memmoves from
+                    # freed memory -> SIGSEGV hours later (crashes 2026-10-07 and
+                    # 2026-10-13, the second one lost a finished dictation). A
+                    # fresh process image is the only state without the orphan.
+                    log(f"WARNING: stream.read() blocked for 3s (stall={_stall:.1f}s) — "
+                        f"restarting process (DEF-272: an orphaned reader must not outlive its stream)")
+                    hud_send({"type": "error", "text": "Mic stalled — restarting"})
+                    time.sleep(0.5)
+                    _release_singleton()
+                    try:
+                        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+                    except Exception as _rd_exc:
+                        log(f"WATCHDOG: execv failed ({_rd_exc}), falling back to subprocess restart")
+                        import subprocess as _sp
+                        _sp.Popen([sys.executable, "-m", "heyvox.main"],
+                                  start_new_session=True)
+                        ctx.shutdown.set()
+                        break
                 audio = np.frombuffer(_raw, dtype=np.int16)
                 # DEF-101: per-mic software capture gain. BT-HFP devices (G435
                 # etc.) deliver a low level the macOS input slider can't lift
