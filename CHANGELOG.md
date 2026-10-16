@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- STT engine `parakeet` (`stt.local.engine: parakeet`): NVIDIA Parakeet TDT
+  0.6B v3 via sherpa-onnx, CPU int8, multilingual. On real German dictations
+  it decoded 3–15 s clips in 0.1–0.4 s versus 0.8–0.9 s for MLX
+  whisper-large-v3-turbo-german. The learned glossary becomes hotwords, audio
+  gets 0.5 s of silence padding and is cut at pauses into ≤30 s chunks, and
+  an empty result for real audio is re-run with `mlx_model`
+  (`stt.local.parakeet_fallback`). Model folder: `stt.local.parakeet_dir`
+  (sherpa-onnx `asr-models` release `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`).
+
 ### Changed
 
 - Herald no longer switches the workspace on its own when a message is

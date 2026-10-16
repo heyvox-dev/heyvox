@@ -1,9 +1,11 @@
 """
 Speech-to-text engine management for heyvox.
 
-Supports two backends:
+Supports three backends:
 - "mlx": MLX Whisper (Metal GPU, Apple Silicon only) — fast, preferred
 - "sherpa": sherpa-onnx Whisper (CPU, int8 quantized) — universal fallback
+- "parakeet": sherpa-onnx Parakeet TDT 0.6B v3 (CPU, int8) — 2-6x faster than
+  german-q4 on short dictations (bench 2026-10-16), glossary as hotwords
 
 MLX model is lazy-loaded on first use and unloaded after idle timeout
 to free ~855MB of GPU/unified memory when not dictating.
@@ -107,6 +109,28 @@ from heyvox.constants import DEFAULT_SAMPLE_RATE  # noqa: E402
 
 # Global sherpa recognizer (initialized once, reused across calls)
 _recognizer = None
+
+# Engine chosen by init_local_stt. preload_model()/model_loaded() are called
+# engine-agnostically from recording.py and must not load MLX for parakeet.
+_engine: str = "mlx"
+
+# Parakeet state (engine "parakeet")
+_parakeet = None                 # sherpa_onnx.OfflineRecognizer, loaded at init
+_parakeet_fallback: bool = False  # re-run empty results with the MLX model
+# HeyVox trims leading silence; Parakeet garbles or drops the first words of
+# short commands without some context ("Review die Antworten" -> "Wie viel die
+# Antworten"). 0.5 s of zeros on both ends fixed 3 of 4 such clips and was
+# neutral on long ones (bench 2026-10-16).
+_PARAKEET_PAD_SECS = 0.5
+# The encoder sees the whole input at once, so memory grows with length
+# (0.9 GB at <=15 s, 2.0 GB at 95 s, measured). Whisper-sized chunks bound it.
+_PARAKEET_CHUNK_SECS = 30.0
+_PARAKEET_CUT_SEARCH_SECS = 5.0  # look this far back from a chunk end for a pause
+# Below this, an empty result is most likely no speech at all — no fallback.
+_PARAKEET_FALLBACK_MIN_SECS = 1.0
+# MLX fallback model stays resident at most this long, not unload_secs (which
+# may be a day): it only serves the rare empty result.
+_PARAKEET_FALLBACK_UNLOAD_SECS = 300.0
 
 # MLX lazy-load state
 _mlx_model_id: str = ""
@@ -273,6 +297,8 @@ def preload_model() -> None:
     user stops talking.
     """
     global _mlx_last_use
+    if _engine == "parakeet":
+        return  # loaded at init; MLX is only the lazy fallback
     with _mlx_lock:
         if _mlx_loaded.is_set():
             _mlx_last_use = time.time()
@@ -292,6 +318,102 @@ def _model_supports_glossary(model_id: str) -> bool:
     return "turbo" in (model_id or "").lower()
 
 
+def _parakeet_bpe_vocab(tokens_path: str, out_dir: str) -> str:
+    """Write the sentencepiece-style vocab sherpa-onnx needs to encode hotwords.
+
+    The sherpa-onnx Parakeet export ships tokens.txt but no bpe.vocab. Its ids
+    match NVIDIA's BPE tokenizer 1:1 (checked 2026-10-16, 8192 pieces), and
+    sentencepiece BPE scores a piece by -merge rank, so "piece\\t-id" is the
+    same file. Returns its path.
+    """
+    out = os.path.join(out_dir, "bpe.vocab")
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(tokens_path):
+        return out
+    lines = []
+    with open(tokens_path, encoding="utf-8") as f:
+        for line in f:
+            piece, _, idx = line.rstrip("\n").rpartition(" ")
+            if piece and idx.isdigit():
+                lines.append(f"{piece}\t{-int(idx)}\n")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    return out
+
+
+def _init_parakeet(model_dir: str, threads: int, initial_prompt: str) -> None:
+    """Load the Parakeet recognizer; the glossary becomes hotwords (beam search)."""
+    global _parakeet
+    import sherpa_onnx
+    from platformdirs import user_cache_dir
+
+    files = {name: os.path.join(model_dir, f"{name}.int8.onnx")
+             for name in ("encoder", "decoder", "joiner")}
+    files["tokens"] = os.path.join(model_dir, "tokens.txt")
+    missing = [p for p in files.values() if not os.path.exists(p)]
+    if missing:
+        _log(f"FATAL: Parakeet model file(s) not found: {', '.join(missing)}")
+        _log("Download sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 from "
+             "https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models "
+             "and set stt.local.parakeet_dir to the extracted folder.")
+        sys.exit(1)
+
+    kwargs = dict(**files, num_threads=threads, sample_rate=DEFAULT_SAMPLE_RATE,
+                  feature_dim=128, model_type="nemo_transducer",
+                  decoding_method="greedy_search")
+    hotwords = initial_prompt.split()
+    if hotwords:
+        # Hotwords only work with modified_beam_search (sherpa-onnx 1.12,
+        # offline-recognizer-transducer-nemo-impl.h). Generated files go to the
+        # cache dir: the model dir may belong to another app and be read-only.
+        cache = os.path.join(user_cache_dir("heyvox"), "parakeet")
+        os.makedirs(cache, exist_ok=True)
+        hw_file = os.path.join(cache, "hotwords.txt")
+        with open(hw_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(hotwords) + "\n")
+        kwargs.update(decoding_method="modified_beam_search", hotwords_file=hw_file,
+                      hotwords_score=1.5, modeling_unit="bpe",
+                      bpe_vocab=_parakeet_bpe_vocab(files["tokens"], cache))
+    t0 = time.perf_counter()
+    _parakeet = sherpa_onnx.OfflineRecognizer.from_transducer(**kwargs)
+    _log(f"Local STT ready (Parakeet sherpa-onnx CPU int8, {threads} threads, "
+         f"hotwords={len(hotwords)}, loaded in {time.perf_counter() - t0:.1f}s)")
+
+
+def _split_at_pauses(samples: np.ndarray, sample_rate: int) -> list[np.ndarray]:
+    """Cut audio into <= _PARAKEET_CHUNK_SECS pieces, each ending at the quietest
+    100 ms in the last _PARAKEET_CUT_SEARCH_SECS, so cuts land between words."""
+    max_len = int(_PARAKEET_CHUNK_SECS * sample_rate)
+    search = int(_PARAKEET_CUT_SEARCH_SECS * sample_rate)
+    win = sample_rate // 10
+    chunks = []
+    start = 0
+    while len(samples) - start > max_len:
+        lo = start + max_len - search
+        region = samples[lo:start + max_len]
+        n = len(region) // win
+        energy = (region[:n * win].reshape(n, win) ** 2).mean(axis=1)
+        cut = lo + int(np.argmin(energy)) * win + win // 2
+        chunks.append(samples[start:cut])
+        start = cut
+    chunks.append(samples[start:])
+    return chunks
+
+
+def _parakeet_transcribe(samples: np.ndarray, sample_rate: int) -> str:
+    _boost_transcribe_thread_priority()
+    pad = np.zeros(int(_PARAKEET_PAD_SECS * sample_rate), dtype=np.float32)
+    parts = []
+    for chunk in _split_at_pauses(samples, sample_rate):
+        stream = _parakeet.create_stream()
+        stream.accept_waveform(sample_rate, np.concatenate([pad, chunk, pad]))
+        _parakeet.decode_stream(stream)
+        text = stream.result.text.strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
 def init_local_stt(
     engine: str = "mlx",
     mlx_model: str = "mlx-community/whisper-small-mlx",
@@ -301,14 +423,16 @@ def init_local_stt(
     log_fn: Callable[[str], None] | None = None,
     initial_prompt: str = "",
     unload_secs: float = 300.0,
+    parakeet_dir: str = "",
+    parakeet_fallback: bool = True,
 ) -> None:
     """Initialize local STT engine.
 
     For MLX: stores config but does NOT load the model (lazy loading).
-    For sherpa: loads immediately (small model, always needed).
+    For sherpa and parakeet: loads immediately.
 
     Args:
-        engine: "mlx" (Metal GPU) or "sherpa" (CPU int8).
+        engine: "mlx" (Metal GPU), "sherpa" (CPU int8) or "parakeet" (CPU int8).
         mlx_model: HuggingFace repo ID for MLX model.
         model_dir: Directory containing sherpa-onnx model files.
         language: Language code (e.g. "en") or "" for auto-detect.
@@ -316,10 +440,34 @@ def init_local_stt(
         log_fn: Optional callable(str) for log messages. Defaults to print.
         initial_prompt: Rendered glossary string for MLX Whisper biasing (Phase 16).
         unload_secs: Idle seconds before the MLX model is unloaded from RAM.
+        parakeet_dir: Directory with the sherpa-onnx Parakeet int8 export.
+        parakeet_fallback: Re-run empty Parakeet results with ``mlx_model``.
     """
     global _recognizer, _mlx_model_id, _mlx_language, _log_fn, _mlx_initial_prompt
-    global _mlx_unload_secs, _mlx_load_ref
+    global _mlx_unload_secs, _mlx_load_ref, _engine, _parakeet_fallback
     _log_fn = log_fn
+    _engine = engine
+
+    if engine == "parakeet":
+        try:
+            import sherpa_onnx  # noqa: F401
+        except ImportError:
+            _log("ERROR: sherpa-onnx is not installed. Install with: pip install sherpa-onnx>=1.0")
+            sys.exit(1)
+        _init_parakeet(parakeet_dir, threads, initial_prompt)
+        # Fallback runs the MLX model lazily, like engine "mlx" without preload
+        # and with a short idle unload. Same glossary gate (DEF-152).
+        _parakeet_fallback = parakeet_fallback
+        if parakeet_fallback:
+            _mlx_model_id = mlx_model
+            _mlx_load_ref = ""
+            _mlx_language = language
+            _mlx_initial_prompt = initial_prompt if _model_supports_glossary(mlx_model) else ""
+            _mlx_unload_secs = min(unload_secs, _PARAKEET_FALLBACK_UNLOAD_SECS) \
+                if unload_secs > 0 else _PARAKEET_FALLBACK_UNLOAD_SECS
+            _log(f"Parakeet fallback on empty result: {mlx_model} "
+                 f"(lazy, unload={int(_mlx_unload_secs)}s)")
+        return
 
     if engine == "mlx":
         _mlx_model_id = mlx_model
@@ -397,6 +545,34 @@ def transcribe_audio(
 
     audio = np.concatenate(audio_chunks)
     samples = audio.astype(np.float32) / 32768.0
+
+    if engine == "parakeet":
+        if _parakeet is None:
+            _log("ERROR: Parakeet not initialized — call init_local_stt(engine='parakeet')")
+            return ""
+        # DEF-221: same orphan gate as the other engines.
+        if not _wait_for_orphan():
+            _log(
+                f"ERROR: previous timed-out transcription still running after "
+                f"{_ORPHAN_WAIT_SECS:.0f}s — skipping this transcription"
+            )
+            return ""
+        try:
+            text = _run_with_timeout(
+                lambda: _parakeet_transcribe(samples, sample_rate), _TRANSCRIBE_TIMEOUT)
+        except FuturesTimeout:
+            _log(f"ERROR: Parakeet transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
+            text = ""
+        except Exception as e:
+            _log(f"ERROR: Parakeet transcription failed: {e}")
+            text = ""
+        audio_secs = len(samples) / sample_rate
+        if not text and _parakeet_fallback and audio_secs >= _PARAKEET_FALLBACK_MIN_SECS:
+            _log(f"Parakeet returned nothing for {audio_secs:.1f}s audio — "
+                 f"falling back to {_mlx_model_id}")
+            text = transcribe_audio(audio_chunks, engine="mlx", mlx_model=_mlx_model_id,
+                                    language=language, sample_rate=sample_rate)
+        return text
 
     if engine == "mlx":
         # DEF-081: hard 30s splits cut mid-sentence and leaked silence/partial
@@ -578,8 +754,12 @@ def transcribe_audio(
 def model_loaded() -> bool:
     """Return True if the MLX model is currently loaded in memory.
 
-    Kept for test_stress.py memory introspection.
+    Kept for test_stress.py memory introspection. For engine "parakeet" this
+    reports the Parakeet recognizer (loaded at init) — recording.py uses it as
+    the warm/cold tag of the live engine.
     """
+    if _engine == "parakeet":
+        return _parakeet is not None
     return _mlx_loaded.is_set()
 
 

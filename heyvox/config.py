@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from platformdirs import user_config_dir
+from platformdirs import user_config_dir, user_data_dir
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
 from heyvox.constants import LOG_FILE_DEFAULT
 
@@ -82,15 +82,26 @@ def _default_stt_engine() -> str:
     return "mlx" if platform.machine() == "arm64" else "sherpa"
 
 
+def _default_parakeet_dir() -> str:
+    return str(Path(user_data_dir("heyvox")) / "models" / "parakeet-tdt-0.6b-v3-int8")
+
+
 class STTLocalConfig(BaseModel):
-    """Local STT engine configuration (MLX Whisper or sherpa-onnx)."""
-    engine: str = Field(default_factory=_default_stt_engine)
+    """Local STT engine configuration (MLX Whisper, sherpa-onnx Whisper or Parakeet)."""
+    engine: str = Field(default_factory=_default_stt_engine)  # mlx | sherpa | parakeet
     mlx_model: str = "mlx-community/whisper-small-mlx"
     model_dir: str = "models/sherpa-onnx-whisper-small"
     language: str = ""
     threads: int = 4
     initial_prompt: str = ""   # rendered glossary from `heyvox learn-vocab` (Phase 16)
     unload_secs: float = 300.0  # idle seconds before MLX model is unloaded from RAM
+    # engine "parakeet": sherpa-onnx export of NVIDIA Parakeet TDT 0.6B v3
+    # (encoder/decoder/joiner .int8.onnx + tokens.txt). Multilingual, no language
+    # setting; the glossary becomes hotwords.
+    parakeet_dir: str = Field(default_factory=_default_parakeet_dir)
+    # Re-run with mlx_model when Parakeet returns nothing for real audio
+    # (seen once in 23 real dictations, 2026-10-16). Needs mlx-whisper.
+    parakeet_fallback: bool = True
 
 
 class STTConfig(BaseModel):
@@ -1227,9 +1238,14 @@ stt:
   backend: local           # "local" only for now
 
   local:
-    engine: mlx            # "mlx" (Apple Silicon) or "sherpa-onnx" (CPU)
+    engine: mlx            # "mlx" (Apple Silicon), "sherpa" (CPU) or "parakeet" (CPU)
     mlx_model: mlx-community/whisper-small-mlx
     model_dir: models/sherpa-onnx-whisper-small
+    # parakeet: model dir with encoder/decoder/joiner.int8.onnx + tokens.txt from
+    # sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 (github.com/k2-fsa/sherpa-onnx
+    # releases, asr-models). Default: <app data>/models/parakeet-tdt-0.6b-v3-int8
+    # parakeet_dir: /path/to/parakeet-tdt-0.6b-v3-int8
+    # parakeet_fallback: true  # re-run with mlx_model when Parakeet returns nothing
     language: ""           # Empty = auto-detect. Set to "en" for faster English-only
     threads: 4
 
