@@ -846,6 +846,8 @@ def _setup(config: HeyvoxConfig):
             log_fn=log,
             initial_prompt=config.stt.local.initial_prompt,   # Phase 16
             unload_secs=config.stt.local.unload_secs,
+            parakeet_dir=os.path.expanduser(config.stt.local.parakeet_dir),
+            parakeet_fallback=config.stt.local.parakeet_fallback,
         )
         # Start-preload: warm the MLX model at daemon startup instead of lazily
         # on the first recording. Every daemon (re)start otherwise makes the

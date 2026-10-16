@@ -32,7 +32,7 @@ heyvox/
 ├── audio/
 │   ├── mic.py           # Microphone management, device priority
 │   ├── wakeword.py      # openwakeword integration
-│   ├── stt.py           # STT engines (MLX Whisper, sherpa-onnx)
+│   ├── stt.py           # STT engines (MLX Whisper, sherpa-onnx Whisper, Parakeet)
 │   ├── tts.py           # TTS worker (Kokoro)
 │   ├── cues.py          # Audio feedback (afplay)
 │   ├── echo.py          # Echo suppression
