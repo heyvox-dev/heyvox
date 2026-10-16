@@ -25,7 +25,7 @@ from heyvox.herald.orchestrator import (
     OrchestratorConfig,
     _enforce_singleton,
     _is_paused,
-    _duck_audio,
+    _apply_tts_volume,
     _restore_audio,
     _herald_log,
     _get_verbosity,
@@ -111,10 +111,10 @@ class TestOrchestratorConfig:
         cfg = OrchestratorConfig()
         assert cfg.poll_interval == pytest.approx(0.1)
 
-    def test_default_duck_level(self):
+    def test_default_volume_handling(self):
         cfg = OrchestratorConfig()
-        assert cfg.duck_level == pytest.approx(0.03)
         assert cfg.duck_enabled is True
+        assert cfg.tts_min_volume == pytest.approx(0.10)
 
     def test_default_switch_countdown_secs(self):
         cfg = OrchestratorConfig()
@@ -189,196 +189,168 @@ class TestIsPaused:
 
 
 # ---------------------------------------------------------------------------
-# _duck_audio / _restore_audio tests
+# _apply_tts_volume / _restore_audio tests
 #
-# Note: _duck_audio/_restore_audio import from heyvox.herald.coreaudio
-# via inline imports. Patch must target heyvox.herald.coreaudio directly.
+# Note: both import from heyvox.herald.coreaudio via inline imports. Patch
+# must target heyvox.herald.coreaudio directly.
 # ---------------------------------------------------------------------------
 
 
-class TestAudioDucking:
-    @pytest.fixture(autouse=True)
-    def _reset_volume_cache(self):
-        """Cache state leaks between tests — DEF-072 sees stale 0.03 from a
-        prior duck and treats it as 'looks bogus, skip', then mock_set never
-        fires. Invalidate before AND after each test to keep them isolated."""
+class _FakeDevice:
+    """One CoreAudio output device whose slider the test (the "user") moves."""
+
+    def __init__(self, vol: float, dev_id: int = 7, alive: bool = True):
+        self.vol = vol
+        self.dev_id = dev_id
+        self.alive = alive
+        self.sets: list[float] = []
+
+    def get(self, dev_id):
+        assert dev_id == self.dev_id
+        return self.vol
+
+    def set(self, dev_id, vol):
+        assert dev_id == self.dev_id
+        self.vol = vol
+        self.sets.append(vol)
+        return True
+
+
+@pytest.fixture
+def device():
+    """Patch CoreAudio with a single fake device, initially at 50 %."""
+    from heyvox.herald import coreaudio
+    coreaudio._invalidate_volume_cache()
+    dev = _FakeDevice(0.5)
+    with patch("heyvox.herald.coreaudio._get_default_output_device", return_value=dev.dev_id), \
+            patch("heyvox.herald.coreaudio._get_volume_coreaudio", side_effect=dev.get), \
+            patch("heyvox.herald.coreaudio._set_volume_coreaudio", side_effect=dev.set), \
+            patch("heyvox.herald.coreaudio._is_coreaudio_device_alive",
+                  side_effect=lambda _id: dev.alive):
+        yield dev
+    coreaudio._invalidate_volume_cache()
+
+
+class TestTtsVolume:
+    def test_volume_above_floor_untouched(self, tmp_path, device):
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        assert _apply_tts_volume(cfg, cfg.debug_log) is None
+        _restore_audio(None, cfg, cfg.debug_log)
+        assert device.sets == []
+        assert device.vol == pytest.approx(0.5)
+        assert not cfg.original_vol_file.exists()
+
+    def test_def274_user_change_between_messages_survives(self, tmp_path, device):
+        """DEF-274: the old code captured 0.50 at the first message and wrote
+        it back at the next message and at queue end, undoing the user's
+        change to 0.30 made while the queue was playing."""
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        original = _apply_tts_volume(cfg, cfg.debug_log)
+        device.vol = 0.30  # user moves the slider mid-run
+        original = _apply_tts_volume(cfg, cfg.debug_log) or original
+        _restore_audio(original, cfg, cfg.debug_log)
+        assert device.sets == []
+        assert device.vol == pytest.approx(0.30)
+
+    def test_def274_stale_cache_not_used(self, tmp_path, device):
+        """DEF-274: a cached reading from before the user's slider move must
+        not be taken as the current volume."""
+        from heyvox.herald import coreaudio
+        with patch("heyvox.herald.coreaudio.set_system_volume"):
+            coreaudio.set_system_volume_cached(0.5)  # cache says 0.50
+        device.vol = 0.07  # user turned it down since
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        assert _apply_tts_volume(cfg, cfg.debug_log) == pytest.approx(0.07)
+        assert device.vol == pytest.approx(0.10)
+
+    def test_below_floor_raised_and_restored(self, tmp_path, device):
+        device.vol = 0.07
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        original = _apply_tts_volume(cfg, cfg.debug_log)
+        assert original == pytest.approx(0.07)
+        assert device.vol == pytest.approx(0.10)
+        assert cfg.original_vol_file.read_text() == "7:0.07:0.1"
+        _restore_audio(original, cfg, cfg.debug_log)
+        assert device.vol == pytest.approx(0.07)
+        assert not cfg.original_vol_file.exists()
+
+    def test_raise_kept_across_messages_of_one_run(self, tmp_path, device):
+        device.vol = 0.07
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        _apply_tts_volume(cfg, cfg.debug_log)
+        assert _apply_tts_volume(cfg, cfg.debug_log) == pytest.approx(0.07)
+        assert device.sets == [pytest.approx(0.10)]
+
+    def test_user_move_during_raise_cancels_restore(self, tmp_path, device):
+        device.vol = 0.07
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        original = _apply_tts_volume(cfg, cfg.debug_log)
+        device.vol = 0.40  # user turns it up while TTS plays
+        _restore_audio(original, cfg, cfg.debug_log)
+        assert device.vol == pytest.approx(0.40)
+        assert not cfg.original_vol_file.exists()
+
+    def test_user_move_during_raise_wins_at_next_message(self, tmp_path, device):
+        device.vol = 0.07
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        _apply_tts_volume(cfg, cfg.debug_log)
+        device.vol = 0.30
+        assert _apply_tts_volume(cfg, cfg.debug_log) is None
+        _restore_audio(None, cfg, cfg.debug_log)
+        assert device.vol == pytest.approx(0.30)
+
+    def test_disabled_leaves_volume_alone(self, tmp_path, device):
+        device.vol = 0.07
+        cfg = _cfg(tmp_path, duck_enabled=False, tts_min_volume=0.10)
+        assert _apply_tts_volume(cfg, cfg.debug_log) is None
+        assert device.sets == []
+
+    def test_muted_or_lying_device_untouched(self, tmp_path, device):
+        """DEF-072: near-zero reads are muted or lying devices."""
+        device.vol = 0.02
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        assert _apply_tts_volume(cfg, cfg.debug_log) is None
+        assert device.sets == []
+        assert not cfg.original_vol_file.exists()
+
+    def test_restore_skips_ghost_device(self, tmp_path, device):
+        """DEF-113: a device gone since the raise is not restored, and the old
+        value is not written onto the new default device either."""
+        device.vol = 0.07
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        original = _apply_tts_volume(cfg, cfg.debug_log)
+        device.alive = False
+        with patch("heyvox.herald.coreaudio.set_system_volume") as mock_sys:
+            _restore_audio(original, cfg, cfg.debug_log)
+        mock_sys.assert_not_called()
+        assert device.sets == [pytest.approx(0.10)]
+        assert not cfg.original_vol_file.exists()
+
+    def test_legacy_sidecar_dropped(self, tmp_path, device):
+        """Pre-DEF-274 sidecars carry no set value; restoring from them could
+        undo a user change, so they are dropped."""
+        cfg = _cfg(tmp_path)
+        cfg.original_vol_file.write_text("7:0.65")
+        _restore_audio(None, cfg, cfg.debug_log)
+        assert device.sets == []
+        assert not cfg.original_vol_file.exists()
+
+    def test_no_default_device_uses_system_volume(self, tmp_path):
         from heyvox.herald import coreaudio
         coreaudio._invalidate_volume_cache()
-        yield
+        state = {"vol": 0.07}
+        cfg = _cfg(tmp_path, tts_min_volume=0.10)
+        with patch("heyvox.herald.coreaudio._get_default_output_device", return_value=None), \
+                patch("heyvox.herald.coreaudio._get_volume_osascript",
+                      side_effect=lambda: state["vol"]), \
+                patch("heyvox.herald.coreaudio.set_system_volume",
+                      side_effect=lambda v: state.update(vol=v)):
+            original = _apply_tts_volume(cfg, cfg.debug_log)
+            assert state["vol"] == pytest.approx(0.10)
+            assert cfg.original_vol_file.read_text() == ":0.07:0.1"
+            _restore_audio(original, cfg, cfg.debug_log)
+        assert state["vol"] == pytest.approx(0.07)
         coreaudio._invalidate_volume_cache()
-
-    def test_duck_saves_original_volume(self, tmp_path):
-        cfg = _cfg(tmp_path, duck_level=0.03, duck_enabled=True)
-        # DEF-046 added a `dev_id:vol` sidecar format. Pin device to None so
-        # the legacy plain-float branch runs and the assertion matches.
-        with patch("heyvox.herald.coreaudio.get_system_volume", return_value=0.7):
-            with patch("heyvox.herald.coreaudio.set_system_volume"):
-                with patch("heyvox.herald.coreaudio._get_default_output_device", return_value=None):
-                    original = _duck_audio(cfg, cfg.debug_log)
-        assert original == pytest.approx(0.7)
-        assert cfg.original_vol_file.exists()
-        assert float(cfg.original_vol_file.read_text().strip()) == pytest.approx(0.7)
-
-    def test_duck_sets_duck_level(self, tmp_path):
-        cfg = _cfg(tmp_path, duck_level=0.05, duck_enabled=True)
-        with patch("heyvox.herald.coreaudio.get_system_volume", return_value=0.7):
-            with patch("heyvox.herald.coreaudio.set_system_volume") as mock_set:
-                _duck_audio(cfg, cfg.debug_log)
-        # set_system_volume_cached wraps set_system_volume, so it calls through
-        # We verify duck level via original_vol_file and that set was called
-        assert mock_set.called
-
-    def test_duck_skipped_when_disabled(self, tmp_path):
-        cfg = _cfg(tmp_path, duck_enabled=False)
-        with patch("heyvox.herald.coreaudio.set_system_volume") as mock_set:
-            result = _duck_audio(cfg, cfg.debug_log)
-        assert result is None
-        mock_set.assert_not_called()
-
-    def test_duck_reuses_saved_vol_on_restart(self, tmp_path):
-        """If original_vol_file exists, use it instead of re-reading volume."""
-        cfg = _cfg(tmp_path, duck_level=0.03, duck_enabled=True)
-        cfg.original_vol_file.write_text("0.8")
-        call_count = [0]
-
-        def counting_get():
-            call_count[0] += 1
-            return 0.7
-
-        with patch("heyvox.herald.coreaudio.get_system_volume", side_effect=counting_get):
-            with patch("heyvox.herald.coreaudio.set_system_volume"):
-                result = _duck_audio(cfg, cfg.debug_log)
-        assert result == pytest.approx(0.8)
-        # Should NOT call get_system_volume (using saved file value)
-        assert call_count[0] == 0
-
-    def test_restore_sets_original_volume(self, tmp_path):
-        cfg = _cfg(tmp_path, duck_enabled=True)
-        cfg.original_vol_file.write_text("0.65")
-        with patch("heyvox.herald.coreaudio.set_system_volume") as mock_set:
-            _restore_audio(0.65, cfg, cfg.debug_log)
-        assert mock_set.called
-        assert not cfg.original_vol_file.exists()
-
-    def test_restore_reads_file_when_vol_none(self, tmp_path):
-        """If original_vol is None, read from file."""
-        cfg = _cfg(tmp_path, duck_enabled=True)
-        cfg.original_vol_file.write_text("0.55")
-        with patch("heyvox.herald.coreaudio.set_system_volume") as mock_set:
-            _restore_audio(None, cfg, cfg.debug_log)
-        assert mock_set.called
-
-    def test_restore_no_op_when_disabled(self, tmp_path):
-        cfg = _cfg(tmp_path, duck_enabled=False)
-        with patch("heyvox.herald.coreaudio.set_system_volume") as mock_set:
-            _restore_audio(0.5, cfg, cfg.debug_log)
-        mock_set.assert_not_called()
-
-    def test_restore_no_op_when_no_file_and_vol_none(self, tmp_path):
-        """If both original_vol=None and file missing, restore is a no-op."""
-        cfg = _cfg(tmp_path, duck_enabled=True)
-        with patch("heyvox.herald.coreaudio.set_system_volume") as mock_set:
-            _restore_audio(None, cfg, cfg.debug_log)
-        mock_set.assert_not_called()
-
-    def test_restore_pre_check_catches_ghost_device(
-        self, tmp_path, monkeypatch
-    ):
-        """DEF-113 + DeviceHandle: CoreAudioHandle.revalidate() returns False
-        for a stale dev_id, so _set_volume_coreaudio is never called and the
-        orchestrator falls straight back to set_system_volume_cached. A warn
-        banner surfaces.
-        """
-        monkeypatch.setattr(
-            "heyvox.constants.HUD_BANNERS_FILE",
-            str(tmp_path / "heyvox-hud-banners.json"),
-        )
-
-        cfg = _cfg(tmp_path, duck_enabled=True)
-        cfg.original_vol_file.write_text("973:0.65")
-
-        with patch(
-            "heyvox.herald.coreaudio._is_coreaudio_device_alive", return_value=False
-        ), patch(
-            "heyvox.herald.coreaudio._set_volume_coreaudio", return_value=True
-        ) as mock_set_dev, patch(
-            "heyvox.herald.coreaudio.set_system_volume_cached"
-        ) as mock_set_sys:
-            _restore_audio(0.65, cfg, cfg.debug_log)
-
-        # Pre-check tripped — Set was never attempted on the ghost.
-        mock_set_dev.assert_not_called()
-        mock_set_sys.assert_called_once_with(0.65)
-        assert not cfg.original_vol_file.exists()
-
-        from heyvox.hud.surface import HUDSurface
-        ghost_records = [
-            r for r in HUDSurface.read_active(include_legacy=False)
-            if r["source"] == "herald-ghost-dev"
-        ]
-        assert len(ghost_records) == 1
-        assert ghost_records[0]["level"] == "warn"
-
-    def test_restore_post_check_catches_race_after_pre_check_passed(
-        self, tmp_path, monkeypatch
-    ):
-        """Rare race: device survives the HasProperty probe but dies before
-        the Set call. _set_volume_coreaudio returns False → same fallback.
-        """
-        monkeypatch.setattr(
-            "heyvox.constants.HUD_BANNERS_FILE",
-            str(tmp_path / "heyvox-hud-banners.json"),
-        )
-
-        cfg = _cfg(tmp_path, duck_enabled=True)
-        cfg.original_vol_file.write_text("973:0.65")
-
-        with patch(
-            "heyvox.herald.coreaudio._is_coreaudio_device_alive", return_value=True
-        ), patch(
-            "heyvox.herald.coreaudio._set_volume_coreaudio", return_value=False
-        ) as mock_set_dev, patch(
-            "heyvox.herald.coreaudio.set_system_volume_cached"
-        ) as mock_set_sys:
-            _restore_audio(0.65, cfg, cfg.debug_log)
-
-        mock_set_dev.assert_called_once_with(973, 0.65)
-        mock_set_sys.assert_called_once_with(0.65)
-
-        from heyvox.hud.surface import HUDSurface
-        ghost_records = [
-            r for r in HUDSurface.read_active(include_legacy=False)
-            if r["source"] == "herald-ghost-dev"
-        ]
-        assert len(ghost_records) == 1
-
-    def test_restore_ok_path_does_not_fall_back(self, tmp_path, monkeypatch):
-        """When both the pre-check and the Set call succeed, no fallback,
-        no banner.
-        """
-        monkeypatch.setattr(
-            "heyvox.constants.HUD_BANNERS_FILE",
-            str(tmp_path / "heyvox-hud-banners.json"),
-        )
-
-        cfg = _cfg(tmp_path, duck_enabled=True)
-        cfg.original_vol_file.write_text("123:0.65")
-
-        with patch(
-            "heyvox.herald.coreaudio._is_coreaudio_device_alive", return_value=True
-        ), patch(
-            "heyvox.herald.coreaudio._set_volume_coreaudio", return_value=True
-        ) as mock_set_dev, patch(
-            "heyvox.herald.coreaudio.set_system_volume_cached"
-        ) as mock_set_sys:
-            _restore_audio(0.65, cfg, cfg.debug_log)
-
-        mock_set_dev.assert_called_once_with(123, 0.65)
-        mock_set_sys.assert_not_called()
-
-        from heyvox.hud.surface import HUDSurface
-        live = HUDSurface.read_active(include_legacy=False)
-        assert all(r["source"] != "herald-ghost-dev" for r in live)
 
 
 # ---------------------------------------------------------------------------
