@@ -148,6 +148,13 @@ def _check_deps(lines: list[str], cfg, is_arm: bool) -> None:
             hint = ("pip install 'heyvox[apple-silicon]'" if is_arm
                     else "Intel Mac — set stt.local.engine to sherpa")
             lines.append(_line(mark, "mlx-whisper NOT installed", hint))
+    elif engine == "parakeet":
+        pdir = os.path.expanduser(getattr(stt_local, "parakeet_dir", ""))
+        if os.path.exists(os.path.join(pdir, "encoder.int8.onnx")):
+            lines.append(_line(_OK, f"Parakeet model found ({pdir})"))
+        else:
+            lines.append(_line(_FAIL, "Parakeet model NOT found",
+                               "set stt.local.parakeet_dir (sherpa-onnx asr-models release)"))
     try:
         import mlx_audio  # noqa: F401
         lines.append(_line(_OK, "mlx-audio installed (TTS)"))

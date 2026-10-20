@@ -892,7 +892,10 @@ class RecordingStateMachine:
             try:
                 import psutil
                 _rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
-                if _rss_mb > 1500:
+                # Parakeet itself sits at ~0.9-1.3 GB and can't be unloaded;
+                # only act when the MLX model (live or fallback) is resident.
+                from heyvox.audio.stt import _mlx_loaded
+                if _rss_mb > 1500 and _mlx_loaded.is_set():
                     self._log(
                         f"WARNING: RSS {_rss_mb:.0f}MB after STT, "
                         "force-unloading MLX model"
@@ -904,7 +907,8 @@ class RecordingStateMachine:
             _t_stt_done = time.time()
             # Short model id for log tagging: mlx-community/whisper-large-v3-turbo → large-v3-turbo
             _stt_model_short = (
-                self.config.stt.local.mlx_model.split("/")[-1]
+                "parakeet-tdt-0.6b-v3" if self.config.stt.local.engine == "parakeet"
+                else self.config.stt.local.mlx_model.split("/")[-1]
                 .replace("whisper-", "").replace("-mlx", "")
             )
             if stop_time:
