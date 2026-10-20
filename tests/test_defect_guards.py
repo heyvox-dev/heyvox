@@ -463,7 +463,7 @@ def test_def053_vad_silent_grace_during_recording():
 
 def test_def053_tts_min_volume_floor():
     """Herald must expose a configurable TTS volume floor and apply it when
-    restoring volume after the duck.
+    raising the volume for playback.
 
     DEF-053 originally hard-coded the floor at 0.55 to keep TTS audible over
     quiet background media. That clamp is now user-tunable via `tts.min_volume`
@@ -481,12 +481,14 @@ def test_def053_tts_min_volume_floor():
     )
     import inspect
     from heyvox.herald import orchestrator as orch
-    src = inspect.getsource(orch._set_tts_volume)
-    assert "tts_min_volume" in src, (
-        "DEF-053: `_set_tts_volume` must read `cfg.tts_min_volume` to apply the floor"
+    src = inspect.getsource(orch._apply_tts_volume)
+    assert "cfg.tts_min_volume" in src, (
+        "DEF-053: `_apply_tts_volume` must read `cfg.tts_min_volume` to apply the floor"
     )
-    assert re.search(r"max\s*\(\s*original_vol\s*,\s*cfg\.tts_min_volume", src), (
-        "DEF-053: `_set_tts_volume` must clamp with `max(original_vol, cfg.tts_min_volume)`"
+    # DEF-274: the volume read that decides whether to touch the slider must
+    # be fresh — a cached value from before a user change got written back.
+    assert "get_system_volume_cached" not in inspect.getsource(orch._read_volume), (
+        "DEF-274: `_read_volume` must not read the 5 s volume cache"
     )
 
 

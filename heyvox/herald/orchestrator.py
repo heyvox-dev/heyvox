@@ -1,7 +1,7 @@
 """Herald Python Orchestrator — plays queued WAV files sequentially.
 
 Features:
-  - Audio ducking: lowers system volume during playback, then restores
+  - TTS volume floor: lifts a too-low output volume during playback, then restores
   - Workspace jump target: every new message's workspace becomes the target
     of the jump key (default mode, see heyvox.herald.jump); the older
     countdown auto-switch stays available as mode "countdown"
@@ -99,14 +99,13 @@ class OrchestratorConfig:
     # WorkspaceSwitchConfig.mode: "jump_key" | "countdown" | "off"
     switch_mode: str = "jump_key"
 
-    # Audio ducking
+    # Output volume handling. Herald only touches the volume to lift it to
+    # tts_min_volume for the duration of playback (see _apply_tts_volume);
+    # duck_enabled=False leaves the volume alone entirely.
     duck_enabled: bool = True
-    duck_level: float = 0.03      # 3% — HERALD_DUCK_LEVEL inherited from original bash orchestrator
-    # Floor for the post-duck TTS volume. _set_tts_volume uses
-    # max(original_vol, tts_min_volume) so TTS stays audible if the pre-duck
-    # media volume was very low, but otherwise respects the user's slider.
-    # Wired from config: tts.min_volume (heyvox/config.py). Default 0.10 ≈
-    # respect the slider with a tiny safety floor.
+    # Floor for the TTS playback volume: a volume below it is raised to it
+    # while Herald plays, and put back afterwards unless the user moved the
+    # slider in between. Wired from config: tts.min_volume (heyvox/config.py).
     tts_min_volume: float = 0.10
 
     # Queue caps
@@ -740,208 +739,174 @@ def _media_resume(cfg: OrchestratorConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Audio ducking
+# TTS volume floor
 # ---------------------------------------------------------------------------
 
 
-def _parse_ducked_state(text: str) -> tuple[int | None, float] | None:
-    """Parse the ducked-state sidecar. Supports legacy 'vol' and new 'dev_id:vol'."""
-    text = text.strip()
-    if not text:
+# Two volume reads of the same slider position can differ by float rounding;
+# one volume-key step is 1/16 (0.0625), so this tolerance still catches it.
+_VOLUME_TOLERANCE = 0.02
+
+
+def _parse_ducked_state(text: str) -> tuple[int | None, float, float] | None:
+    """Parse the volume sidecar 'dev_id:original:set' (dev_id may be empty).
+
+    Older formats ('vol', 'dev_id:vol') carry no set value, so Herald can't
+    tell whether the user has moved the slider since; they parse as None and
+    are dropped.
+    """
+    parts = text.strip().split(":")
+    if len(parts) != 3:
         return None
-    if ":" in text:
-        dev_str, vol_str = text.split(":", 1)
-        try:
-            return int(dev_str), float(vol_str)
-        except ValueError:
-            return None
     try:
-        return None, float(text)  # legacy: volume only, no device pinning
+        dev_id = int(parts[0]) if parts[0] else None
+        return dev_id, float(parts[1]), float(parts[2])
     except ValueError:
         return None
 
 
-def _duck_audio(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
-    """Lower system volume for TTS ducking. Returns the original volume or None.
+def _read_volume(dev_id: int | None) -> float | None:
+    """Read the current output volume of ``dev_id`` (default device if None).
 
-    DEF-046: Saves the ducked device_id alongside the volume so that restore
-    always targets the originally-ducked device, even if the user switches
-    the default output mid-playback. Without the device pin, the duck level
-    sticks on device A while restore writes to device B, leaving A at 3%.
+    Uncached on purpose: a value cached from before the user moved the
+    slider is exactly what DEF-274 wrote back over their setting.
+    """
+    from heyvox.herald.coreaudio import _get_volume_coreaudio, get_system_volume
+    if dev_id is not None:
+        return _get_volume_coreaudio(dev_id)
+    return get_system_volume()
+
+
+def _user_moved_volume(current: float | None, set_vol: float) -> bool:
+    return current is None or abs(current - set_vol) > _VOLUME_TOLERANCE
+
+
+def _apply_tts_volume(cfg: OrchestratorConfig, debug_log: Path) -> float | None:
+    """Lift the output volume to the TTS floor for this message, if needed.
+
+    DEF-274: Herald used to capture the volume at the first message of a
+    playback run and write that value back at every later message and once
+    the queue drained, reading it through a 5 s cache. A slider change made
+    during playback, or just before the next message, was undone. Now Herald
+    leaves the volume alone unless it is below ``tts_min_volume``; when it
+    raises it, the sidecar records what it set (pinned to the device, DEF-046),
+    and a slider move by the user since then cancels the restore.
+
+    Returns the volume before the raise while Herald holds one, else None.
     """
     if not cfg.duck_enabled:
         return None
 
     from heyvox.herald.coreaudio import (
-        _get_default_output_device, _set_volume_coreaudio,
-        get_system_volume_cached, set_system_volume_cached,
+        _get_default_output_device, _set_volume_coreaudio, set_system_volume_cached,
     )
 
-    # Only save original if not already ducked (avoid saving already-ducked level on restart)
-    if cfg.original_vol_file.exists():
-        try:
-            parsed = _parse_ducked_state(cfg.original_vol_file.read_text())
-            if parsed is not None:
-                _dev_id, saved = parsed
-                # Duck the pinned device if we have one, else current default
-                if _dev_id is not None:
-                    _set_volume_coreaudio(_dev_id, cfg.duck_level)
-                else:
-                    set_system_volume_cached(cfg.duck_level)
-                time.sleep(0.05)
-                return saved
-        except OSError:
-            pass
-
-    original_vol = get_system_volume_cached(cfg.volume_cache_ttl)
-    dev_id = _get_default_output_device()
-    # DEF-072: If we read a near-zero volume the device is either actually
-    # muted (in which case ducking is pointless) or lying about having software
-    # volume control (in which case saving 0.0 would zero the output on
-    # restore). Either way, skip the sidecar + skip ducking entirely.
-    if original_vol is None or original_vol < 0.05:
+    # A raise from an earlier message of this run is still in place, unless
+    # the user has moved the slider since — then their value stands.
+    try:
+        state = _parse_ducked_state(cfg.original_vol_file.read_text())
+    except OSError:
+        state = None
+    if state is not None:
+        dev_id, original_vol, set_vol = state
+        current = _read_volume(dev_id)
+        if not _user_moved_volume(current, set_vol):
+            return original_vol
+        cfg.original_vol_file.unlink(missing_ok=True)
         _herald_log(
-            f"ORCH: skipping duck — original_vol={original_vol} (dev={dev_id}) "
-            f"looks bogus or muted; not writing sidecar",
+            f"ORCH: volume moved by user to {current} since raise to {set_vol:.2f} "
+            f"(dev={dev_id}); leaving it",
             debug_log,
         )
         return None
+    cfg.original_vol_file.unlink(missing_ok=True)
+
+    dev_id = _get_default_output_device()
+    original_vol = _read_volume(dev_id)
+    # DEF-072: near zero means the device is muted or has no software volume
+    # control (lying 0.0); raising it would be wrong either way.
+    if original_vol is None or original_vol < 0.05:
+        _herald_log(
+            f"ORCH: volume untouched — original_vol={original_vol} (dev={dev_id}) "
+            f"looks bogus or muted",
+            debug_log,
+        )
+        return None
+    if original_vol >= cfg.tts_min_volume:
+        return None
+
+    target = cfg.tts_min_volume
     try:
-        if dev_id is not None:
-            cfg.original_vol_file.write_text(f"{dev_id}:{original_vol}")
-        else:
-            cfg.original_vol_file.write_text(str(original_vol))
+        cfg.original_vol_file.write_text(
+            f"{dev_id if dev_id is not None else ''}:{original_vol}:{target}"
+        )
     except OSError:
-        pass
-    set_system_volume_cached(cfg.duck_level)
-    time.sleep(0.05)
+        return None  # don't change what can't be put back
+    if dev_id is not None:
+        ok = _set_volume_coreaudio(dev_id, target)
+    else:
+        set_system_volume_cached(target)
+        ok = True
     _herald_log(
-        f"ORCH: ducked audio from {original_vol:.2f} to {cfg.duck_level:.2f} (dev={dev_id})",
+        f"ORCH: raised volume from {original_vol:.2f} to floor {target:.2f} "
+        f"(dev={dev_id}) ok={ok}",
         debug_log,
     )
     return original_vol
 
 
-def _set_tts_volume(original_vol: float | None, cfg: OrchestratorConfig) -> None:
-    """Restore volume to TTS (full) level after ducking.
-
-    Targets the originally-ducked device via the sidecar file so that a mid-
-    playback output device change doesn't leave the previous device muted.
-    """
-    if not cfg.duck_enabled or original_vol is None:
-        _herald_log(
-            f"ORCH: _set_tts_volume skipped (duck_enabled={cfg.duck_enabled} "
-            f"original_vol={original_vol})",
-            cfg.debug_log,
-        )
-        return
-    # DEF-053: enforce minimum TTS volume floor so TTS stays audible even when
-    # the user's pre-duck media volume was low (e.g. background music at 37 %).
-    tts_vol = max(original_vol, cfg.tts_min_volume)
-    from heyvox.herald.coreaudio import _set_volume_coreaudio, set_system_volume_cached
-    dev_id = None
-    try:
-        parsed = _parse_ducked_state(cfg.original_vol_file.read_text())
-        if parsed is not None:
-            dev_id, _ = parsed
-    except (OSError, ValueError):
-        pass
-    if dev_id is not None:
-        ok = _set_volume_coreaudio(dev_id, tts_vol)
-        _herald_log(
-            f"ORCH: set TTS volume to {tts_vol:.2f} (orig={original_vol:.2f}, "
-            f"floor={cfg.tts_min_volume:.2f}) via CA dev={dev_id} ok={ok}",
-            cfg.debug_log,
-        )
-    else:
-        set_system_volume_cached(tts_vol)
-        _herald_log(
-            f"ORCH: set TTS volume to {tts_vol:.2f} (orig={original_vol:.2f}, "
-            f"floor={cfg.tts_min_volume:.2f}) via system-cached (dev=None)",
-            cfg.debug_log,
-        )
-
-
 def _restore_audio(original_vol: float | None, cfg: OrchestratorConfig, debug_log: Path) -> None:
-    """Restore volume after all TTS parts are done.
+    """Undo the floor raise after all TTS parts are done.
 
-    DEF-046: Restores to the pinned device_id captured at duck time, not the
-    current default. If the user switched output during playback, the original
-    device would otherwise stay stuck at 3%.
+    The sidecar is the record of the raise; ``original_vol`` is only the
+    caller's copy of it. DEF-274: restores only while the device still sits
+    at the volume Herald set — a slider move by the user wins. DEF-046 /
+    DEF-113: restores the pinned device, and skips it when the device is gone
+    (macOS reassigns device IDs on hotplug) instead of writing the old value
+    onto whatever device is the default now.
     """
     if not cfg.duck_enabled:
         return
 
     from heyvox.herald.coreaudio import _set_volume_coreaudio, set_system_volume_cached
 
-    dev_id: int | None = None
-    vol = original_vol
-
-    # Read sidecar to get the pinned device (and volume as fallback)
     try:
-        parsed = _parse_ducked_state(cfg.original_vol_file.read_text())
-        if parsed is not None:
-            file_dev, file_vol = parsed
-            dev_id = file_dev
-            if vol is None:
-                vol = file_vol
-    except (OSError, ValueError):
-        pass
+        state = _parse_ducked_state(cfg.original_vol_file.read_text())
+    except OSError:
+        state = None
+    cfg.original_vol_file.unlink(missing_ok=True)
+    if state is None:
+        return
+    dev_id, vol, set_vol = state
 
-    if vol is None:
+    if dev_id is not None:
+        from heyvox.audio.device_handle import CoreAudioHandle
+        if not CoreAudioHandle(dev_id=dev_id).revalidate():
+            _herald_log(f"ORCH: restore skipped — device {dev_id} gone", debug_log)
+            return
+
+    current = _read_volume(dev_id)
+    if _user_moved_volume(current, set_vol):
+        _herald_log(
+            f"ORCH: restore skipped — user set volume to {current} "
+            f"(Herald had set {set_vol:.2f}, dev={dev_id})",
+            debug_log,
+        )
         return
 
-    # DEF-113 / P-hotplug-cache: macOS reassigns CoreAudio device IDs on every
-    # hotplug, so the pinned dev_id may point at a ghost device. Two-layer
-    # defence:
-    #   1. CoreAudioHandle.revalidate() — cheap pre-write probe via
-    #      AudioObjectHasProperty. Catches the common case where the device
-    #      went away while the sidecar lived (seconds).
-    #   2. _set_volume_coreaudio() return value — backstop for the rare race
-    #      where the device survives the probe but dies before the Set call.
-    # Either failure path emits the same warn banner and falls back to
-    # set_system_volume_cached() so the user's media isn't stranded at
-    # duck-level.
-    from heyvox.audio.device_handle import CoreAudioHandle
-    ok = True
-    fallback = False
-    pre_check = "n/a"
     if dev_id is not None:
-        handle = CoreAudioHandle(dev_id=dev_id)
-        if handle.revalidate():
-            pre_check = "alive"
-            ok = _set_volume_coreaudio(handle.id, vol)
-        else:
-            pre_check = "ghost"
-            ok = False
-        if not ok:
-            set_system_volume_cached(vol)
-            fallback = True
-            try:
-                from heyvox.hud.surface import HUDSurface
-                HUDSurface.banner(
-                    level="warn",
-                    source="herald-ghost-dev",
-                    text="Audio restored via system volume (device gone)",
-                    ttl_secs=30,
-                )
-            except Exception:
-                pass
+        ok = _set_volume_coreaudio(dev_id, vol)
     else:
         set_system_volume_cached(vol)
-    cfg.original_vol_file.unlink(missing_ok=True)
-    _herald_log(
-        f"ORCH: restored audio to {vol:.2f} (dev={dev_id}) "
-        f"pre_check={pre_check} ok={ok} fallback={fallback}",
-        debug_log,
-    )
+        ok = True
+    _herald_log(f"ORCH: restored audio to {vol:.2f} (dev={dev_id}) ok={ok}", debug_log)
 
 
 # ---------------------------------------------------------------------------
 # Volume-zero guard
 # ---------------------------------------------------------------------------
 
-# Reuse the same threshold as _duck_audio's guard — below this the duck is
+# Same threshold as _apply_tts_volume's guard — below this the floor raise is
 # skipped and TTS plays at essentially no volume.
 _VOL_ZERO_THRESHOLD: float = 0.05
 # Banner TTL slightly longer than the 30s periodic check so it auto-expires
@@ -1088,7 +1053,7 @@ def _play_wav(
     *,
     switch_stop_event: threading.Event | None = None,
 ) -> tuple[str, str, float | None, bool, threading.Event | None]:
-    """Play a single WAV file, handling ducking, pausing, and workspace switching.
+    """Play a single WAV file, handling the volume floor, pausing, and workspace switching.
 
     Args:
         switch_stop_event: threading.Event for the most recently started
@@ -1164,8 +1129,7 @@ def _play_wav(
             _herald_log("ORCH: media PAUSED", debug_log)
 
         _warn_if_vol_zero(cfg, debug_log)
-        original_vol = _duck_audio(cfg, debug_log)
-        _set_tts_volume(original_vol, cfg)
+        original_vol = _apply_tts_volume(cfg, debug_log)
     else:
         workspace_file.unlink(missing_ok=True)
 
@@ -1318,7 +1282,7 @@ class HeraldOrchestrator:
     """Pure-Python Herald orchestrator.
 
     Runs as a singleton daemon process. Polls the herald-queue directory,
-    plays WAV files via afplay, handles audio ducking, workspace switching
+    plays WAV files via afplay, handles the TTS volume floor, workspace switching
     (via a cancelable countdown — see _run_switch_countdown), and recording
     watchdog.
 

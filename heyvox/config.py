@@ -203,11 +203,11 @@ class TTSConfig(BaseModel):
     # Requirement: TTS-04
     ducking_percent: int = 60
 
-    # Minimum TTS playback volume floor [0.0, 1.0]. After ducking, Herald sets
-    # output volume to max(your_pre_duck_volume, min_volume) so TTS stays
-    # audible even when background media was very quiet. Set to 0.0 to fully
-    # respect the user's slider; default 0.10 keeps speech audible without
-    # overriding the user's level in normal use.
+    # Minimum TTS playback volume floor [0.0, 1.0]. If the output volume is
+    # below it when Herald starts speaking, Herald raises it to the floor and
+    # puts it back afterwards (unless you moved the slider in between); at or
+    # above the floor Herald never touches the volume. Set to 0.0 to fully
+    # respect the user's slider.
     min_volume: float = 0.10
 
     # Pause system media (YouTube, Spotify, etc.) during TTS playback.
@@ -1260,8 +1260,8 @@ tts:
   verbosity: full          # full | short | skip
   volume_boost: 10         # Added to system volume during TTS (capped at 100)
   ducking_percent: 60      # Reduce system volume to this % during TTS playback (0=off, 100=no ducking)
-  min_volume: 0.10         # Minimum TTS playback volume [0.0–1.0]. After ducking, Herald sets
-                           # max(your_pre_duck_volume, min_volume). 0.0 = fully respect your slider.
+  min_volume: 0.10         # Minimum TTS playback volume [0.0–1.0]. A lower volume is raised to it
+                           # while Herald speaks, then put back. 0.0 = fully respect your slider.
   pause_media: false       # Pause YouTube/Spotify/VLC/etc. during TTS, resume after
                            # Scriptable players (VLC, QuickTime, Music, Spotify) are built in;
                            # add or disable players via tts.media_players (see MediaPlayerConfig).
