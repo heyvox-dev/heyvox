@@ -2382,7 +2382,7 @@ def test_def221_orphan_gate_serializes_next_transcription():
     finally:
         release.set()
         deadline = _t.monotonic() + 2.0
-        while not _stt._orphan_done.is_set() and _t.monotonic() < deadline:
+        while not _stt._orphan_done["mlx"].is_set() and _t.monotonic() < deadline:
             _t.sleep(0.02)
 
 
@@ -2434,3 +2434,107 @@ def test_def254_consec_start_path_not_gated_by_silence():
         "False while idle and would silently disable start-word detection "
         "if it weren't short-circuited first."
     )
+
+
+# ---------------------------------------------------------------------------
+# DEF-275: one hung decode blocked every later dictation until a restart.
+#
+# sherpa-onnx 1.12 looped forever on one clip (Parakeet beam search with
+# hotwords). The single DEF-221 orphan gate then blocked the MLX fallback for
+# that clip and skipped every later dictation. The gate is now per model, the
+# Parakeet path falls back without waiting, and main.py restarts the listener
+# when an orphan is still running _STT_STUCK_RESTART_SECS later.
+# ---------------------------------------------------------------------------
+
+
+def _def275_hang(stt_mod, key, release):
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    with pytest.raises(FuturesTimeout):
+        stt_mod._run_with_timeout(lambda: release.wait(30.0), timeout=0.1, key=key)
+
+
+def _def275_drain(stt_mod, key):
+    import time as _t
+    deadline = _t.monotonic() + 2.0
+    while not stt_mod._orphan_done[key].is_set() and _t.monotonic() < deadline:
+        _t.sleep(0.02)
+
+
+def test_def275_parakeet_orphan_does_not_block_mlx_gate():
+    import threading
+    from heyvox.audio import stt as _stt
+
+    release = threading.Event()
+    try:
+        _def275_hang(_stt, "parakeet", release)
+        assert _stt._wait_for_orphan("parakeet", timeout=0.1) is False
+        assert _stt._wait_for_orphan("mlx", timeout=0.1) is True
+        assert _stt.stuck_transcription_secs() > 0.0
+    finally:
+        release.set()
+        _def275_drain(_stt, "parakeet")
+    assert _stt.stuck_transcription_secs() == 0.0
+
+
+def test_def275_parakeet_falls_back_while_orphan_runs(monkeypatch):
+    import threading
+    import time as _t
+    import numpy as np
+    from heyvox.audio import stt as _stt
+
+    calls = []
+    original = _stt.transcribe_audio
+
+    def _fake(chunks, engine="mlx", **kw):
+        if engine == "mlx":
+            calls.append("mlx")
+            return "fallback text"
+        return original(chunks, engine=engine, **kw)
+
+    monkeypatch.setattr(_stt, "transcribe_audio", _fake)
+    monkeypatch.setattr(_stt, "_parakeet", object())
+    monkeypatch.setattr(_stt, "_parakeet_fallback", True)
+    release = threading.Event()
+    try:
+        _def275_hang(_stt, "parakeet", release)
+        audio = [np.zeros(16000 * 2, dtype=np.int16)]
+        t0 = _t.monotonic()
+        text = original(audio, engine="parakeet", sample_rate=16000)
+        assert text == "fallback text"
+        assert calls == ["mlx"]
+        assert _t.monotonic() - t0 < 2.0, "fallback waited on the hung Parakeet decode"
+    finally:
+        release.set()
+        _def275_drain(_stt, "parakeet")
+
+
+def test_def275_main_restarts_only_after_stuck_limit(monkeypatch):
+    from unittest.mock import MagicMock
+    from heyvox import main as _main
+    from heyvox.audio import stt as _stt
+
+    execv = MagicMock(side_effect=RuntimeError("stop"))
+    monkeypatch.setattr(_main.os, "execv", execv)
+    monkeypatch.setattr(_main, "_release_singleton", lambda: None)
+    monkeypatch.setattr(_main.time, "sleep", lambda _s: None)
+    popen = MagicMock()
+    monkeypatch.setattr("subprocess.Popen", popen)
+    ctx = MagicMock()
+
+    monkeypatch.setattr(_stt, "stuck_transcription_secs", lambda: 10.0)
+    _main._maybe_restart_for_stuck_stt(lambda _m: None, lambda _m: None, ctx)
+    execv.assert_not_called()
+
+    monkeypatch.setattr(_stt, "stuck_transcription_secs",
+                        lambda: _main._STT_STUCK_RESTART_SECS + 1)
+    _main._maybe_restart_for_stuck_stt(lambda _m: None, lambda _m: None, ctx)
+    execv.assert_called_once()
+    popen.assert_called_once()
+    ctx.shutdown.set.assert_called_once()
+
+
+def test_def275_stuck_check_runs_in_idle_block():
+    src = _read_main_src()
+    idx = src.index("_maybe_restart_for_stuck_stt(log, hud_send, ctx)  # DEF-275")
+    head = src[max(0, idx - 200):idx]
+    assert "if not _is_rec and not _is_busy:" in head

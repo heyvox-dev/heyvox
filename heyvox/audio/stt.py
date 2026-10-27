@@ -31,22 +31,40 @@ _TRANSCRIBE_TIMEOUT = 30  # seconds — no transcription should take this long
 # running. Concurrent inference on the one shared MLX/Metal model object (or
 # sherpa recognizer) is unverified territory — the old `with ThreadPoolExecutor`
 # blockade prevented that overlap by accident; this event makes it explicit.
-_orphan_done = threading.Event()
-_orphan_done.set()
+# DEF-275: one gate per model. A hung Parakeet decode must not block the MLX
+# fallback, which runs on a different model; one shared gate turned a single
+# bad clip into "every dictation skipped" until the listener was restarted.
+_MODEL_KEYS = ("mlx", "sherpa", "parakeet")
+_orphan_done = {key: threading.Event() for key in _MODEL_KEYS}
+for _ev in _orphan_done.values():
+    _ev.set()
+_orphan_since: dict[str, float] = {}
 
 _ORPHAN_WAIT_SECS = 15.0
 
 
-def _wait_for_orphan(timeout: float = _ORPHAN_WAIT_SECS) -> bool:
-    """Bounded wait until any abandoned transcription worker has finished.
+def _wait_for_orphan(key: str = "mlx", timeout: float = _ORPHAN_WAIT_SECS) -> bool:
+    """Bounded wait until an abandoned worker on model ``key`` has finished.
 
     Returns True when clear to transcribe, False if the orphan is still
     running after ``timeout`` (caller should skip rather than run
     concurrently on the shared model)."""
-    return _orphan_done.wait(timeout)
+    return _orphan_done[key].wait(timeout)
 
 
-def _run_with_timeout(fn, timeout: float):
+def stuck_transcription_secs() -> float:
+    """Seconds the oldest still-running abandoned transcription has been stuck.
+
+    0.0 when none is running. A native decode cannot be cancelled from Python,
+    so main.py restarts the listener once this grows past its limit (DEF-275).
+    """
+    now = time.monotonic()
+    stuck = [now - since for key, since in list(_orphan_since.items())
+             if not _orphan_done[key].is_set()]
+    return max(stuck, default=0.0)
+
+
+def _run_with_timeout(fn, timeout: float, key: str = "mlx"):
     """Run ``fn`` on a worker thread, bounded by ``timeout`` seconds.
 
     DEF-221: this must NOT be a ``with ThreadPoolExecutor(...)`` block. The
@@ -55,9 +73,10 @@ def _run_with_timeout(fn, timeout: float):
     still blocked on the wedged transcription thread and the 30s guard was
     silently worthless against a real hang. On success we join (clean release
     of MLX memory before continuing); on timeout we abandon the worker
-    (``shutdown(wait=False)``) — but flag it via ``_orphan_done`` so the NEXT
-    transcription waits for the orphan instead of running concurrently on the
-    shared model (the race the old blockade accidentally prevented).
+    (``shutdown(wait=False)``) — but flag it via ``_orphan_done[key]`` so the
+    NEXT transcription on the same model waits for the orphan instead of
+    running concurrently on it (the race the old blockade accidentally
+    prevented).
 
     Raises FuturesTimeout on deadline; re-raises whatever ``fn`` raised.
     """
@@ -66,9 +85,11 @@ def _run_with_timeout(fn, timeout: float):
     try:
         result = future.result(timeout=timeout)
     except FuturesTimeout:
-        _orphan_done.clear()
+        done = _orphan_done[key]
+        done.clear()
+        _orphan_since[key] = time.monotonic()
         # Fires immediately if the worker finished between raise and here.
-        future.add_done_callback(lambda _f: _orphan_done.set())
+        future.add_done_callback(lambda _f: done.set())
         executor.shutdown(wait=False)
         raise
     except BaseException:
@@ -550,22 +571,21 @@ def transcribe_audio(
         if _parakeet is None:
             _log("ERROR: Parakeet not initialized — call init_local_stt(engine='parakeet')")
             return ""
-        # DEF-221: same orphan gate as the other engines.
-        if not _wait_for_orphan():
-            _log(
-                f"ERROR: previous timed-out transcription still running after "
-                f"{_ORPHAN_WAIT_SECS:.0f}s — skipping this transcription"
-            )
-            return ""
-        try:
-            text = _run_with_timeout(
-                lambda: _parakeet_transcribe(samples, sample_rate), _TRANSCRIBE_TIMEOUT)
-        except FuturesTimeout:
-            _log(f"ERROR: Parakeet transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
-            text = ""
-        except Exception as e:
-            _log(f"ERROR: Parakeet transcription failed: {e}")
-            text = ""
+        # DEF-221: same orphan gate as the other engines. DEF-275: with the
+        # fallback on, don't wait for a hung Parakeet decode, go to MLX now.
+        text = ""
+        if not _wait_for_orphan("parakeet", 0.0 if _parakeet_fallback else _ORPHAN_WAIT_SECS):
+            _log("ERROR: previous timed-out Parakeet transcription still running — "
+                 "skipping Parakeet for this transcription")
+        else:
+            try:
+                text = _run_with_timeout(
+                    lambda: _parakeet_transcribe(samples, sample_rate),
+                    _TRANSCRIBE_TIMEOUT, key="parakeet")
+            except FuturesTimeout:
+                _log(f"ERROR: Parakeet transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
+            except Exception as e:
+                _log(f"ERROR: Parakeet transcription failed: {e}")
         audio_secs = len(samples) / sample_rate
         if not text and _parakeet_fallback and audio_secs >= _PARAKEET_FALLBACK_MIN_SECS:
             _log(f"Parakeet returned nothing for {audio_secs:.1f}s audio — "
@@ -733,7 +753,7 @@ def transcribe_audio(
 
         # DEF-221: same orphan gate as the MLX path — never infer concurrently
         # with an abandoned worker on the shared recognizer.
-        if not _wait_for_orphan():
+        if not _wait_for_orphan("sherpa"):
             _log(
                 f"ERROR: previous timed-out transcription still running after "
                 f"{_ORPHAN_WAIT_SECS:.0f}s — skipping this transcription"
@@ -742,7 +762,7 @@ def transcribe_audio(
         try:
             # DEF-221: see _run_with_timeout — the previous `with` form joined
             # the wedged worker on exit, nullifying the timeout.
-            return _run_with_timeout(_sherpa_transcribe, _TRANSCRIBE_TIMEOUT)
+            return _run_with_timeout(_sherpa_transcribe, _TRANSCRIBE_TIMEOUT, key="sherpa")
         except FuturesTimeout:
             _log(f"ERROR: Sherpa transcription timed out after {_TRANSCRIBE_TIMEOUT}s")
             return ""

@@ -1080,6 +1080,17 @@
 - **Found by**: Franz's question; code read plus the debug log.
 - **Would have caught earlier**: a test that models the user as a second writer to the same state — "user changes X while we hold X, then we restore" — rather than only testing our own write/restore pair. Any save-and-restore of a user-owned setting needs that test.
 
+## DEF-275 — one hung Parakeet decode skipped every later dictation until a manual restart (FIXED 2026-10-27)
+
+- **Date**: 2026-10-27
+- **Category**: error-handling
+- **Severity**: S2 (dictation dead for ~10 min, four dictations lost; recovered only from the debug WAV dump)
+- **Symptom**: Franz: transcription failed several times in a row. `/tmp/heyvox.log` 18:52:47 CET: `Parakeet transcription timed out after 30s`, the MLX fallback then `previous timed-out transcription still running after 15s — skipping`, and the same skip for every dictation at 19:00, 19:01, 19:02 (`Empty transcription, skipping`). The listener sat at ~495 % CPU.
+- **Root cause**: two layers. (1) sherpa-onnx 1.12.33 (and 1.12.40) loops forever in `modified_beam_search` with hotwords on one specific 8.6 s clip (macOS `sample`: the decode thread cycles decoder/joiner `OrtApis::Run` + memmove); greedy and beam-without-hotwords decode the same clip in 0.5 s, sherpa-onnx 1.13.8 with hotwords in 0.47 s. Reproduced in a separate process, so not the high system load (load 18–20) at the time. (2) The DEF-221 orphan gate was one global event: the abandoned native decode (uncancellable from Python) blocked the MLX fallback for that clip, which runs on a different model, and every later transcription, with no recovery short of a restart.
+- **Fix**: orphan gate per model (`mlx`/`sherpa`/`parakeet`); the Parakeet path goes to the MLX fallback without waiting while its own orphan runs; `stt.stuck_transcription_secs()` + `main._maybe_restart_for_stuck_stt` restart the listener (execv, idle only) when an orphan is still running 60 s after its timeout; `sherpa-onnx>=1.13.8`. Live config was also switched back to `engine: mlx` (Franz's preference after the daily-use test). Tests `test_def275_*` in `tests/test_defect_guards.py`.
+- **Found by**: Franz's report; log read, `sample` of the live process, re-run of the saved WAVs per sherpa-onnx version.
+- **Would have caught earlier**: DEF-221 tested that the gate serializes the next transcription, never what happens when the orphan never finishes. A timeout guard around uncancellable native work needs a test for "the worker never returns": the process must still serve the next request (other model, or a restart), not just bound the first wait.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
