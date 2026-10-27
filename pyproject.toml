@@ -37,7 +37,9 @@ dependencies = [
     "PyYAML>=6.0,<7.0",
     "pydantic>=2.0,<3.0",
     "platformdirs>=4.0,<5.0",
-    "sherpa-onnx>=1.0,<2.0",
+    # DEF-275: 1.12.x loops forever in modified_beam_search with hotwords on
+    # some clips (Parakeet engine); 1.13.8 decodes the same clip in 0.5 s.
+    "sherpa-onnx>=1.13.8,<2.0",
     "pyobjc-framework-Cocoa>=10.0,<13.0",
     "pyobjc-framework-Quartz>=10.0,<13.0",
     # DEF-225: ApplicationServices is a SEPARATE PyObjC distribution — Cocoa and

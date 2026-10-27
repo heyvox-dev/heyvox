@@ -488,6 +488,42 @@ def _maybe_restart_for_pa_storm(log, hud_send, ctx) -> None:
         ctx.shutdown.set()
 
 
+# DEF-275: a transcription that outlived its timeout keeps running natively.
+# Give it this long to finish on its own, then restart (only while idle).
+_STT_STUCK_RESTART_SECS = 60.0
+
+
+def _maybe_restart_for_stuck_stt(log, hud_send, ctx) -> None:
+    """Restart the process when an abandoned transcription never finishes.
+
+    DEF-275: a native decode (sherpa-onnx 1.12 beam search with hotwords on
+    one specific clip) looped forever. Python cannot cancel it; it held ~5
+    CPU cores and its model's orphan gate, so every later dictation on that
+    model was skipped until a manual restart. Caller gates on idle.
+    """
+    from heyvox.audio.stt import stuck_transcription_secs
+    stuck = stuck_transcription_secs()
+    if stuck < _STT_STUCK_RESTART_SECS:
+        return
+    log(
+        f"STT_STUCK: a timed-out transcription is still running {stuck:.0f}s later "
+        f"— native decode can't be cancelled; self-restarting (DEF-275)"
+    )
+    try:
+        hud_send({"type": "error", "text": "Transcription hung — restarting"})
+    except Exception:
+        pass
+    time.sleep(0.3)
+    _release_singleton()
+    try:
+        os.execv(sys.executable, [sys.executable, "-m", "heyvox.main"])
+    except Exception as exc:
+        log(f"STT_STUCK: execv failed ({exc}), falling back to subprocess restart")
+        import subprocess as _sp
+        _sp.Popen([sys.executable, "-m", "heyvox.main"], start_new_session=True)
+        ctx.shutdown.set()
+
+
 # ---------------------------------------------------------------------------
 # DEF-210: main-loop wedge supervisor
 # ---------------------------------------------------------------------------
@@ -1550,6 +1586,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
             # Proactive silent-mic health check (catches A2DP bad-state without IOError)
             if not _is_rec and not _is_busy:
+                _maybe_restart_for_stuck_stt(log, hud_send, ctx)  # DEF-275
                 _hud_ensure_connected()
                 now = time.time()
                 _prev_stream = devices.stream
