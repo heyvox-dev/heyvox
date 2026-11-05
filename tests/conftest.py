@@ -83,6 +83,12 @@ def isolate_flags(tmp_path, monkeypatch):
         monkeypatch.setattr("heyvox.audio.echo.TTS_ECHO_JOURNAL", tts_echo_journal)
     except AttributeError:
         pass  # Module not yet imported
+    # DEF-276: the mic-level check reads the active mic, writes the per-mic
+    # level history and may raise a HUD banner — keep all three off the live
+    # instance's files.
+    monkeypatch.setattr("heyvox.constants.ACTIVE_MIC_FILE", str(tmp_path / "heyvox-active-mic"))
+    monkeypatch.setattr("heyvox.constants.HUD_BANNERS_FILE", str(tmp_path / "heyvox-hud-banners.json"))
+    monkeypatch.setattr("heyvox.audio.level._default_cache_dir", lambda: tmp_path / "cache")
 
     # Patch consumers that imported at module level
     try:

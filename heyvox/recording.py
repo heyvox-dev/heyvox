@@ -103,6 +103,10 @@ def _speech_level_db(chunks: list, sample_rate: int) -> float:
     return float(20 * np.log10(p95 / 32768.0))
 
 
+_MIC_LEVEL_DROP_SOURCE = "mic-level-drop"
+_MIC_LEVEL_DROP_TTL_SECS = 1800  # stays until a normal dictation clears it, at most 30 min
+
+
 def _admit_quiet_recording(raw_speech_db: float | None, duration: float) -> bool:
     """True when a below-gate recording still has speech-level energy and is long enough to be a dictation (DEF-255)."""
     return (
@@ -366,6 +370,7 @@ class RecordingStateMachine:
         self._hud_send = hud_send
         self.training_collector = None  # Set by main.py when collect_negatives is enabled
         self._quiet_streak = 0  # consecutive too-quiet recordings; banner only after ≥2
+        self._level_baseline = None  # DEF-276: lazily created MicLevelBaseline
 
     def start(self, ptt: bool = False, preroll=None, handsfree: bool = False) -> None:
         """Begin a recording session.
@@ -627,6 +632,7 @@ class RecordingStateMachine:
                 # removing it would make the remaining audio seem quieter)
                 raw_rms_db = _audio_rms(recorded_chunks, self.config.audio.sample_rate)
                 raw_speech_db = _speech_level_db(recorded_chunks, self.config.audio.sample_rate)
+                self._check_mic_level_drop(raw_speech_db, duration)
 
                 # Save raw audio BEFORE any trimming (for debug analysis).
                 # DEF-081: capture the path so the garbled-filter branch can
@@ -772,6 +778,44 @@ class RecordingStateMachine:
             audio_cue("paused", cues_dir)
         self._hud_send({"type": "state", "state": "idle"})
         self._log("Recording cancelled.")
+
+    def _check_mic_level_drop(self, speech_db: float | None, duration: float) -> None:
+        """Warn when a dictation sits far below the active mic's usual speech level (DEF-276).
+
+        A sagged mic (DEF-101 G435 state) gives no device event; the user only
+        notices cut-off or garbled dictations. Power-cycling the headset restores
+        the level, so the banner says so. A dictation back at normal level clears it.
+        """
+        try:
+            from heyvox.audio.level import MIN_DICTATION_SECS, MicLevelBaseline
+            from heyvox.constants import ACTIVE_MIC_FILE
+            from heyvox.hud.surface import HUDSurface
+            try:
+                with open(ACTIVE_MIC_FILE) as _f:
+                    mic = _f.read().strip().split("\n")[0]
+            except OSError:
+                return
+            if not mic:
+                return
+            if self._level_baseline is None:
+                self._level_baseline = MicLevelBaseline()
+            base = self._level_baseline.baseline(mic)
+            drop = self._level_baseline.observe(mic, speech_db, duration)
+            if drop is not None:
+                self._log(
+                    f"[mic-level] drop: speech_p95={speech_db:.1f} dBFS is {drop:.0f} dB below "
+                    f"baseline {base:.1f} dBFS ({mic})"
+                )
+                HUDSurface.banner(
+                    level="warn",
+                    source=_MIC_LEVEL_DROP_SOURCE,
+                    text=f"Mic level {drop:.0f} dB below normal — turn {mic[:40]} off and on",
+                    ttl_secs=_MIC_LEVEL_DROP_TTL_SECS,
+                )
+            elif base is not None and speech_db is not None and duration >= MIN_DICTATION_SECS:
+                HUDSurface.clear(_MIC_LEVEL_DROP_SOURCE)
+        except Exception as exc:  # never let a diagnostic break the dictation
+            self._log(f"[mic-level] check failed: {exc}")
 
     def _surface_quiet_banner(self, raw_rms_db: float, duration: float, *, force: bool = False) -> None:
         """Show the "Mic too quiet" HUD banner for a recording dropped for its level (DEF-101, DEF-255)."""

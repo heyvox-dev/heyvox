@@ -22,6 +22,7 @@ from heyvox.app_context import AppContext
 from heyvox.device_manager import DeviceManager
 from heyvox.audio.profile import MicProfileManager
 from heyvox.audio.normalize import apply_input_gain
+from heyvox.audio.level import effective_silence_threshold
 from heyvox.audio.keepalive import OutputKeepAlive
 from heyvox.recording import RecordingStateMachine
 from heyvox.constants import (
@@ -1173,6 +1174,9 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
 
     # Silence timeout: tracks when user first speaks during recording
     _first_speech_time: float = 0.0
+    # DEF-276: chunk peaks of the running hands-free recording, for the
+    # relative silence threshold (see heyvox/audio/level.py).
+    _rec_peaks: list[int] = []
     _rec_started_at: float = 0.0  # timestamp when current recording started (for warmup)
     _STOP_WARMUP_SECS = 2.0       # suppress stop-word re-trigger for this long after start
     _is_rec: bool = False
@@ -1557,6 +1561,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # Reset first-speech tracker and model reset timer when recording starts
             if _is_rec and not _was_rec:
                 _first_speech_time = 0.0
+                _rec_peaks = []
                 _last_model_reset = time.time()
                 _rec_started_at = time.time()  # for stop-word warmup suppression
 
@@ -1747,6 +1752,7 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
             # Track when user first starts speaking during recording
             if _is_rec and not _is_ptt:
                 _level = int(np.abs(audio).max())
+                _rec_peaks.append(_level)
                 if _level >= silence_threshold and _first_speech_time == 0.0:
                     _first_speech_time = time.time()
 
@@ -1794,10 +1800,18 @@ def _run_loop(ctx: AppContext, devices: DeviceManager, recording: RecordingState
                         with ctx.lock:
                             recent_chunks = ctx.audio_buffer[-int(silence_timeout * sample_rate / chunk_size):]
                         if recent_chunks:
-                            quiet_count = sum(1 for c in recent_chunks if int(np.abs(c).max()) < silence_threshold)
+                            # DEF-276: when the mic sagged, speech peaks sit under the
+                            # static threshold and the watchdog cut dictations mid-sentence.
+                            # Judge silence against this recording's own speech level.
+                            _eff_threshold = effective_silence_threshold(_rec_peaks, silence_threshold)
+                            quiet_count = sum(1 for c in recent_chunks if int(np.abs(c).max()) < _eff_threshold)
                             quiet_pct = quiet_count / len(recent_chunks)
                             if quiet_pct >= 0.85:
-                                log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet), transcribing")
+                                _thr_tag = (
+                                    f", threshold {_eff_threshold} relative (static {silence_threshold})"
+                                    if _eff_threshold != silence_threshold else ""
+                                )
+                                log(f"Silence timeout ({silence_timeout}s after speech, {quiet_pct:.0%} quiet{_thr_tag}), transcribing")
                                 recording.stop(reason="silence_timeout")
                                 continue
 
