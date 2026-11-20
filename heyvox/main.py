@@ -49,7 +49,6 @@ from heyvox.constants import (
     HERALD_LAST_PLAY,
     HERALD_WORKSPACE_FILE,
     HERALD_GENERATING_WAV_PREFIX,
-    HERALD_PLAYING_PID,
     HERALD_PENDING_SWITCH_FLAG,
     VERBOSITY_FILE,
     ensure_run_dirs,
@@ -630,11 +629,45 @@ def _start_liveness_watchdog(atexit_mod) -> None:
 
 
 def _stop_tts_from_escape(hud_send_fn) -> None:
-    """Stop TTS playback and clear queue (used by Escape key handler)."""
-    from heyvox.audio.tts import stop_all
-    stop_all()
-    hud_send_fn({"type": "state", "state": "idle"})
-    log("TTS stopped via Escape key.")
+    """Stop TTS playback and clear queue (used by Escape key handler).
+
+    Called from the Quartz event-tap callback. The stop spawns the Herald CLI
+    (a Python subprocess, up to 5 s timeout), so it runs on its own thread:
+    a callback that blocks long enough makes macOS disable the tap, and keys
+    pressed meanwhile bypass HeyVox (DEF-277).
+    """
+    import threading
+
+    def _run():
+        from heyvox.audio.tts import stop_all
+        stop_all()
+        hud_send_fn({"type": "state", "state": "idle"})
+        log("TTS stopped via Escape key.")
+
+    threading.Thread(target=_run, daemon=True, name="escape-stop-tts").start()
+
+
+def _tts_playback_active() -> bool:
+    """Escape's "is TTS speaking" check, including gaps between parts (DEF-277)."""
+    from heyvox.audio.tts import is_playback_active
+    return is_playback_active()
+
+
+def _on_secure_input(enabled: bool, owner: str | None) -> None:
+    """Menu-bar banner while Secure Input blinds HeyVox to Escape (DEF-277)."""
+    try:
+        from heyvox.hud.surface import HUDSurface
+        if enabled:
+            HUDSurface.banner(
+                level="warn",
+                source="secure-input",
+                text=f"Escape can't stop TTS: Secure Input on ({owner or 'unknown app'})",
+                ttl_secs=3600,
+            )
+        else:
+            HUDSurface.clear("secure-input")
+    except Exception as e:
+        log(f"SECURE_INPUT banner failed: {e}")
 
 
 def _cancel_pending_switch() -> None:
@@ -944,9 +977,8 @@ def _setup(config: HeyvoxConfig):
             "on_cancel_switch": _cancel_pending_switch,
             "is_busy": lambda: ctx.busy,
             "is_recording": lambda: ctx.is_recording,
-            "is_speaking": lambda: (
-                os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID)
-            ),
+            "is_speaking": _tts_playback_active,
+            "on_secure_input": _on_secure_input,
             "is_switch_pending": lambda: os.path.exists(HERALD_PENDING_SWITCH_FLAG),
             "on_jump": _jump_to_announced,
         }

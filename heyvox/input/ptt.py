@@ -32,6 +32,59 @@ _PTT_KEY_FLAGS = {
 
 ESCAPE_KEYCODE = 53
 
+
+# DEF-277: macOS "Secure Event Input" (EnableSecureEventInput, switched on by
+# e.g. a focused browser password field, 1Password, Terminal's Secure Keyboard
+# Entry) hides key-down events from every event tap of other processes, even
+# while the owning app is in the background. Modifier changes (fn) still
+# arrive, so PTT keeps working while Escape silently stops reaching HeyVox and
+# instead falls through to the frontmost app (in Orca it interrupts the agent).
+_carbon_lib = None
+
+
+def secure_input_enabled() -> bool:
+    """True if some process holds Secure Event Input (Carbon, cheap call)."""
+    global _carbon_lib
+    try:
+        if _carbon_lib is None:
+            import ctypes
+            _carbon_lib = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/Carbon.framework/Carbon"
+            )
+            _carbon_lib.IsSecureEventInputEnabled.restype = ctypes.c_bool
+        return bool(_carbon_lib.IsSecureEventInputEnabled())
+    except Exception:
+        return False
+
+
+def secure_input_owner() -> str | None:
+    """Return "<process name> (pid N)" of the Secure Input holder, or None.
+
+    Reads kCGSSessionSecureInputPID from the IORegistry. Takes a few hundred
+    ms, so only call it off the event-tap thread (the watchdog does, and
+    only on a state change).
+    """
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ioreg", "-l", "-w", "0", "-d", "1"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return None
+    m = re.search(r'"kCGSSessionSecureInputPID"=(\d+)', out)
+    if not m:
+        return None
+    pid = m.group(1)
+    try:
+        name = subprocess.run(
+            ["ps", "-o", "comm=", "-p", pid], capture_output=True, text=True, timeout=2,
+        ).stdout.strip().rsplit("/", 1)[-1]
+    except Exception:
+        name = "?"
+    return f"{name or '?'} (pid {pid})"
+
 # Device-dependent modifier bits (NX_DEVICE*KEYMASK in IOLLEvent.h). Unlike the
 # generic masks above, each one names exactly one physical key, so a left-side
 # key can be told apart from its right-side twin. Used by the Herald jump key.
@@ -379,6 +432,9 @@ def start_ptt_listener(
             - "is_busy": callable() -> bool — is transcription in progress?
             - "is_recording": callable() -> bool — is recording active?
             - "is_speaking": callable() -> bool — is TTS playing?
+            - "on_secure_input": callable(enabled: bool, owner: str | None)
+              — Secure Event Input switched on/off (DEF-277). Runs on the
+              watchdog thread, not the Quartz callback.
             - "is_switch_pending": callable() -> bool — is a Herald
               workspace-switch countdown currently running?
             - "on_jump": callable() — jump_key double-tapped. Runs inside
@@ -552,8 +608,10 @@ def start_ptt_listener(
                     cancel_tts = callbacks.get("on_cancel_tts")
                     if cancel_tts:
                         cancel_tts()
-                    _log("Escape: stopping TTS")
+                    _log(f"Escape: stopping TTS ({esc_src})")
                     return None  # consume — don't pass to app
+                # DEF-277: previously silent, so a missed stop left no trace.
+                _log(f"Escape: passed through, nothing to cancel ({esc_src})")
             return event
 
         # Only process modifier flag changes for PTT
@@ -653,8 +711,29 @@ def start_ptt_listener(
         _consecutive_reenable = 0
         _last_heartbeat = time.time()
         _silence_warned = False
+        _secure_prev = False
         while True:
             time.sleep(1.0)
+            # DEF-277: Secure Input blinds this tap to key-downs (Escape)
+            # while fn still works — log every on/off edge with the holder.
+            try:
+                secure_now = secure_input_enabled()
+                if secure_now != _secure_prev:
+                    _secure_prev = secure_now
+                    owner = secure_input_owner() if secure_now else None
+                    if secure_now:
+                        _log(
+                            f"SECURE_INPUT on, held by {owner or 'unknown'}: macOS hides "
+                            f"key presses from HeyVox, Escape cannot stop TTS until it ends "
+                            f"(fn/PTT unaffected)"
+                        )
+                    else:
+                        _log("SECURE_INPUT off: Escape reaches HeyVox again")
+                    on_secure = callbacks.get("on_secure_input")
+                    if on_secure:
+                        on_secure(secure_now, owner)
+            except Exception as e:
+                _log(f"SECURE_INPUT check failed: {e}")
             try:
                 if not Quartz.CGEventTapIsEnabled(tap):
                     _consecutive_reenable += 1

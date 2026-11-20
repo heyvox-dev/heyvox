@@ -240,6 +240,41 @@ def stop_all() -> None:
     _herald("stop")
 
 
+# DEF-277: a queued part counts as "playing" for Escape only while it is this
+# fresh, so an orphaned WAV left in the queue can't make Escape swallow the
+# key forever.
+_QUEUED_PART_MAX_AGE_SECS = 120.0
+
+
+def is_playback_active(now: float | None = None) -> bool:
+    """True while Herald is playing or has fresh parts queued to play.
+
+    The playing flag and afplay PID file are removed after every part and
+    written again for the next one, and they don't exist yet while the
+    orchestrator pauses media before the first part. An Escape landing in
+    such a gap used to fall through to the frontmost app. A fresh WAV in the
+    queue means playback continues within moments, so Escape should stop it.
+    """
+    import time
+    from heyvox.constants import HERALD_PLAYING_PID, HERALD_QUEUE_DIR, TTS_PLAYING_FLAG
+    if os.path.exists(TTS_PLAYING_FLAG) or os.path.exists(HERALD_PLAYING_PID):
+        return True
+    now = time.time() if now is None else now
+    try:
+        with os.scandir(HERALD_QUEUE_DIR) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".wav"):
+                    continue
+                try:
+                    if now - entry.stat().st_mtime <= _QUEUED_PART_MAX_AGE_SECS:
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return False
+
+
 def cancel_pending_switch() -> None:
     """Cancel a pending Herald workspace-switch countdown (Right-Ctrl key target)."""
     _herald("cancel-switch")
