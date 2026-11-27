@@ -84,5 +84,8 @@ HUD: Hadd
 API: A-P-I
 URL: U-R-L
 
+# English words used in German speech
+live: leif
+
 # German words Martin mispronounces
 drin: drinn

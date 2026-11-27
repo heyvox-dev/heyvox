@@ -301,3 +301,25 @@ class TestDaemonChunks:
         assert resp["parts"] == 1
         with wave.open(out) as w:
             assert w.getnframes() == 2000
+
+
+class TestDaemonStartWait:
+    def _run(self, worker, monkeypatch, cfg):
+        sleeps = []
+        monkeypatch.setattr("heyvox.herald.worker._tts_config", lambda: cfg)
+        monkeypatch.setattr(worker, "_kokoro_daemon_alive", lambda: False)
+        monkeypatch.setattr(worker, "_reap_stale_kokoro_daemon", lambda: None)
+        monkeypatch.setattr(worker, "_find_kokoro_daemon_script", lambda: Path("/x/kokoro-daemon.py"))
+        monkeypatch.setattr(worker, "_find_kokoro_python", lambda: "/usr/bin/true")
+        monkeypatch.setattr("heyvox.herald.worker.subprocess.Popen", lambda *a, **k: None)
+        monkeypatch.setattr("heyvox.herald.worker.os.path.exists", lambda p: False)
+        monkeypatch.setattr("heyvox.herald.worker.time.sleep", lambda s: sleeps.append(s))
+        assert worker._ensure_kokoro_daemon() is False
+        return len(sleeps)
+
+    def test_def280_longer_wait_in_german_mode(self, worker, monkeypatch):
+        german = _cfg(reply_language="de", german_engine="kikiri")
+        assert self._run(worker, monkeypatch, german) == 200
+
+    def test_default_wait_unchanged(self, worker, monkeypatch):
+        assert self._run(worker, monkeypatch, _cfg()) == 80

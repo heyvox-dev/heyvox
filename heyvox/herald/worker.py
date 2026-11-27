@@ -1173,8 +1173,15 @@ class HeraldWorker:
             log.warning("Failed to launch Kokoro daemon: %s", exc)
             return False
 
-        # Wait up to 8 seconds for socket to appear
-        for _ in range(80):
+        # Wait for the socket. 8 s covers the English model; in German mode
+        # the daemon also preloads kikiri before binding (measured 7.0 s for
+        # both on an M1 Pro, DEF-280), so allow more headroom there.
+        tts = _tts_config()
+        german_preload = (
+            getattr(tts, "reply_language", "en") == "de"
+            and getattr(tts, "german_engine", "") == "kikiri"
+        )
+        for _ in range(200 if german_preload else 80):
             if os.path.exists(KOKORO_DAEMON_SOCK):
                 log.info("Kokoro daemon started successfully")
                 return True
