@@ -87,6 +87,7 @@ Key features:
 - **Audio ducking** — lowers volume during speech, restores after
 - **Emotional voice switching** — alert/cheerful/thoughtful → different voices
 - **Language detection** — auto-switches German/French/Italian/Chinese/Japanese
+- **German voice** — `tts.german_engine: kikiri` runs kikiri's German Kokoro weights (Martin/Victoria) inside the Kokoro daemon, with a respelling lexicon for English dev terms (`herald/lexicon_de.yaml` + user `tts-lexicon-de.yaml`); `tts.reply_language: de` asks agents (voice_status, `heyvox tts-language`) to write German <tts>
 - **Hold queue** — messages from inactive workspaces held until user idle
 - **Media pause** — via Hush (browser) or MediaRemote (native apps)
 

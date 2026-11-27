@@ -1108,6 +1108,25 @@ def _cmd_calibrate(args):
         pa.terminate()
 
 
+def _cmd_tts_language(args):
+    """Print or set tts.reply_language — the language agents write <tts> in.
+
+    Without an argument prints "en" or "de" (for session-start hooks);
+    --hint prints the instruction sentence instead (empty for English).
+    """
+    from heyvox.audio.tts import get_reply_language, get_tts_language_prompt
+
+    if args.language:
+        from heyvox.config import update_config
+
+        if not update_config(**{"tts.reply_language": args.language}):
+            print("Could not write tts.reply_language to config.yaml", file=sys.stderr)
+            sys.exit(1)
+        print(f"tts.reply_language = {args.language} (new agent sessions pick it up)")
+        return
+    print(get_tts_language_prompt() if args.hint else get_reply_language())
+
+
 def _cmd_learn_vocab(args):
     """Learn the STT vocabulary glossary from transcript history (Phase 16).
 
@@ -1396,6 +1415,18 @@ def main():
         help="Filter by agent name (e.g. 'cursor'). Registers all detected if omitted.",
     )
     sub_register.set_defaults(func=_cmd_register)
+
+    # tts-language — language agents write <tts> blocks in
+    sub_tts_lang = subparsers.add_parser(
+        "tts-language",
+        help="Print or set the language agents write <tts> blocks in (en|de)",
+    )
+    sub_tts_lang.add_argument("language", nargs="?", choices=["en", "de"], default=None)
+    sub_tts_lang.add_argument(
+        "--hint", action="store_true",
+        help="Print the instruction sentence for agents instead of the code",
+    )
+    sub_tts_lang.set_defaults(func=_cmd_tts_language)
 
     # learn-vocab — batch vocabulary extractor for STT initial_prompt (Phase 16)
     sub_learn_vocab = subparsers.add_parser(

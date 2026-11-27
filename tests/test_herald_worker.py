@@ -14,6 +14,7 @@ import os
 import struct
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -706,6 +707,11 @@ class TestDisallowedLanguageAndTempSkip:
         Path(verbosity_file).write_text("full")
         monkeypatch.setattr("heyvox.constants.VERBOSITY_FILE", verbosity_file)
         monkeypatch.setenv("HEYVOX_TTS_LANGS", "en-us")
+        # Independent of the developer's live tts.reply_language.
+        monkeypatch.setattr(
+            "heyvox.herald.worker._tts_config",
+            lambda: SimpleNamespace(reply_language="en", german_engine="qwen"),
+        )
         calls = []
 
         def mock_generate(text, voice, lang, speed):

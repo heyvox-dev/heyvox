@@ -232,6 +232,24 @@ class TTSConfig(BaseModel):
     # Env override: HEYVOX_TTS_LANGS="en-us,de"
     languages: list[str] | str = "auto"
 
+    # Language agents are asked to write their <tts> blocks in ("en" | "de").
+    # Surfaced to agents via voice_status()'s style_instruction and the
+    # `heyvox tts-language` command (for session-start hooks). "de" also
+    # allows German output regardless of `languages`, so switching the spoken
+    # language is this one line.
+    reply_language: str = "en"
+
+    # Engine for German speech:
+    #   "qwen"   — Qwen3-TTS daemon (separate process, ~650 MB, slower)
+    #   "kikiri" — Kokoro with kikiri German weights (Apache-2.0), runs inside
+    #              the Kokoro daemon on Metal; one speaker per model
+    german_engine: str = "qwen"
+    # kikiri speaker model: "martin" | "victoria"
+    kikiri_voice: str = "martin"
+    # Playback speed for kikiri (English Kokoro voices run at 1.2, which
+    # rushes German).
+    kikiri_speed: float = 1.0
+
     # Voice overrides — when set, replace the mood-based voice selection.
     # None (default) → mood → voice mapping picks (af_sarah/af_heart/af_nova/af_sky
     # for Kokoro; Serena/Vivian/Aura/Aria for Qwen3).
@@ -293,6 +311,30 @@ class TTSConfig(BaseModel):
         valid = {"kokoro", "piper"}
         if v not in valid:
             raise ValueError(f"engine must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("reply_language")
+    @classmethod
+    def validate_reply_language(cls, v: str) -> str:
+        valid = {"en", "de"}
+        if v not in valid:
+            raise ValueError(f"reply_language must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("german_engine")
+    @classmethod
+    def validate_german_engine(cls, v: str) -> str:
+        valid = {"qwen", "kikiri"}
+        if v not in valid:
+            raise ValueError(f"german_engine must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("kikiri_voice")
+    @classmethod
+    def validate_kikiri_voice(cls, v: str) -> str:
+        valid = {"martin", "victoria"}
+        if v not in valid:
+            raise ValueError(f"kikiri_voice must be one of {valid}, got '{v}'")
         return v
 
     @field_validator("style")

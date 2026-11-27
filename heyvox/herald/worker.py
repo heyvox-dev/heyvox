@@ -112,9 +112,33 @@ QWEN_DEFAULT_VOICE = "Serena"
 QWEN_LANGS: frozenset[str] = frozenset({"de"})
 
 
+# kikiri German Kokoro speakers (see heyvox.herald.kikiri). Speak at 1.0:
+# DEFAULT_SPEED (1.2) is tuned for the English voices and rushes German.
+KIKIRI_SPEAKERS: frozenset[str] = frozenset({"martin", "victoria"})
+KIKIRI_DEFAULT_SPEAKER = "martin"
+KIKIRI_DEFAULT_SPEED = 1.0
+
+
+def _tts_config():
+    try:
+        from heyvox.config import load_config
+        return load_config().tts
+    except Exception as exc:
+        log.debug("Could not load tts config: %s", exc)
+        return None
+
+
+def _german_engine() -> str:
+    """'qwen' (default) or 'kikiri' — config tts.german_engine."""
+    engine = getattr(_tts_config(), "german_engine", "qwen")
+    return engine if engine in ("qwen", "kikiri") else "qwen"
+
+
 def _engine_for_lang(lang: str) -> str:
-    """Return 'qwen' or 'kokoro' for the given language code."""
-    return "qwen" if lang in QWEN_LANGS else "kokoro"
+    """Return 'qwen', 'kikiri' or 'kokoro' for the given language code."""
+    if lang in QWEN_LANGS:
+        return _german_engine()
+    return "kokoro"
 
 
 def _allowed_languages() -> frozenset[str] | None:
@@ -147,6 +171,10 @@ def _allowed_languages() -> frozenset[str] | None:
         return None
     if not items or "auto" in items:
         return None
+    # tts.reply_language: de asks agents to write German, so German must be
+    # speakable without also editing the allowlist (one-line switch).
+    if getattr(_tts_config(), "reply_language", "en") == "de":
+        items.append("de")
     return frozenset(items)
 
 # ---------------------------------------------------------------------------
@@ -567,7 +595,14 @@ class HeraldWorker:
         # demote to the fallback (first allowlist entry or en-us) so we
         # never silently pull an unwanted engine (e.g. Qwen3 for German).
         allowed = _allowed_languages()
-        if allowed is not None and "de" not in allowed and _is_predominantly_german(speech):
+        german_text = _is_predominantly_german(speech)
+        if german_text and lang != "de" and (allowed is None or "de" in allowed):
+            # detect_language() only flags German with umlauts or a few fixed
+            # phrases; plain German ("Das war der Fehler") would otherwise go
+            # to an English voice.
+            log.info("TTS lang promoted: %s → de (German function words)", lang)
+            lang, lang_voice = "de", None
+        if allowed is not None and "de" not in allowed and german_text:
             # A German sentence read by an English voice is unintelligible.
             # Replace it with a short English notice so the user still hears
             # that the session finished. Checked independently of
@@ -609,8 +644,11 @@ class HeraldWorker:
             log.debug("DEF-078: register_tts_text failed (non-fatal): %s", e)
 
         # Generate WAV
+        speed = DEFAULT_SPEED
+        if _engine_for_lang(lang) == "kikiri":
+            speed = float(getattr(_tts_config(), "kikiri_speed", KIKIRI_DEFAULT_SPEED) or KIKIRI_DEFAULT_SPEED)
         log.info("Generating TTS: mood=%s lang=%s voice=%s len=%d", mood, lang, voice, len(speech))
-        ok = self._generate(speech, voice, lang, DEFAULT_SPEED)
+        ok = self._generate(speech, voice, lang, speed)
         if ok:
             _ensure_orchestrator()
         return ok
@@ -641,6 +679,13 @@ class HeraldWorker:
         (Serena/Ethan/etc.) — picked based on lang.
         """
         engine = _engine_for_lang(lang)
+
+        # kikiri: one speaker per model, no mood/agent variation.
+        if engine == "kikiri":
+            speaker = os.environ.get("KIKIRI_VOICE", "") or getattr(
+                _tts_config(), "kikiri_voice", KIKIRI_DEFAULT_SPEAKER
+            )
+            return speaker if speaker in KIKIRI_SPEAKERS else KIKIRI_DEFAULT_SPEAKER
 
         # Mood → default voice for this engine
         if engine == "qwen":
@@ -745,6 +790,12 @@ class HeraldWorker:
         temp_wav = f"{HERALD_GENERATING_WAV_PREFIX}{os.getpid()}.wav"
 
         engine = _engine_for_lang(lang)
+        if engine == "kikiri":
+            # German kikiri weights run inside the Kokoro daemon (lang "de").
+            if self._generate_kokoro(text, voice, lang, speed, temp_wav, timestamp):
+                return True
+            log.warning("Kokoro daemon (kikiri) unavailable — falling back to Piper (lang=%s)", lang)
+            return self._generate_piper(text, voice, temp_wav, timestamp, lang)
         if engine == "qwen":
             if self._generate_qwen(text, voice, lang, speed, temp_wav, timestamp):
                 return True

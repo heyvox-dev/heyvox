@@ -1,0 +1,88 @@
+# German TTS pronunciation lexicon (shipped defaults).
+#
+# espeak-ng's German G2P reads English loanwords by German spelling rules
+# ("Headset" -> "He-az-et", "Cache" -> "Kache", "Daemon" -> "Dämon"). Each
+# entry maps a written word to a German *respelling* that espeak-de turns into
+# the intended sound. Matching is case-insensitive, on whole words; a plain
+# German plural/genitive "s"/"es" after the word is kept ("Headsets" ->
+# "Hedsetts"); where that reads wrong, add the plural as its own entry
+# ("Caches"). Words inside hyphenated compounds match too ("Kokoro-Daemon").
+# Multi-word keys ("Pull Request") match across a space or hyphen.
+#
+# Override or extend per user in <config dir>/tts-lexicon-de.yaml with the
+# same format; a user value of "" removes a shipped entry.
+#
+# Check a respelling with:
+#   python -c "from misaki import espeak; print(espeak.EspeakG2P(language='de')('Käsch'))"
+
+# Hardware / audio
+Headset: Hedsett
+Mic: Meik
+Speaker: Spieker
+
+# Dev workflow
+Cache: Käsch
+Caches: Käsches
+Daemon: Diemen
+Pull Request: Pull-Rikwest
+Bug: Bagg
+Hook: Huck
+Issue: Ischu
+Feature: Fietscher
+Client: Kleient
+Build: Bild
+Thread: Thredd
+Queue: Kju
+Timeout: Teimaut
+Default: Diefolt
+Endpoint: Endpeunt
+Shortcut: Schortkatt
+Pipeline: Peiplein
+Review: Riwju
+Deploy: Dipleu
+Merge: Mördsch
+Branch: Bräntsch
+Log: Logg
+Update: Apdeit
+Upload: Aplohd
+Download: Daunlohd
+Workflow: Wörkflo
+Workspace: Wörkspeis
+Workspaces: Wörkspeises
+Worktree: Wörktrie
+Release: Rilies
+Releases: Rilieses
+Stream: Striem
+Server: Sörwer
+Browser: Brauser
+Overlay: Owerlei
+Clipboard: Klippbord
+Sidebar: Seidbar
+Tooltip: Tuhltipp
+Watchdog: Wotsch-Dogg
+Listener: Lissener
+Plugin: Plaggin
+Engine: Ändschinn
+Escape: Iskeip
+Hotkey: Hott-Kie
+Tab: Täb
+Call: Kohl
+Wake Word: Weik-Wörd
+
+# Names
+Claude: Klohd
+GitHub: Gitt-Häbb
+Whisper: Wisper
+
+# Acronyms read as English letters
+CI: Sie-Ei
+CET: C-E-T
+CEST: C-E-S-T
+UK: Ju-Kei
+JSON: Dschäisn
+HUD: Hadd
+API: A-P-I
+URL: U-R-L
+
+# German words Martin mispronounces
+drin: drinn

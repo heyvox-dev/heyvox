@@ -32,6 +32,10 @@ MODEL_REVISIONS: dict[str, str] = {
     "mlx-community/Kokoro-82M-bf16": "a71e4d38b236d968966a2002c4c895dbd12b1c3c",
     "mlx-community/whisper-small-mlx": "45f3915923c7a79a5a5b5a7d909d39aeb0e5630e",
     "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16": "1eccf1cb2519b5a4e8a95b5f0544f3303568164f",
+    # German Kokoro weights (Apache-2.0); converted locally to MLX by
+    # heyvox.herald.kikiri. Not mlx-community — fetched by pinned SHA only.
+    "kikiri-tts/kikiri-german-martin": "1e9dcd16ed48fda0a7a1f62e5e37130a5fdf10d9",
+    "kikiri-tts/kikiri-german-victoria": "ce81e200ff9203e1a3b042cd678c48e3ffb85cef",
 }
 
 # The Kokoro repo the runtime actually loads — NOT hexgrad/Kokoro-82M, which the
