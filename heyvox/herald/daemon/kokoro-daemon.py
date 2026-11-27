@@ -166,6 +166,79 @@ def map_lang(lang):
     return LANG_MAP.get(lang, "a")
 
 
+# --- German (kikiri) ---
+# Kokoro's stock weights have no German voice. kikiri publishes German
+# single-speaker Kokoro checkpoints; heyvox.herald.kikiri converts one to an
+# MLX model dir. It is loaded lazily on the first "de" request (it costs
+# ~170 MB on top of the English model) and kept until the daemon idles out.
+GERMAN_LANGS = {"de", "de-de"}
+KIKIRI_DEFAULT_SPEAKER = "martin"
+_german = {}  # speaker -> (pipeline, voice_path)
+
+
+def _ensure_kikiri_dir(speaker):
+    from heyvox.herald import kikiri
+
+    if not kikiri.is_prepared(speaker):
+        # Conversion needs torch, which this daemon blocks (DEF-193) — run it
+        # in a child interpreter. First run downloads ~330 MB.
+        import subprocess
+
+        log(f"kikiri {speaker} not prepared yet, converting...")
+        subprocess.run(
+            [sys.executable, "-m", "heyvox.herald.kikiri", "prepare", speaker],
+            check=True, timeout=900, stdout=subprocess.DEVNULL,
+        )
+    return kikiri.model_dir(speaker)
+
+
+def german_pipeline(speaker):
+    """Return (pipeline, voice_path) for a kikiri speaker, loading on first use."""
+    if speaker in _german:
+        return _german[speaker]
+    t0 = time.time()
+    model_dir = _ensure_kikiri_dir(speaker)
+    from mlx_audio.tts.utils import load_model as _load
+    from mlx_audio.tts.models.kokoro.pipeline import KokoroPipeline
+    from misaki import espeak
+
+    model = _load(model_dir)
+    # mlx-audio has no German lang code; build a pipeline on any espeak code
+    # and swap in the German G2P (the model itself is language-blind).
+    pipe = KokoroPipeline(lang_code="e", model=model, repo_id=str(model_dir))
+    pipe.g2p = espeak.EspeakG2P(language="de")
+    voice_path = str(model_dir / "voices" / f"{speaker}.safetensors")
+    for _ in pipe("Hallo.", voice=voice_path, speed=1.0):
+        pass
+    _german[speaker] = (pipe, voice_path)
+    _clear_mlx_cache("german warmup")
+    log(f"kikiri {speaker} loaded + warmed in {time.time() - t0:.1f}s")
+    return _german[speaker]
+
+
+def prepare_german_text(text):
+    try:
+        from heyvox.herald.german_text import prepare
+
+        return prepare(text)
+    except Exception as exc:
+        log(f"German text preparation failed, using raw text: {exc}")
+        return text
+
+
+def _german_mode_configured():
+    try:
+        from heyvox.config import load_config
+
+        tts = load_config().tts
+        speaker = getattr(tts, "kikiri_voice", KIKIRI_DEFAULT_SPEAKER)
+        if getattr(tts, "reply_language", "en") == "de" and getattr(tts, "german_engine", "") == "kikiri":
+            return speaker
+    except Exception as exc:
+        log(f"Could not read German TTS config: {exc}")
+    return None
+
+
 # --- Model loading ---
 
 def load_model_mlx():
@@ -286,50 +359,78 @@ def write_wav(path, samples, sample_rate):
 
 # --- TTS generation ---
 
-def generate_mlx(model, text, voice, lang, speed, output_path):
-    """Generate TTS using mlx-audio (Metal GPU)."""
-    t0 = time.time()
-    lang_code = map_lang(lang)
-    sentences = split_sentences(text)
+GERMAN_SAMPLE_RATE = 24000
 
-    if len(sentences) <= 1:
-        for result in model.generate(text, voice=voice, speed=speed, lang_code=lang_code):
-            audio = np.array(result.audio)
-            audio = normalize_samples(audio)
-            write_wav(output_path, audio, result.sample_rate)
-            duration = time.time() - t0
-            audio_len = len(audio) / result.sample_rate
-            log(f"Generated {audio_len:.1f}s audio in {duration:.2f}s (1 part, mlx) -> {output_path}")
-            return {"ok": True, "duration": duration, "audio_length": audio_len, "parts": 1}
+
+def _mlx_synth(model, voice, lang, speed):
+    """Return synth(sentence) -> (float samples, sample_rate) for this request."""
+    if lang in GERMAN_LANGS:
+        speaker = voice if voice in ("martin", "victoria") else KIKIRI_DEFAULT_SPEAKER
+        pipe, voice_path = german_pipeline(speaker)
+
+        def synth(sentence):
+            chunks = [
+                np.array(r.audio).reshape(-1)
+                for r in pipe(sentence, voice=voice_path, speed=speed)
+                if r.audio is not None
+            ]
+            if not chunks:
+                return None, GERMAN_SAMPLE_RATE
+            return np.concatenate(chunks), GERMAN_SAMPLE_RATE
+
+        return synth
+
+    lang_code = map_lang(lang)
+
+    def synth(sentence):
+        chunks, sample_rate = [], 24000
+        for result in model.generate(sentence, voice=voice, speed=speed, lang_code=lang_code):
+            chunks.append(np.array(result.audio).reshape(-1))
+            sample_rate = result.sample_rate
+        if not chunks:
+            return None, sample_rate
+        return np.concatenate(chunks), sample_rate
+
+    return synth
+
+
+def generate_mlx(model, text, voice, lang, speed, output_path):
+    """Generate TTS using mlx-audio (Metal GPU).
+
+    German ("de") goes through the kikiri model with lexicon/normalization
+    applied BEFORE sentence splitting ("z. B." must not end a sentence).
+    """
+    t0 = time.time()
+    if lang in GERMAN_LANGS:
+        text = prepare_german_text(text)
+    synth = _mlx_synth(model, voice, lang, speed)
+    sentences = split_sentences(text) or [text]
 
     total_audio_len = 0.0
     base = output_path.replace(".wav", "")
-
-    # Part 1 — first sentence (fast start)
-    for result in model.generate(sentences[0], voice=voice, speed=speed, lang_code=lang_code):
-        audio = np.array(result.audio)
+    parts = 0
+    part1_time = 0.0
+    for sentence in sentences:
+        audio, sample_rate = synth(sentence)
+        if audio is None or len(audio) == 0:
+            continue
+        parts += 1
+        path = output_path if parts == 1 else f"{base}.part{parts}.wav"
         audio = normalize_samples(audio)
-        write_wav(output_path, audio, result.sample_rate)
-        sample_rate = result.sample_rate
-        part1_time = time.time() - t0
-        part1_audio = len(audio) / sample_rate
-        total_audio_len += part1_audio
-        log(f"  Part 1: {part1_audio:.1f}s audio in {part1_time:.2f}s -> {output_path}")
-
-    # Part 2+ — remaining sentences
-    for i, sentence in enumerate(sentences[1:], start=2):
-        part_path = f"{base}.part{i}.wav"
-        for result in model.generate(sentence, voice=voice, speed=speed, lang_code=lang_code):
-            audio = np.array(result.audio)
-            audio = normalize_samples(audio)
-            write_wav(part_path, audio, result.sample_rate)
-            part_audio = len(audio) / result.sample_rate
-            total_audio_len += part_audio
-            log(f"  Part {i}: {part_audio:.1f}s audio in {time.time() - t0 - part1_time:.2f}s -> {part_path}")
+        write_wav(path, audio, sample_rate)
+        part_audio = len(audio) / sample_rate
+        total_audio_len += part_audio
+        if parts == 1:
+            part1_time = time.time() - t0
+            log(f"  Part 1: {part_audio:.1f}s audio in {part1_time:.2f}s -> {path}")
+        else:
+            log(f"  Part {parts}: {part_audio:.1f}s audio in {time.time() - t0 - part1_time:.2f}s -> {path}")
 
     duration = time.time() - t0
-    log(f"Generated {total_audio_len:.1f}s total in {duration:.2f}s ({len(sentences)} parts, mlx)")
-    return {"ok": True, "duration": duration, "audio_length": total_audio_len, "parts": len(sentences)}
+    if parts == 0:
+        return {"ok": False, "error": "no audio generated"}
+    log(f"Generated {total_audio_len:.1f}s total in {duration:.2f}s ({parts} parts, mlx, lang={lang})")
+    return {"ok": True, "duration": duration, "audio_length": total_audio_len, "parts": parts}
 
 
 def generate_onnx(model, text, voice, lang, speed, output_path):
@@ -509,6 +610,17 @@ def main():
     check_and_acquire_pid_lock()
 
     model = load_model()
+
+    # German mode configured: load the kikiri model before accepting requests
+    # so the first German reply doesn't pay the load. Failure is non-fatal —
+    # the first "de" request retries and the worker falls back to Piper.
+    if ENGINE == "mlx":
+        speaker = _german_mode_configured()
+        if speaker:
+            try:
+                german_pipeline(speaker)
+            except Exception as exc:
+                log(f"kikiri {speaker} preload failed: {exc}")
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     # We hold the flock, so any socket at this path is from a crashed

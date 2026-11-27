@@ -116,6 +116,8 @@ heyvox = [
     "models/oww/*.onnx",
     # Herald — TTS orchestration (Python daemon + hook shims)
     "herald/daemon/*.py",
+    # German TTS pronunciation lexicon
+    "herald/*.yaml",
     "herald/hooks/*.sh",
     # HUD — menu bar brand icons
     "hud/assets/*.png",

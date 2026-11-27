@@ -405,9 +405,38 @@ def get_tts_style() -> str:
     return _style
 
 
+# Language instruction for <tts> blocks, keyed by tts.reply_language.
+TTS_LANGUAGE_PROMPTS = {
+    "en": "",
+    "de": (
+        "Write the <tts> block in German: Herald speaks it with a German voice. "
+        "Plain spoken German, no markdown; English technical terms are fine."
+    ),
+}
+
+
+def get_reply_language() -> str:
+    """Return tts.reply_language ("en" | "de"); "en" on any config error."""
+    try:
+        from heyvox.config import load_config
+
+        lang = getattr(load_config().tts, "reply_language", "en")
+    except Exception as e:
+        log.debug(f"Could not read tts.reply_language: {e}")
+        return "en"
+    return lang if lang in TTS_LANGUAGE_PROMPTS else "en"
+
+
+def get_tts_language_prompt() -> str:
+    """Return the <tts> language instruction ('' for the English default)."""
+    return TTS_LANGUAGE_PROMPTS[get_reply_language()]
+
+
 def get_tts_style_prompt() -> str:
     """Return the style instruction for Claude to follow when writing <tts> blocks."""
-    return TTS_STYLE_PROMPTS.get(get_tts_style(), TTS_STYLE_PROMPTS["detailed"])
+    style = TTS_STYLE_PROMPTS.get(get_tts_style(), TTS_STYLE_PROMPTS["detailed"])
+    language = get_tts_language_prompt()
+    return f"{style} {language}" if language else style
 
 
 def set_tts_style(style: str) -> None:

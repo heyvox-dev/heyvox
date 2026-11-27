@@ -1124,6 +1124,17 @@
 - **Found by**: Franz's report; log grep for SECURE_INPUT, manual ioreg, comparing the daemon's plist PATH.
 - **Would have caught earlier**: a test that runs the helper under the daemon's real PATH instead of mocking the command by name. Any `subprocess` call in daemon code should use absolute paths for tools outside `/usr/bin:/bin`.
 
+## DEF-279 — Kokoro daemon kept only one audio chunk per sentence when mlx-audio returned several (FIXED 2026-11-27)
+
+- **Date**: 2026-11-27
+- **Category**: dead-code
+- **Severity**: S3 (latent; only for a single sentence longer than Kokoro's ~510-phoneme chunk)
+- **Symptom**: none reported. Found while adding the German kikiri path to `generate_mlx()` in `herald/daemon/kokoro-daemon.py`.
+- **Root cause**: `model.generate()` yields one result per internal chunk. The 1-sentence branch wrote the first result and returned; the multi-sentence branch wrote every result of a sentence to the same part file, so each chunk overwrote the previous one. Either way only one chunk of an over-long sentence was spoken.
+- **Fix**: one `synth(sentence)` per request that concatenates all chunks of a sentence before the WAV is written; the same loop now serves English (stock Kokoro) and German (kikiri pipeline).
+- **Found by**: code reading during the German TTS build.
+- **Would have caught earlier**: a daemon test with a fake model that yields two chunks for one sentence; the daemon had no test of `generate_mlx()` at all, only of its model pin.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
