@@ -68,7 +68,7 @@ def secure_input_owner() -> str | None:
     import subprocess
     try:
         out = subprocess.run(
-            ["ioreg", "-l", "-w", "0", "-d", "1"],
+            ["/usr/sbin/ioreg", "-l", "-w", "0", "-d", "1"],
             capture_output=True, text=True, timeout=5,
         ).stdout
     except Exception:
@@ -79,7 +79,7 @@ def secure_input_owner() -> str | None:
     pid = m.group(1)
     try:
         name = subprocess.run(
-            ["ps", "-o", "comm=", "-p", pid], capture_output=True, text=True, timeout=2,
+            ["/bin/ps", "-o", "comm=", "-p", pid], capture_output=True, text=True, timeout=2,
         ).stdout.strip().rsplit("/", 1)[-1]
     except Exception:
         name = "?"
