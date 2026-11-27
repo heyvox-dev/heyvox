@@ -33,7 +33,7 @@ def write_plist() -> Path:
 
     # Build PATH: include the Python binary's directory so vox CLI is available
     python_bin_dir = str(Path(sys.executable).parent)
-    env_path = f"{python_bin_dir}:/usr/local/bin:/usr/bin:/bin"
+    env_path = f"{python_bin_dir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
     # WorkingDirectory = the repo root so `python -m heyvox.main` resolves correctly
     working_dir = str(Path(__file__).resolve().parent.parent.parent)

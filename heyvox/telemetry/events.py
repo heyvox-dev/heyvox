@@ -84,7 +84,7 @@ def _system_info() -> dict:
     except Exception:
         hv_version = "unknown"
     macos_prod = _safe(["sw_vers", "-productVersion"]) or "unknown"
-    mac_model = _safe(["sysctl", "-n", "hw.model"]) or "unknown"
+    mac_model = _safe(["/usr/sbin/sysctl", "-n", "hw.model"]) or "unknown"
 
     # Hash the hostname so we have a stable but non-identifying machine key.
     host = platform.node() or "unknown"

@@ -197,7 +197,7 @@ def test_secure_input_owner_parses_pid(monkeypatch):
     import heyvox.input.ptt as ptt
 
     def fake_run(argv, **kw):
-        if argv[0] == "ioreg":
+        if argv[0].endswith("ioreg"):
             out = '"IOConsoleUsers" = ({"kCGSSessionSecureInputPID"=76296,"x"=1})'
         else:
             out = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n"
@@ -215,3 +215,30 @@ def test_secure_input_owner_none_when_absent(monkeypatch):
         lambda argv, **kw: subprocess.CompletedProcess(argv, 0, '"IOConsoleUsers" = ({})', ""),
     )
     assert ptt.secure_input_owner() is None
+
+
+def test_secure_input_owner_uses_absolute_tool_paths(monkeypatch):
+    """The launchd PATH has no /usr/sbin, so a bare "ioreg" is not found and
+    the holder was always logged as "unknown" (DEF-278)."""
+    import subprocess
+    import heyvox.input.ptt as ptt
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv[0])
+        out = '"kCGSSessionSecureInputPID"=444' if argv[0].endswith("ioreg") else "loginwindow\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert ptt.secure_input_owner() == "loginwindow (pid 444)"
+    assert seen and all(os.path.isabs(a) for a in seen)
+    if sys.platform == "darwin":
+        assert all(os.path.exists(a) for a in seen)
+
+
+def test_launchd_path_includes_sbin():
+    """Daemons shell out to /usr/sbin tools (ioreg, sysctl)."""
+    import inspect
+    from heyvox.setup import launchd
+    assert ":/usr/sbin:/sbin" in inspect.getsource(launchd.write_plist)

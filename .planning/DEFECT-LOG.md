@@ -1113,6 +1113,17 @@
 - **Found by**: Franz's report; log correlation, flag polling during a 6-part announcement, `CGGetEventTapList`, ioreg Secure Input check, live test.
 - **Would have caught earlier**: the input path had no log for "key arrived but did nothing" and no signal for "key never arrived". Every user-facing hotkey needs a trace for both outcomes, plus a log of the OS states that can blind it (tap disabled, Secure Input), so one report can be matched to a cause from the log alone.
 
+## DEF-278 — Secure Input holder always logged as "unknown" under launchd (FIXED 2026-11-27)
+
+- **Date**: 2026-11-27
+- **Category**: platform
+- **Severity**: S3 (diagnostic only; the DEF-277 banner said "unknown app" instead of naming the holder)
+- **Symptom**: Franz: Escape stops TTS rarely or not at all. Log: `SECURE_INPUT on, held by unknown` at 07:05:49 CET and again after the 08:37 restart, no `off` since, no `Escape:` line after 06:44. `ioreg` by hand showed `kCGSSessionSecureInputPID=444` = `loginwindow`.
+- **Root cause**: `secure_input_owner()` called bare `ioreg`; the launchd plist PATH (`setup/launchd.py`) is `<python>:/usr/local/bin:/usr/bin:/bin`, without `/usr/sbin`, so `subprocess.run` raised FileNotFoundError and the function returned None. `sysctl` in `reporting/text_report.py` and `telemetry/events.py` had the same gap (bug reports would show model/RAM "unknown" when run from the daemon). The DEF-277 test mocked `argv[0] == "ioreg"`, so it pinned the bug instead of catching it.
+- **Fix**: absolute paths `/usr/sbin/ioreg`, `/bin/ps`, `/usr/sbin/sysctl`; plist PATH gains `/usr/sbin:/sbin` (applies on next `heyvox setup`/plist rewrite). Tests: absolute-path assertion under a stripped PATH, plist PATH contains sbin.
+- **Found by**: Franz's report; log grep for SECURE_INPUT, manual ioreg, comparing the daemon's plist PATH.
+- **Would have caught earlier**: a test that runs the helper under the daemon's real PATH instead of mocking the command by name. Any `subprocess` call in daemon code should use absolute paths for tools outside `/usr/bin:/bin`.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.

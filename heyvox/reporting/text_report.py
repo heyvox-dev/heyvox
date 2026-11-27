@@ -39,11 +39,11 @@ def _macos_version() -> str:
 
 
 def _mac_model() -> str:
-    return _safe(["sysctl", "-n", "hw.model"]) or "unknown"
+    return _safe(["/usr/sbin/sysctl", "-n", "hw.model"]) or "unknown"
 
 
 def _ram_gb() -> str:
-    mem = _safe(["sysctl", "-n", "hw.memsize"])
+    mem = _safe(["/usr/sbin/sysctl", "-n", "hw.memsize"])
     try:
         return f"{int(mem) // (1024 ** 3)} GB"
     except (ValueError, TypeError):
