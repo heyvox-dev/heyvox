@@ -1135,6 +1135,17 @@
 - **Found by**: code reading during the German TTS build.
 - **Would have caught earlier**: a daemon test with a fake model that yields two chunks for one sentence; the daemon had no test of `generate_mlx()` at all, only of its model pin.
 
+## DEF-280 — German mode: Kokoro daemon cold start (7.0 s) ran into the worker's 8 s socket wait (FIXED 2026-11-27)
+
+- **Date**: 2026-11-27
+- **Category**: timing
+- **Severity**: S3 (near miss; a slower start would have sent the first reply after an idle-out to Piper)
+- **Symptom**: first live check after PR #72: `_ensure_kokoro_daemon()` returned after 7.0 s; the worker gives up after 8 s and falls back to Piper.
+- **Root cause**: in German mode (`reply_language: de`, `german_engine: kikiri`) the daemon preloads the kikiri model before binding its socket, on top of the English model. The worker's fixed 8 s wait was sized for the English model alone. The daemon idles out after 120 s, so this cold start happens on most replies after a pause.
+- **Fix**: the worker waits up to 20 s when German preload is configured, 8 s otherwise. Also added `live` → "leif" to the German lexicon (Whisper heard "liebe").
+- **Found by**: live smoke test via `HeraldWorker._ensure_kokoro_daemon()` after the merge.
+- **Would have caught earlier**: measuring the cold start in the configuration that ships, not only with the daemon already warm; the isolated E2E test started the daemon by hand and never went through the worker's wait loop.
+
 ## Patterns & Process Gaps
 
 - **P-latent-behind-a-bug** (DEF-228, exposed by DEF-227/DEF-223): a broken integration hides every defect downstream of it. The stdio MCP server's state-clobbering could not manifest while registration was writing to the wrong file. Repairing an integration therefore ships two changes at once — the fix, and first-ever execution of everything behind it. **Action item**: treat "this path now actually runs" as equivalent to "this path is new" — review and test it accordingly, rather than assuming code that predates the fix is proven.
